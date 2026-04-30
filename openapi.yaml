@@ -1,0 +1,3451 @@
+openapi: 3.1.0
+info:
+  title: Little Bear RAG Backend API
+  version: 0.1.0
+  description: >
+    P0 OpenAPI contract for Little Bear RAG backend. The contract covers setup,
+    authentication, organization, permission, knowledge base, document import,
+    indexing operations, query, audit, healthcheck, config, and internal model
+    gateway APIs. P0 uses model mocks or a single model adapter and does not
+    include complete config approval or rollback workflows.
+servers:
+  - url: http://localhost:8000
+    description: Local development
+  - url: /api/v1
+    description: API Gateway public prefix mapped to /internal/v1
+tags:
+  - name: Setup
+  - name: Auth
+  - name: Query
+  - name: KnowledgeBase
+  - name: Import
+  - name: AdminKnowledgeBase
+  - name: AdminFolder
+  - name: AdminDocument
+  - name: AdminUser
+  - name: AdminOrg
+  - name: AdminPermission
+  - name: AdminConfig
+  - name: AdminAudit
+  - name: Health
+  - name: ModelGateway
+
+security:
+  - bearerAuth: []
+
+paths:
+  /internal/v1/setup-state:
+    get:
+      tags: [Setup]
+      summary: Get setup state
+      operationId: getSetupState
+      security: []
+      x-token-type: anonymous
+      responses:
+        "200":
+          description: Setup state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetupStateResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/setup-config-validations:
+    post:
+      tags: [Setup]
+      summary: Validate setup configuration
+      operationId: createSetupConfigValidation
+      security:
+        - bearerAuth: []
+      x-token-type: setup
+      x-required-scope: setup:initialize
+      x-audit-required: true
+      x-risk-level: high
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetupConfigValidationRequest"
+      responses:
+        "200":
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetupConfigValidationResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/setup-initialization:
+    put:
+      tags: [Setup]
+      summary: Initialize system
+      operationId: putSetupInitialization
+      security:
+        - bearerAuth: []
+      x-token-type: setup
+      x-required-scope: setup:initialize
+      x-audit-required: true
+      x-risk-level: critical
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetupInitializationRequest"
+      responses:
+        "200":
+          description: Initialization result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetupInitializationResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/sessions:
+    post:
+      tags: [Auth]
+      summary: Create session
+      operationId: createSession
+      security: []
+      x-token-type: anonymous
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/sessions/current:
+    delete:
+      tags: [Auth]
+      summary: Revoke current session
+      operationId: deleteCurrentSession
+      x-token-type: access
+      x-required-scope: session:write
+      x-audit-required: true
+      responses:
+        "204":
+          description: Session revoked
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/token-refreshes:
+    post:
+      tags: [Auth]
+      summary: Rotate refresh token
+      operationId: createTokenRefresh
+      security:
+        - bearerAuth: []
+      x-token-type: refresh
+      x-audit-required: true
+      responses:
+        "200":
+          description: New token pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/users/me:
+    get:
+      tags: [Auth]
+      summary: Get current user
+      operationId: getCurrentUser
+      x-token-type: access
+      x-required-scope: user:read:self
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/users/me/password:
+    put:
+      tags: [Auth]
+      summary: Change current user password
+      operationId: putCurrentUserPassword
+      x-token-type: access
+      x-required-scope: user:write:self
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordChangeRequest"
+      responses:
+        "204":
+          description: Password changed
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/queries:
+    post:
+      tags: [Query]
+      summary: Create non-streaming query
+      operationId: createQuery
+      x-token-type: access
+      x-required-scope: rag:query
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+      responses:
+        "200":
+          description: Query answer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/query-streams:
+    post:
+      tags: [Query]
+      summary: Create streaming query
+      operationId: createQueryStream
+      x-token-type: access
+      x-required-scope: rag:query
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+      responses:
+        "200":
+          description: SSE query stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              x-sse-events:
+                - metadata
+                - token
+                - citation
+                - done
+                - error
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/knowledge-bases:
+    get:
+      tags: [KnowledgeBase]
+      summary: List accessible knowledge bases
+      operationId: listKnowledgeBases
+      x-token-type: access
+      x-required-scope: knowledge_base:read
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Keyword"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200":
+          description: Knowledge base list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBaseListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/knowledge-bases/{kb_id}:
+    get:
+      tags: [KnowledgeBase]
+      summary: Get accessible knowledge base
+      operationId: getKnowledgeBase
+      x-token-type: access
+      x-required-scope: knowledge_base:read
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+      responses:
+        "200":
+          description: Knowledge base
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBaseResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/knowledge-bases/{kb_id}/folders:
+    get:
+      tags: [KnowledgeBase]
+      summary: List accessible folders
+      operationId: listFolders
+      x-token-type: access
+      x-required-scope: knowledge_base:read
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Folder list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/knowledge-bases/{kb_id}/documents:
+    get:
+      tags: [KnowledgeBase]
+      summary: List accessible documents
+      operationId: listDocuments
+      x-token-type: access
+      x-required-scope: document:read
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Keyword"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200":
+          description: Document list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Import]
+      summary: Upload files and create import job
+      operationId: createUploadDocumentImport
+      x-token-type: access
+      x-required-scope: document:import
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/DocumentUploadRequest"
+      responses:
+        "202":
+          description: Import job queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportJobResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/knowledge-bases/{kb_id}/document-imports:
+    post:
+      tags: [Import]
+      summary: Create URL or metadata import job
+      operationId: createDocumentImport
+      x-token-type: access
+      x-required-scope: document:import
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DocumentImportRequest"
+      responses:
+        "202":
+          description: Import job queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportJobResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/documents/{doc_id}:
+    get:
+      tags: [KnowledgeBase]
+      summary: Get accessible document
+      operationId: getDocument
+      x-token-type: access
+      x-required-scope: document:read
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "200":
+          description: Document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/documents/{doc_id}/versions:
+    get:
+      tags: [KnowledgeBase]
+      summary: List accessible document versions
+      operationId: listDocumentVersions
+      x-token-type: access
+      x-required-scope: document:read
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "200":
+          description: Document versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentVersionListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/documents/{doc_id}/chunks:
+    get:
+      tags: [KnowledgeBase]
+      summary: List accessible document chunks
+      operationId: listDocumentChunks
+      x-token-type: access
+      x-required-scope: document:read
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "200":
+          description: Chunk list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChunkListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/documents/{doc_id}/preview:
+    get:
+      tags: [KnowledgeBase]
+      summary: Preview accessible document
+      operationId: getDocumentPreview
+      x-token-type: access
+      x-required-scope: document:read
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "200":
+          description: Document preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentPreviewResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/import-jobs/{job_id}:
+    get:
+      tags: [Import]
+      summary: Get import job
+      operationId: getImportJob
+      x-token-type: access
+      x-required-scope: document:import
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Import job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportJobResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [Import]
+      summary: Update import job status
+      operationId: patchImportJob
+      x-token-type: access
+      x-required-scope: document:import
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportJobPatchRequest"
+      responses:
+        "200":
+          description: Import job updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportJobResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/import-jobs/{job_id}/retries:
+    post:
+      tags: [Import]
+      summary: Create import job retry
+      operationId: createImportJobRetry
+      x-token-type: access
+      x-required-scope: document:import
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "202":
+          description: Retry job queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportJobResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/import-jobs:
+    get:
+      tags: [Import]
+      summary: Admin list import jobs
+      operationId: adminListImportJobs
+      x-token-type: access
+      x-required-scope: import_job:read
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Status"
+        - name: stage
+          in: query
+          schema:
+            type: string
+        - name: kb_id
+          in: query
+          schema:
+            type: string
+        - name: created_by
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Import jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportJobListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/import-jobs/{job_id}:
+    get:
+      tags: [Import]
+      summary: Admin get import job
+      operationId: adminGetImportJob
+      x-token-type: access
+      x-required-scope: import_job:read
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Import job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportJobResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/knowledge-bases:
+    get:
+      tags: [AdminKnowledgeBase]
+      summary: Admin list knowledge bases
+      operationId: adminListKnowledgeBases
+      x-token-type: access
+      x-required-scope: knowledge_base:manage
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Keyword"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200":
+          description: Knowledge bases
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBaseListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [AdminKnowledgeBase]
+      summary: Admin create knowledge base
+      operationId: adminCreateKnowledgeBase
+      x-token-type: access
+      x-required-scope: knowledge_base:manage
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowledgeBaseCreateRequest"
+      responses:
+        "201":
+          description: Knowledge base created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBaseResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/knowledge-bases/{kb_id}:
+    get:
+      tags: [AdminKnowledgeBase]
+      summary: Admin get knowledge base
+      operationId: adminGetKnowledgeBase
+      x-token-type: access
+      x-required-scope: knowledge_base:manage
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+      responses:
+        "200":
+          description: Knowledge base
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBaseResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [AdminKnowledgeBase]
+      summary: Admin update knowledge base
+      operationId: adminPatchKnowledgeBase
+      x-token-type: access
+      x-required-scope: knowledge_base:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowledgeBasePatchRequest"
+      responses:
+        "200":
+          description: Knowledge base updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeBaseResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [AdminKnowledgeBase]
+      summary: Admin delete knowledge base
+      operationId: adminDeleteKnowledgeBase
+      x-token-type: access
+      x-required-scope: knowledge_base:manage
+      x-audit-required: true
+      x-risk-level: high
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+      responses:
+        "202":
+          description: Knowledge base delete accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/knowledge-bases/{kb_id}/folders:
+    get:
+      tags: [AdminFolder]
+      summary: Admin list folders
+      operationId: adminListFolders
+      x-token-type: access
+      x-required-scope: folder:manage
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+      responses:
+        "200":
+          description: Folders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [AdminFolder]
+      summary: Admin create folder
+      operationId: adminCreateFolder
+      x-token-type: access
+      x-required-scope: folder:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FolderCreateRequest"
+      responses:
+        "201":
+          description: Folder created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/folders/{folder_id}:
+    get:
+      tags: [AdminFolder]
+      summary: Admin get folder
+      operationId: adminGetFolder
+      x-token-type: access
+      x-required-scope: folder:manage
+      parameters:
+        - $ref: "#/components/parameters/FolderId"
+      responses:
+        "200":
+          description: Folder
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [AdminFolder]
+      summary: Admin update folder
+      operationId: adminPatchFolder
+      x-token-type: access
+      x-required-scope: folder:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/FolderId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FolderPatchRequest"
+      responses:
+        "200":
+          description: Folder updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [AdminFolder]
+      summary: Admin delete folder
+      operationId: adminDeleteFolder
+      x-token-type: access
+      x-required-scope: folder:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/FolderId"
+      responses:
+        "202":
+          description: Folder delete accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/knowledge-bases/{kb_id}/documents:
+    get:
+      tags: [AdminDocument]
+      summary: Admin list documents
+      operationId: adminListDocuments
+      x-token-type: access
+      x-required-scope: document:manage
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200":
+          description: Documents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/documents/{doc_id}:
+    get:
+      tags: [AdminDocument]
+      summary: Admin get document
+      operationId: adminGetDocument
+      x-token-type: access
+      x-required-scope: document:manage
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "200":
+          description: Document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [AdminDocument]
+      summary: Admin update document
+      operationId: adminPatchDocument
+      x-token-type: access
+      x-required-scope: document:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DocumentPatchRequest"
+      responses:
+        "200":
+          description: Document updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [AdminDocument]
+      summary: Admin delete document
+      operationId: adminDeleteDocument
+      x-token-type: access
+      x-required-scope: document:manage
+      x-audit-required: true
+      x-risk-level: high
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "202":
+          description: Document delete accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/documents/{doc_id}/index-jobs:
+    post:
+      tags: [AdminDocument]
+      summary: Create document index rebuild job
+      operationId: adminCreateDocumentIndexJob
+      x-token-type: access
+      x-required-scope: document:index
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "202":
+          description: Index job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/documents/{doc_id}/versions:
+    get:
+      tags: [AdminDocument]
+      summary: Admin list document versions
+      operationId: adminListDocumentVersions
+      x-token-type: access
+      x-required-scope: document:manage
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "200":
+          description: Versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentVersionListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/documents/{doc_id}/chunks:
+    get:
+      tags: [AdminDocument]
+      summary: Admin list document chunks
+      operationId: adminListDocumentChunks
+      x-token-type: access
+      x-required-scope: document:manage
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "200":
+          description: Chunks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChunkListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/documents/{doc_id}/index-versions:
+    get:
+      tags: [AdminDocument]
+      summary: Admin list document index versions
+      operationId: adminListDocumentIndexVersions
+      x-token-type: access
+      x-required-scope: document:manage
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "200":
+          description: Index versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexVersionListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/users:
+    get:
+      tags: [AdminUser]
+      summary: Admin list users
+      operationId: adminListUsers
+      x-token-type: access
+      x-required-scope: user:manage
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Keyword"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200":
+          description: Users
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [AdminUser]
+      summary: Admin create user
+      operationId: adminCreateUser
+      x-token-type: access
+      x-required-scope: user:manage
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserCreateRequest"
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/users/{user_id}:
+    get:
+      tags: [AdminUser]
+      summary: Admin get user
+      operationId: adminGetUser
+      x-token-type: access
+      x-required-scope: user:manage
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: User
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [AdminUser]
+      summary: Admin update user
+      operationId: adminPatchUser
+      x-token-type: access
+      x-required-scope: user:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserPatchRequest"
+      responses:
+        "200":
+          description: User updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [AdminUser]
+      summary: Admin soft delete user
+      operationId: adminDeleteUser
+      x-token-type: access
+      x-required-scope: user:manage
+      x-audit-required: true
+      x-risk-level: high
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: User deleted
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/users/{user_id}/password:
+    put:
+      tags: [AdminUser]
+      summary: Admin reset user password
+      operationId: adminPutUserPassword
+      x-token-type: access
+      x-required-scope: user:manage
+      x-audit-required: true
+      x-risk-level: high
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminPasswordResetRequest"
+      responses:
+        "204":
+          description: Password reset
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/users/{user_id}/lock:
+    delete:
+      tags: [AdminUser]
+      summary: Admin unlock user
+      operationId: adminDeleteUserLock
+      x-token-type: access
+      x-required-scope: user:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: User unlocked
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/departments:
+    get:
+      tags: [AdminOrg]
+      summary: Admin list departments
+      operationId: adminListDepartments
+      x-token-type: access
+      x-required-scope: org:manage
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Keyword"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200":
+          description: Departments
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepartmentListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [AdminOrg]
+      summary: Admin create department
+      operationId: adminCreateDepartment
+      x-token-type: access
+      x-required-scope: org:manage
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DepartmentCreateRequest"
+      responses:
+        "201":
+          description: Department created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepartmentResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/departments/{department_id}:
+    get:
+      tags: [AdminOrg]
+      summary: Admin get department
+      operationId: adminGetDepartment
+      x-token-type: access
+      x-required-scope: org:manage
+      parameters:
+        - $ref: "#/components/parameters/DepartmentId"
+      responses:
+        "200":
+          description: Department
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepartmentResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [AdminOrg]
+      summary: Admin update department
+      operationId: adminPatchDepartment
+      x-token-type: access
+      x-required-scope: org:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/DepartmentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DepartmentPatchRequest"
+      responses:
+        "200":
+          description: Department updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepartmentResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [AdminOrg]
+      summary: Admin delete department
+      operationId: adminDeleteDepartment
+      x-token-type: access
+      x-required-scope: org:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/DepartmentId"
+      responses:
+        "204":
+          description: Department deleted
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/users/{user_id}/departments:
+    get:
+      tags: [AdminOrg]
+      summary: Admin get user departments
+      operationId: adminGetUserDepartments
+      x-token-type: access
+      x-required-scope: org:manage
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: User departments
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDepartmentsResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [AdminOrg]
+      summary: Admin replace user departments
+      operationId: adminPutUserDepartments
+      x-token-type: access
+      x-required-scope: org:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserDepartmentsPutRequest"
+      responses:
+        "200":
+          description: User departments replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDepartmentsResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/roles:
+    get:
+      tags: [AdminPermission]
+      summary: Admin list roles
+      operationId: adminListRoles
+      x-token-type: access
+      x-required-scope: role:manage
+      responses:
+        "200":
+          description: Roles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [AdminPermission]
+      summary: Admin create role
+      operationId: adminCreateRole
+      x-token-type: access
+      x-required-scope: role:manage
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleCreateRequest"
+      responses:
+        "201":
+          description: Role created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/roles/{role_id}:
+    get:
+      tags: [AdminPermission]
+      summary: Admin get role
+      operationId: adminGetRole
+      x-token-type: access
+      x-required-scope: role:manage
+      parameters:
+        - $ref: "#/components/parameters/RoleId"
+      responses:
+        "200":
+          description: Role
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [AdminPermission]
+      summary: Admin update role
+      operationId: adminPatchRole
+      x-token-type: access
+      x-required-scope: role:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/RoleId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RolePatchRequest"
+      responses:
+        "200":
+          description: Role updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [AdminPermission]
+      summary: Admin delete role
+      operationId: adminDeleteRole
+      x-token-type: access
+      x-required-scope: role:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/RoleId"
+      responses:
+        "204":
+          description: Role deleted
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/users/{user_id}/role-bindings:
+    get:
+      tags: [AdminPermission]
+      summary: Admin list user role bindings
+      operationId: adminListUserRoleBindings
+      x-token-type: access
+      x-required-scope: role:manage
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Role bindings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleBindingListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [AdminPermission]
+      summary: Admin create user role bindings
+      operationId: adminCreateUserRoleBindings
+      x-token-type: access
+      x-required-scope: role:manage
+      x-audit-required: true
+      x-risk-level: high
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleBindingCreateRequest"
+      responses:
+        "201":
+          description: Role bindings created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleBindingListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [AdminPermission]
+      summary: Admin replace user role bindings
+      operationId: adminPutUserRoleBindings
+      x-token-type: access
+      x-required-scope: role:manage
+      x-audit-required: true
+      x-risk-level: high
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleBindingCreateRequest"
+      responses:
+        "200":
+          description: Role bindings replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleBindingListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/users/{user_id}/role-bindings/{binding_id}:
+    delete:
+      tags: [AdminPermission]
+      summary: Admin delete user role binding
+      operationId: adminDeleteUserRoleBinding
+      x-token-type: access
+      x-required-scope: role:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BindingId"
+      responses:
+        "204":
+          description: Role binding deleted
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/permission-evaluations:
+    get:
+      tags: [AdminPermission]
+      summary: Evaluate resource permission
+      operationId: getPermissionEvaluation
+      x-token-type: access
+      x-required-scope: permission:read
+      parameters:
+        - name: resource_type
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/ResourceType"
+        - name: resource_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: user_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Permission evaluation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionEvaluationResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/knowledge-bases/{kb_id}/permissions:
+    put:
+      tags: [AdminPermission]
+      summary: Replace knowledge base permissions
+      operationId: putKnowledgeBasePermissions
+      x-token-type: access
+      x-required-scope: permission:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/KbId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResourcePermissionPutRequest"
+      responses:
+        "200":
+          description: Permissions updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionPolicyResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/documents/{doc_id}/permissions:
+    put:
+      tags: [AdminPermission]
+      summary: Replace document permissions
+      operationId: putDocumentPermissions
+      x-token-type: access
+      x-required-scope: permission:manage
+      x-audit-required: true
+      x-risk-level: high
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResourcePermissionPutRequest"
+      responses:
+        "200":
+          description: Permissions updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionPolicyResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/configs:
+    get:
+      tags: [AdminConfig]
+      summary: Admin list configs
+      operationId: adminListConfigs
+      x-token-type: access
+      x-required-scope: config:manage
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Configs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigItemListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/configs/{key}:
+    get:
+      tags: [AdminConfig]
+      summary: Admin get config
+      operationId: adminGetConfig
+      x-token-type: access
+      x-required-scope: config:manage
+      parameters:
+        - $ref: "#/components/parameters/ConfigKey"
+      responses:
+        "200":
+          description: Config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigItemResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [AdminConfig]
+      summary: Admin save config draft
+      operationId: adminPutConfig
+      x-token-type: access
+      x-required-scope: config:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/ConfigKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigPutRequest"
+      responses:
+        "200":
+          description: Config saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigItemResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/config-versions:
+    get:
+      tags: [AdminConfig]
+      summary: Admin list config versions
+      operationId: adminListConfigVersions
+      x-token-type: access
+      x-required-scope: config:manage
+      responses:
+        "200":
+          description: Config versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigVersionListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/config-versions/{version}:
+    get:
+      tags: [AdminConfig]
+      summary: Admin get config version
+      operationId: adminGetConfigVersion
+      x-token-type: access
+      x-required-scope: config:manage
+      parameters:
+        - $ref: "#/components/parameters/ConfigVersion"
+      responses:
+        "200":
+          description: Config version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigVersionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [AdminConfig]
+      summary: Admin publish config version
+      operationId: adminPatchConfigVersion
+      x-token-type: access
+      x-required-scope: config:manage
+      x-audit-required: true
+      x-risk-level: high
+      parameters:
+        - $ref: "#/components/parameters/ConfigVersion"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigVersionPatchRequest"
+      responses:
+        "200":
+          description: Config version updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigVersionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/config-validations:
+    post:
+      tags: [AdminConfig]
+      summary: Admin validate config
+      operationId: adminCreateConfigValidation
+      x-token-type: access
+      x-required-scope: config:manage
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigValidationRequest"
+      responses:
+        "200":
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigValidationResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/audit-logs:
+    get:
+      tags: [AdminAudit]
+      summary: Admin list audit logs
+      operationId: adminListAuditLogs
+      x-token-type: access
+      x-required-scope: audit:read
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: actor_id
+          in: query
+          schema:
+            type: string
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          schema:
+            type: string
+        - name: result
+          in: query
+          schema:
+            type: string
+        - name: risk_level
+          in: query
+          schema:
+            $ref: "#/components/schemas/RiskLevel"
+      responses:
+        "200":
+          description: Audit logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/audit-logs/{audit_id}:
+    get:
+      tags: [AdminAudit]
+      summary: Admin get audit log
+      operationId: adminGetAuditLog
+      x-token-type: access
+      x-required-scope: audit:read
+      parameters:
+        - $ref: "#/components/parameters/AuditId"
+      responses:
+        "200":
+          description: Audit log
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/query-logs:
+    get:
+      tags: [AdminAudit]
+      summary: Admin list query logs
+      operationId: adminListQueryLogs
+      x-token-type: access
+      x-required-scope: audit:read
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: user_id
+          in: query
+          schema:
+            type: string
+        - name: kb_id
+          in: query
+          schema:
+            type: string
+        - name: degraded
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Query logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryLogListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/query-logs/{query_log_id}:
+    get:
+      tags: [AdminAudit]
+      summary: Admin get query log
+      operationId: adminGetQueryLog
+      x-token-type: access
+      x-required-scope: audit:read
+      parameters:
+        - $ref: "#/components/parameters/QueryLogId"
+      responses:
+        "200":
+          description: Query log
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryLogResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/model-call-logs:
+    get:
+      tags: [AdminAudit]
+      summary: Admin list model call logs
+      operationId: adminListModelCallLogs
+      x-token-type: access
+      x-required-scope: audit:read
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: model
+          in: query
+          schema:
+            type: string
+        - name: degraded
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Model call logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCallLogListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      operationId: getHealthLive
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      operationId: getHealthReady
+      security: []
+      responses:
+        "200":
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Service is not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /internal/v1/model-embeddings:
+    post:
+      tags: [ModelGateway]
+      summary: Internal create embeddings
+      operationId: createModelEmbeddings
+      x-token-type: service
+      x-required-scope: model:call
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmbeddingRequest"
+      responses:
+        "200":
+          description: Embedding result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmbeddingResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/model-rerankings:
+    post:
+      tags: [ModelGateway]
+      summary: Internal rerank documents
+      operationId: createModelReranking
+      x-token-type: service
+      x-required-scope: model:call
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RerankRequest"
+      responses:
+        "200":
+          description: Rerank result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RerankResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/model-chat-completions:
+    post:
+      tags: [ModelGateway]
+      summary: Internal create chat completion
+      operationId: createModelChatCompletion
+      x-token-type: service
+      x-required-scope: model:call
+      x-audit-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: Chat completion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/model-catalog:
+    get:
+      tags: [ModelGateway]
+      summary: Internal list model catalog
+      operationId: getModelCatalog
+      x-token-type: service
+      x-required-scope: model:read
+      responses:
+        "200":
+          description: Model catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCatalogResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/model-health:
+    get:
+      tags: [ModelGateway]
+      summary: Internal model gateway health
+      operationId: getModelHealth
+      x-token-type: service
+      x-required-scope: model:read
+      responses:
+        "200":
+          description: Model gateway health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 20
+    Keyword:
+      name: keyword
+      in: query
+      schema:
+        type: string
+    Status:
+      name: status
+      in: query
+      schema:
+        type: string
+    KbId:
+      name: kb_id
+      in: path
+      required: true
+      schema:
+        type: string
+    DocId:
+      name: doc_id
+      in: path
+      required: true
+      schema:
+        type: string
+    FolderId:
+      name: folder_id
+      in: path
+      required: true
+      schema:
+        type: string
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
+    DepartmentId:
+      name: department_id
+      in: path
+      required: true
+      schema:
+        type: string
+    RoleId:
+      name: role_id
+      in: path
+      required: true
+      schema:
+        type: string
+    BindingId:
+      name: binding_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ConfigKey:
+      name: key
+      in: path
+      required: true
+      schema:
+        type: string
+    ConfigVersion:
+      name: version
+      in: path
+      required: true
+      schema:
+        type: integer
+    AuditId:
+      name: audit_id
+      in: path
+      required: true
+      schema:
+        type: string
+    QueryLogId:
+      name: query_log_id
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    RequestId:
+      type: string
+      examples: ["req_001"]
+    Timestamp:
+      type: string
+      format: date-time
+    AnyObject:
+      type: object
+      additionalProperties: true
+    Pagination:
+      type: object
+      required: [page, page_size, total]
+      properties:
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+    ErrorResponse:
+      type: object
+      required: [request_id, error_code, message, retryable]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        error_code:
+          type: string
+        message:
+          type: string
+        stage:
+          type: string
+        retryable:
+          type: boolean
+        details:
+          $ref: "#/components/schemas/AnyObject"
+    AcceptedResponse:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: object
+          required: [accepted]
+          properties:
+            accepted:
+              type: boolean
+            job_id:
+              type: [string, "null"]
+
+    Visibility:
+      type: string
+      enum: [department, enterprise]
+    ResourceType:
+      type: string
+      enum: [knowledge_base, folder, document, chunk, query, config, setup]
+    RiskLevel:
+      type: string
+      enum: [low, medium, high, critical]
+    LifecycleStatus:
+      type: string
+      enum: [draft, active, disabled, archived, deleted, left]
+    ImportJobStatus:
+      type: string
+      enum: [queued, running, retrying, partial_success, success, failed, cancelled]
+
+    SetupConfigValidationRequest:
+      type: object
+      required: [setup, config]
+      properties:
+        setup:
+          $ref: "#/components/schemas/SetupPayload"
+        config:
+          $ref: "#/components/schemas/ActiveConfigV1"
+    SetupInitializationRequest:
+      $ref: "#/components/schemas/SetupConfigValidationRequest"
+    SetupPayload:
+      type: object
+      required: [admin, organization, roles]
+      properties:
+        admin:
+          $ref: "#/components/schemas/SetupAdmin"
+        organization:
+          $ref: "#/components/schemas/SetupOrganization"
+        roles:
+          $ref: "#/components/schemas/SetupRoles"
+    SetupAdmin:
+      type: object
+      required: [username, display_name, initial_password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 64
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        initial_password:
+          type: string
+          format: password
+          minLength: 12
+          writeOnly: true
+        email:
+          type: [string, "null"]
+          format: email
+        phone:
+          type: [string, "null"]
+    SetupOrganization:
+      type: object
+      required: [enterprise, departments]
+      properties:
+        enterprise:
+          type: object
+          required: [name, code]
+          properties:
+            name:
+              type: string
+            code:
+              type: string
+        departments:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [name, code, is_default]
+            properties:
+              name:
+                type: string
+              code:
+                type: string
+              is_default:
+                type: boolean
+    SetupRoles:
+      type: object
+      required: [builtin_roles, admin_role, default_user_role]
+      properties:
+        builtin_roles:
+          type: array
+          items:
+            type: string
+            enum:
+              - system_admin
+              - security_admin
+              - audit_admin
+              - department_admin
+              - knowledge_base_admin
+              - employee
+        admin_role:
+          type: string
+          const: system_admin
+        default_user_role:
+          type: string
+          const: employee
+    ActiveConfigV1:
+      type: object
+      required:
+        - schema_version
+        - config_version
+        - scope
+        - secret_provider
+        - redis
+        - storage
+        - vector_store
+        - keyword_search
+        - model_gateway
+        - model
+        - llm
+        - auth
+        - retrieval
+        - chunk
+        - import
+        - permission
+        - security
+        - cache
+        - rate_limit
+        - timeout
+        - degrade
+        - audit
+        - observability
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        config_version:
+          type: integer
+          const: 1
+        scope:
+          type: object
+          required: [type, id]
+          properties:
+            type:
+              type: string
+              const: global
+            id:
+              type: string
+              const: global
+        secret_provider:
+          $ref: "#/components/schemas/SecretProviderConfig"
+        redis:
+          $ref: "#/components/schemas/AnyObject"
+        storage:
+          $ref: "#/components/schemas/AnyObject"
+        vector_store:
+          $ref: "#/components/schemas/AnyObject"
+        keyword_search:
+          $ref: "#/components/schemas/AnyObject"
+        model_gateway:
+          $ref: "#/components/schemas/ModelGatewayConfig"
+        model:
+          $ref: "#/components/schemas/ModelConfig"
+        llm:
+          $ref: "#/components/schemas/AnyObject"
+        auth:
+          $ref: "#/components/schemas/AnyObject"
+        retrieval:
+          $ref: "#/components/schemas/AnyObject"
+        chunk:
+          $ref: "#/components/schemas/AnyObject"
+        import:
+          $ref: "#/components/schemas/AnyObject"
+        permission:
+          $ref: "#/components/schemas/AnyObject"
+        security:
+          $ref: "#/components/schemas/AnyObject"
+        cache:
+          $ref: "#/components/schemas/AnyObject"
+        rate_limit:
+          $ref: "#/components/schemas/AnyObject"
+        timeout:
+          $ref: "#/components/schemas/AnyObject"
+        degrade:
+          $ref: "#/components/schemas/AnyObject"
+        audit:
+          $ref: "#/components/schemas/AnyObject"
+        observability:
+          $ref: "#/components/schemas/AnyObject"
+    SecretProviderConfig:
+      type: object
+      required: [type, endpoint, auth_method, secret_ref_policy]
+      properties:
+        type:
+          type: string
+          enum: [postgres_encrypted, vault, kms]
+        endpoint:
+          type: string
+        auth_method:
+          type: string
+        secret_ref_policy:
+          type: object
+          additionalProperties: true
+    ModelGatewayConfig:
+      type: object
+      required: [mode, base_url, routes, mock, healthcheck]
+      properties:
+        mode:
+          type: string
+          enum: [mock, single_adapter]
+        base_url:
+          type: string
+        auth_token_ref:
+          type: [string, "null"]
+        routes:
+          type: object
+          additionalProperties: true
+        mock:
+          type: object
+          additionalProperties: true
+        healthcheck:
+          type: object
+          additionalProperties: true
+    ModelConfig:
+      type: object
+      required:
+        - embedding_model
+        - embedding_version
+        - embedding_dimension
+        - embedding_normalize
+        - rerank_model
+        - llm_model
+      properties:
+        embedding_model:
+          type: string
+        embedding_version:
+          type: string
+        embedding_dimension:
+          type: integer
+        embedding_normalize:
+          type: boolean
+        embedding_tokenizer_version:
+          type: string
+        rerank_model:
+          type: string
+        llm_model:
+          type: string
+        llm_fallback_model:
+          type: string
+
+    SetupStateResponse:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: object
+          required: [initialized, setup_status]
+          properties:
+            initialized:
+              type: boolean
+            setup_status:
+              type: string
+            system_token_expires_at:
+              type: [string, "null"]
+              format: date-time
+    SetupConfigValidationResponse:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: object
+          required: [valid, errors, warnings]
+          properties:
+            valid:
+              type: boolean
+            errors:
+              type: array
+              items:
+                $ref: "#/components/schemas/ValidationIssue"
+            warnings:
+              type: array
+              items:
+                $ref: "#/components/schemas/ValidationIssue"
+    ValidationIssue:
+      type: object
+      required: [error_code, path, message, retryable]
+      properties:
+        error_code:
+          type: string
+        path:
+          type: string
+        message:
+          type: string
+        retryable:
+          type: boolean
+    SetupInitializationResponse:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: object
+          required: [initialized, active_config_version]
+          properties:
+            initialized:
+              type: boolean
+            active_config_version:
+              type: integer
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+          writeOnly: true
+    TokenResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+    PasswordChangeRequest:
+      type: object
+      required: [old_password, new_password]
+      properties:
+        old_password:
+          type: string
+          format: password
+        new_password:
+          type: string
+          format: password
+
+    QueryRequest:
+      type: object
+      required: [kb_ids, query]
+      properties:
+        kb_ids:
+          type: array
+          items:
+            type: string
+        query:
+          type: string
+          minLength: 1
+        mode:
+          type: string
+          enum: [answer, search]
+          default: answer
+        filters:
+          type: object
+          additionalProperties: true
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 8
+        include_sources:
+          type: boolean
+          default: true
+    QueryResponse:
+      type: object
+      required: [request_id, answer, citations, degraded, trace_id]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        answer:
+          type: string
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Citation"
+        confidence:
+          type: string
+          enum: [low, medium, high]
+        degraded:
+          type: boolean
+        degrade_reason:
+          type: [string, "null"]
+        trace_id:
+          type: string
+    Citation:
+      type: object
+      required: [source_id, doc_id, document_version_id, title, page_start, page_end]
+      properties:
+        source_id:
+          type: string
+        doc_id:
+          type: string
+        document_version_id:
+          type: string
+        title:
+          type: string
+        page_start:
+          type: integer
+        page_end:
+          type: integer
+        score:
+          type: number
+
+    KnowledgeBase:
+      type: object
+      required: [id, name, status, owner_department_id, default_visibility]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, archived]
+        owner_department_id:
+          type: string
+        default_visibility:
+          $ref: "#/components/schemas/Visibility"
+        config_scope_id:
+          type: [string, "null"]
+    KnowledgeBaseCreateRequest:
+      type: object
+      required: [name, owner_department_id, default_visibility]
+      properties:
+        name:
+          type: string
+        owner_department_id:
+          type: string
+        default_visibility:
+          $ref: "#/components/schemas/Visibility"
+        config_scope_id:
+          type: [string, "null"]
+    KnowledgeBasePatchRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, archived]
+        default_visibility:
+          $ref: "#/components/schemas/Visibility"
+    KnowledgeBaseResponse:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/KnowledgeBase"
+    KnowledgeBaseListResponse:
+      type: object
+      required: [request_id, data, pagination]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/KnowledgeBase"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    Folder:
+      type: object
+      required: [id, kb_id, name, status]
+      properties:
+        id:
+          type: string
+        kb_id:
+          type: string
+        parent_id:
+          type: [string, "null"]
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, archived]
+    FolderCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        parent_id:
+          type: [string, "null"]
+    FolderPatchRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        parent_id:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [active, disabled, archived]
+    FolderResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/Folder"
+    FolderListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Folder"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    Document:
+      type: object
+      required: [id, kb_id, title, lifecycle_status, index_status, owner_department_id, visibility]
+      properties:
+        id:
+          type: string
+        kb_id:
+          type: string
+        folder_id:
+          type: [string, "null"]
+        title:
+          type: string
+        lifecycle_status:
+          type: string
+          enum: [draft, active, archived, deleted]
+        index_status:
+          type: string
+          enum: [none, indexing, indexed, index_failed, blocked]
+        owner_department_id:
+          type: string
+        visibility:
+          $ref: "#/components/schemas/Visibility"
+        current_version_id:
+          type: [string, "null"]
+    DocumentPatchRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        folder_id:
+          type: [string, "null"]
+        tags:
+          type: array
+          items:
+            type: string
+        owner_department_id:
+          type: string
+        visibility:
+          $ref: "#/components/schemas/Visibility"
+        lifecycle_status:
+          type: string
+          enum: [active, archived, deleted]
+    DocumentResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/Document"
+    DocumentListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Document"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    DocumentVersion:
+      type: object
+      properties:
+        id:
+          type: string
+        document_id:
+          type: string
+        version_no:
+          type: integer
+        status:
+          type: string
+    DocumentVersionListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentVersion"
+    Chunk:
+      type: object
+      properties:
+        id:
+          type: string
+        document_id:
+          type: string
+        document_version_id:
+          type: string
+        text_preview:
+          type: string
+        page_start:
+          type: integer
+        page_end:
+          type: integer
+        status:
+          type: string
+    ChunkListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Chunk"
+    DocumentPreviewResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: object
+          properties:
+            doc_id:
+              type: string
+            title:
+              type: string
+            preview:
+              type: string
+            citations:
+              type: array
+              items:
+                $ref: "#/components/schemas/Citation"
+    IndexVersion:
+      type: object
+      properties:
+        id:
+          type: string
+        document_id:
+          type: string
+        status:
+          type: string
+          enum: [draft, ready, active, archived, pending_delete, failed]
+        chunk_count:
+          type: integer
+    IndexVersionListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/IndexVersion"
+
+    DocumentUploadRequest:
+      type: object
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            type: string
+            format: binary
+        owner_department_id:
+          type: string
+        visibility:
+          $ref: "#/components/schemas/Visibility"
+        folder_id:
+          type: [string, "null"]
+        idempotency_key:
+          type: string
+    DocumentImportRequest:
+      type: object
+      required: [job_type, items]
+      properties:
+        job_type:
+          type: string
+          enum: [url, metadata_batch]
+        owner_department_id:
+          type: string
+        visibility:
+          $ref: "#/components/schemas/Visibility"
+        idempotency_key:
+          type: string
+        items:
+          type: array
+          items:
+            type: object
+            required: [title]
+            properties:
+              title:
+                type: string
+              url:
+                type: string
+                format: uri
+              metadata:
+                type: object
+                additionalProperties: true
+    ImportJob:
+      type: object
+      required: [id, kb_id, status, stage]
+      properties:
+        id:
+          type: string
+        kb_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/ImportJobStatus"
+        stage:
+          type: string
+          enum: [validate, parse, clean, chunk, embed, index, publish]
+        document_ids:
+          type: array
+          items:
+            type: string
+        error_summary:
+          type: [string, "null"]
+    ImportJobPatchRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [cancelled]
+    ImportJobResponse:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/ImportJob"
+    ImportJobListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportJob"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, left]
+        departments:
+          type: array
+          items:
+            $ref: "#/components/schemas/Department"
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+        scopes:
+          type: array
+          items:
+            type: string
+    UserCreateRequest:
+      type: object
+      required: [username, name, initial_password]
+      properties:
+        username:
+          type: string
+        name:
+          type: string
+        initial_password:
+          type: string
+          format: password
+        department_ids:
+          type: array
+          items:
+            type: string
+        role_ids:
+          type: array
+          items:
+            type: string
+    UserPatchRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+    AdminPasswordResetRequest:
+      type: object
+      required: [new_password]
+      properties:
+        new_password:
+          type: string
+          format: password
+    UserResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/User"
+    UserListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    Department:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        code:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+    DepartmentCreateRequest:
+      type: object
+      required: [name, code]
+      properties:
+        name:
+          type: string
+        code:
+          type: string
+    DepartmentPatchRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+    DepartmentResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/Department"
+    DepartmentListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Department"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    UserDepartmentsPutRequest:
+      type: object
+      required: [department_ids]
+      properties:
+        department_ids:
+          type: array
+          items:
+            type: string
+    UserDepartmentsResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Department"
+
+    Role:
+      type: object
+      properties:
+        id:
+          type: string
+        code:
+          type: string
+        name:
+          type: string
+        scope_type:
+          type: string
+          enum: [enterprise, department, knowledge_base]
+        is_builtin:
+          type: boolean
+        status:
+          type: string
+          enum: [active, disabled, archived]
+    RoleCreateRequest:
+      type: object
+      required: [code, name, scope_type]
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        scope_type:
+          type: string
+          enum: [enterprise, department, knowledge_base]
+    RolePatchRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, archived]
+    RoleResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/Role"
+    RoleListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+    RoleBinding:
+      type: object
+      properties:
+        id:
+          type: string
+        role_id:
+          type: string
+        subject_type:
+          type: string
+          enum: [user, department]
+        subject_id:
+          type: string
+        scope_type:
+          type: string
+          enum: [enterprise, department, knowledge_base]
+        scope_id:
+          type: string
+    RoleBindingCreateRequest:
+      type: object
+      required: [bindings]
+      properties:
+        bindings:
+          type: array
+          items:
+            type: object
+            required: [role_id, scope_type, scope_id]
+            properties:
+              role_id:
+                type: string
+              scope_type:
+                type: string
+                enum: [enterprise, department, knowledge_base]
+              scope_id:
+                type: string
+    RoleBindingListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoleBinding"
+
+    ResourcePermissionPutRequest:
+      type: object
+      required: [visibility]
+      properties:
+        visibility:
+          $ref: "#/components/schemas/Visibility"
+        owner_department_id:
+          type: string
+    PermissionEvaluationResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: object
+          properties:
+            allowed:
+              type: boolean
+            reason:
+              type: string
+            permission_filter_hash:
+              type: string
+    PermissionPolicyResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: object
+          properties:
+            resource_type:
+              $ref: "#/components/schemas/ResourceType"
+            resource_id:
+              type: string
+            visibility:
+              $ref: "#/components/schemas/Visibility"
+            permission_version:
+              type: integer
+
+    ConfigItem:
+      type: object
+      properties:
+        key:
+          type: string
+        value_json:
+          type: object
+          additionalProperties: true
+        scope_type:
+          type: string
+        status:
+          type: string
+          enum: [draft, active, archived]
+        version:
+          type: integer
+    ConfigPutRequest:
+      type: object
+      required: [value_json]
+      properties:
+        value_json:
+          type: object
+          additionalProperties: true
+    ConfigItemResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/ConfigItem"
+    ConfigItemListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfigItem"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    ConfigVersion:
+      type: object
+      properties:
+        version:
+          type: integer
+        status:
+          type: string
+          enum: [draft, active, archived]
+        risk_level:
+          $ref: "#/components/schemas/RiskLevel"
+        created_by:
+          type: string
+    ConfigVersionPatchRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, archived]
+    ConfigVersionResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/ConfigVersion"
+    ConfigVersionListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfigVersion"
+    ConfigValidationRequest:
+      type: object
+      required: [config]
+      properties:
+        config:
+          $ref: "#/components/schemas/ActiveConfigV1"
+    ConfigValidationResponse:
+      $ref: "#/components/schemas/SetupConfigValidationResponse"
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+        actor_type:
+          type: string
+        actor_id:
+          type: string
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        result:
+          type: string
+        risk_level:
+          $ref: "#/components/schemas/RiskLevel"
+        summary_json:
+          type: object
+          additionalProperties: true
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+    AuditLogResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/AuditLog"
+    AuditLogListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLog"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    QueryLog:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        kb_ids:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+        degraded:
+          type: boolean
+        config_version:
+          type: integer
+        permission_version:
+          type: integer
+    QueryLogResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/QueryLog"
+    QueryLogListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryLog"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    ModelCallLog:
+      type: object
+      properties:
+        id:
+          type: string
+        model:
+          type: string
+        route_hash:
+          type: string
+        latency_ms:
+          type: integer
+        token_usage:
+          type: object
+          additionalProperties: true
+        degraded:
+          type: boolean
+        error_code:
+          type: [string, "null"]
+    ModelCallLogListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelCallLog"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [live, ready, not_ready]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+
+    EmbeddingRequest:
+      type: object
+      required: [model, input_type, input, trace_id]
+      properties:
+        model:
+          type: string
+        input_type:
+          type: string
+          enum: [query, document]
+        input:
+          type: array
+          items:
+            type: string
+        normalize:
+          type: boolean
+        trace_id:
+          type: string
+    EmbeddingResponse:
+      type: object
+      properties:
+        vectors:
+          type: array
+          items:
+            type: array
+            items:
+              type: number
+        model_route_hash:
+          type: string
+        degraded:
+          type: boolean
+    RerankRequest:
+      type: object
+      required: [model, query, documents, trace_id]
+      properties:
+        model:
+          type: string
+        query:
+          type: string
+        documents:
+          type: array
+          items:
+            type: object
+            required: [id, text]
+            properties:
+              id:
+                type: string
+              text:
+                type: string
+        top_n:
+          type: integer
+        trace_id:
+          type: string
+    RerankResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              score:
+                type: number
+        model_route_hash:
+          type: string
+        degraded:
+          type: boolean
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages, trace_id]
+      properties:
+        model:
+          type: string
+        messages:
+          type: array
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role:
+                type: string
+                enum: [system, user, assistant]
+              content:
+                type: string
+        temperature:
+          type: number
+        max_tokens:
+          type: integer
+        stream:
+          type: boolean
+        trace_id:
+          type: string
+    ChatCompletionResponse:
+      type: object
+      properties:
+        content:
+          type: string
+        model_route_hash:
+          type: string
+        token_usage:
+          type: object
+          additionalProperties: true
+        degraded:
+          type: boolean
+    ModelCatalogResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: object
+          additionalProperties: true
