@@ -872,7 +872,7 @@ import_jobs:
 15. Context Compressor 压缩上下文
 16. Prompt Builder 填充 Prompt
 17. LLM 生成最终答案
-18. Citation Verifier 校验引用
+18. 答案引用有效性校验
 19. Safety Filter 和权限二次校验
 20. 写入查询日志、审计和指标
 21. 返回答案、引用、置信度和 trace_id
@@ -1258,11 +1258,11 @@ Model Gateway 是模型能力的统一入口。
 推荐内部接口：
 
 ```http
-POST /internal/v1/models/embeddings
-POST /internal/v1/models/rerank
-POST /internal/v1/models/chat/completions
-GET  /internal/v1/models
-GET  /internal/v1/models/health
+POST /internal/v1/model-embeddings
+POST /internal/v1/model-rerankings
+POST /internal/v1/model-chat-completions
+GET  /internal/v1/model-catalog
+GET  /internal/v1/model-health
 ```
 
 模型路由配置示例：
@@ -1419,7 +1419,7 @@ LLM Serving 服务负责最终答案生成，建议提供 OpenAI-compatible Chat
 - LLM 服务只负责生成，不负责权限判断。
 - Prompt 中的检索资料必须已经过权限过滤和引用映射。
 - 高密级文档使用私有化模型或专属模型池。
-- 生成结果必须经过 Citation Verifier，不能直接返回给用户。
+- 生成结果必须经过答案引用有效性校验，不能直接返回给用户。
 - 支持流式输出、取消请求、超时中断。
 - 记录 prompt_version、model_version、token usage、首 token 延迟和总延迟。
 
@@ -1638,7 +1638,7 @@ retrieval_policy_version
 ### 9.1 查询 API
 
 ```http
-POST /internal/v1/rag/query
+POST /internal/v1/queries
 Authorization: Bearer <jwt>
 Content-Type: application/json
 ```
@@ -1662,7 +1662,7 @@ Content-Type: application/json
 ### 9.2 流式查询 API
 
 ```http
-POST /internal/v1/rag/query:stream
+POST /internal/v1/query-streams
 Accept: text/event-stream
 ```
 
@@ -1685,7 +1685,7 @@ data: {"request_id":"req_001"}
 ### 9.3 导入 API
 
 ```http
-POST /internal/v1/knowledge-bases/{kb_id}/documents:import
+POST /internal/v1/knowledge-bases/{kb_id}/document-imports
 Authorization: Bearer <jwt>
 Idempotency-Key: required
 ```
@@ -1744,7 +1744,7 @@ GET /internal/v1/import-jobs/{job_id}
 ```http
 PUT /internal/v1/knowledge-bases/{kb_id}/permissions
 PUT /internal/v1/documents/{doc_id}/permissions
-GET /internal/v1/permissions/effective?resource_id=doc_001&user_id=user_123
+GET /internal/v1/permission-evaluations?resource_type=document&resource_id=doc_001&user_id=user_123
 ```
 
 权限变更必须：
@@ -1764,24 +1764,25 @@ GET /internal/v1/permissions/effective?resource_id=doc_001&user_id=user_123
 GET  /internal/v1/admin/configs
 GET  /internal/v1/admin/configs/{key}
 PUT  /internal/v1/admin/configs/{key}
-POST /internal/v1/admin/configs:validate
-POST /internal/v1/admin/configs:publish
-POST /internal/v1/admin/configs:rollback
-GET  /internal/v1/admin/configs/versions
-GET  /internal/v1/admin/configs/diff?from=12&to=13
+GET  /internal/v1/admin/config-versions
+GET  /internal/v1/admin/config-versions/{version}
+PATCH /internal/v1/admin/config-versions/{version}
+GET  /internal/v1/admin/config-version-diffs?from=12&to=13
+POST /internal/v1/admin/config-validations
+POST /internal/v1/admin/config-rollbacks
 ```
 
 首次启动初始化接口：
 
 ```http
-GET  /internal/v1/setup/status
-POST /internal/v1/setup/validate
-POST /internal/v1/setup/initialize
+GET  /internal/v1/setup-state
+POST /internal/v1/setup-config-validations
+PUT  /internal/v1/setup-initialization
 ```
 
 首次启动时，环境变量只让 API 服务完成进程启动、数据库连接、Redis 连接和 Secret Provider 初始化。API 服务发现系统未初始化后进入 `setup_required` 状态，由服务端生成一次性临时 `system_token`，该 token 具备临时 `system` 等级，但只允许访问上述初始化接口。普通查询、导入、权限和配置 API 在初始化完成前必须拒绝访问。
 
-`system_token` 不通过普通 HTTP 接口返回明文。推荐通过本机初始化 CLI 或部署平台受控操作获取和轮换，例如 `rag-admin setup-token show`、`rag-admin setup-token rotate`。
+`system_token` 不通过普通 HTTP 接口返回明文。推荐通过本机初始化 CLI 或部署平台受控操作签发和轮换，例如 `rag-admin setup-token issue`、`rag-admin setup-token rotate`。每次签发或轮换都会生成新的 token，并使旧 token 立即失效。
 
 配置变更请求：
 
@@ -1798,7 +1799,7 @@ POST /internal/v1/setup/initialize
 初始化接口要求：
 
 - 初始化接口只在 `system_state.initialized = false` 时开放，初始化成功后除 `status` 外全部关闭。
-- `validate` 和 `initialize` 必须使用 `Authorization: System <system_token>`。
+- `setup-config-validations` 和 `setup-initialization` 必须使用 `Authorization: Bearer <setup_jwt>`。
 
 管理员配置接口要求：
 
@@ -2142,9 +2143,10 @@ not_initialized
 生成规则：
 
 - API 服务启动后检查到 `system_state.initialized = false` 时生成。
-- 如果已有未过期、未使用的 token，不重复生成；如果不存在或已过期，则生成新 token。
+- 每次请求签发临时 token 都必须生成新 token，不复用已有 token。
+- 签发新 token 前必须将已有未过期、未使用的 token 标记为失效，且只允许最新 token 通过校验。
 - 使用安全随机数生成，例如 256-bit random token。
-- 数据库只保存 token hash，不保存明文。
+- 数据库只保存最新 token hash，不保存明文。
 - 默认有效期建议 30 到 60 分钟。
 - token 具备临时 `system` 等级和 `setup:*` scope，但不映射为普通用户、系统管理员或服务账号。
 - token 只能使用一次。
@@ -2154,7 +2156,7 @@ not_initialized
 获取方式：
 
 - system token 生成后只展示一次。
-- 推荐通过初始化 CLI 获取，例如 `docker compose exec api rag-admin setup-token show`。
+- 推荐通过初始化 CLI 签发，例如 `docker compose exec api rag-admin setup-token issue`。
 - 也可以写入受限权限的临时文件，例如 `/run/rag/setup_token`，初始化完成后删除。
 - 不建议通过普通应用日志输出 token。
 - 不建议通过无需认证的 HTTP 接口返回 token。
@@ -2163,9 +2165,9 @@ not_initialized
 
 ```text
 允许：
-GET  /internal/v1/setup/status      可不带 token，但只返回有限状态
-POST /internal/v1/setup/validate    必须 Authorization: System <system_token>
-POST /internal/v1/setup/initialize  必须 Authorization: System <system_token>
+GET  /internal/v1/setup-state                 可不带 token，但只返回有限状态
+POST /internal/v1/setup-config-validations    必须 Authorization: Bearer <setup_jwt>
+PUT  /internal/v1/setup-initialization        必须 Authorization: Bearer <setup_jwt>
 
 禁止：
 任何查询、导入、权限、配置、审计等业务 API
@@ -2283,20 +2285,20 @@ POST /internal/v1/setup/initialize  必须 Authorization: System <system_token>
 ### 14.7 初始化接口
 
 ```http
-GET  /internal/v1/setup/status
-POST /internal/v1/setup/validate
-POST /internal/v1/setup/initialize
+GET  /internal/v1/setup-state
+POST /internal/v1/setup-config-validations
+PUT  /internal/v1/setup-initialization
 ```
 
 鉴权要求：
 
 ```http
-GET  /internal/v1/setup/status      不要求 token，只返回有限状态
-POST /internal/v1/setup/validate    Authorization: System <system_token>
-POST /internal/v1/setup/initialize  Authorization: System <system_token>
+GET  /internal/v1/setup-state                 不要求 token，只返回有限状态
+POST /internal/v1/setup-config-validations    Authorization: Bearer <setup_jwt>
+PUT  /internal/v1/setup-initialization        Authorization: Bearer <setup_jwt>
 ```
 
-`GET /internal/v1/setup/status` 响应：
+`GET /internal/v1/setup-state` 响应：
 
 ```json
 {
@@ -2306,11 +2308,11 @@ POST /internal/v1/setup/initialize  Authorization: System <system_token>
 }
 ```
 
-`GET /internal/v1/setup/status` 不返回 token 明文，只返回初始化状态和 token 过期时间。
+`GET /internal/v1/setup-state` 不返回 token 明文，只返回初始化状态和 token 过期时间。
 
-`POST /internal/v1/setup/validate` 只校验和测试配置，不写入 active config。
+`POST /internal/v1/setup-config-validations` 只校验和测试配置，不写入 active config。
 
-`POST /internal/v1/setup/initialize` 在校验通过后执行：
+`PUT /internal/v1/setup-initialization` 在校验通过后执行：
 
 ```text
 1. 开启数据库事务
@@ -2335,7 +2337,7 @@ POST /internal/v1/setup/initialize  Authorization: System <system_token>
 
 初始化成功后：
 
-- `/internal/v1/setup/*` 除 status 外全部关闭。
+- setup 初始化写接口关闭，仅保留 `GET /internal/v1/setup-state` 返回有限状态。
 - system token 不可再次使用。
 - 管理员必须使用新建本地账号登录。
 - 后续配置修改走管理员配置中心和配置发布流程。
@@ -2594,11 +2596,12 @@ knowledge_base 配置 > department 配置 > global 配置 > 代码默认值
 GET  /internal/v1/admin/configs
 GET  /internal/v1/admin/configs/{key}
 PUT  /internal/v1/admin/configs/{key}
-POST /internal/v1/admin/configs:validate
-POST /internal/v1/admin/configs:publish
-POST /internal/v1/admin/configs:rollback
-GET  /internal/v1/admin/configs/versions
-GET  /internal/v1/admin/configs/diff?from=12&to=13
+GET  /internal/v1/admin/config-versions
+GET  /internal/v1/admin/config-versions/{version}
+PATCH /internal/v1/admin/config-versions/{version}
+GET  /internal/v1/admin/config-version-diffs?from=12&to=13
+POST /internal/v1/admin/config-validations
+POST /internal/v1/admin/config-rollbacks
 ```
 
 配置请求示例：
@@ -2653,7 +2656,7 @@ GET  /internal/v1/admin/configs/diff?from=12&to=13
 ```text
 1. 使用环境变量启动 API 进程，并连接 PostgreSQL、Redis 和 Secret Provider
 2. 检查 system_state.initialized
-3. 未初始化时进入 setup_required，生成或复用临时 system_token，只开放 setup 接口
+3. 未初始化时进入 setup_required，生成新的临时 system_token 并使旧 token 失效，只开放 setup 接口
 4. 已初始化时从 Config Service 拉取 active config
 5. 本地内存缓存配置
 6. Redis 保存配置版本和变更通知
