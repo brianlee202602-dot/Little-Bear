@@ -1,0 +1,1392 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://little-bear.local/schemas/setup-config.schema.json",
+  "title": "Little Bear Setup Configuration",
+  "description": "Machine-verifiable schema for setup-config-validations, setup-initialization and active_config v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["setup", "config"],
+  "properties": {
+    "setup": {
+      "$ref": "#/$defs/SetupPayload"
+    },
+    "config": {
+      "$ref": "#/$defs/ActiveConfigV1"
+    }
+  },
+  "$defs": {
+    "SecretRef": {
+      "type": "string",
+      "pattern": "^secret://[a-z0-9_-]+/[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+$"
+    },
+    "NullableSecretRef": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SecretRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "SetupPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["admin", "organization", "roles"],
+      "properties": {
+        "admin": {
+          "$ref": "#/$defs/SetupAdmin"
+        },
+        "organization": {
+          "$ref": "#/$defs/SetupOrganization"
+        },
+        "roles": {
+          "$ref": "#/$defs/SetupRoles"
+        }
+      }
+    },
+    "SetupAdmin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["username", "display_name", "initial_password"],
+      "properties": {
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "initial_password": {
+          "type": "string",
+          "minLength": 12,
+          "writeOnly": true
+        },
+        "email": {
+          "type": ["string", "null"],
+          "format": "email"
+        },
+        "phone": {
+          "type": ["string", "null"],
+          "maxLength": 32
+        }
+      }
+    },
+    "SetupOrganization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enterprise", "departments"],
+      "properties": {
+        "enterprise": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "code"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          }
+        },
+        "departments": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "contains": {
+            "type": "object",
+            "required": ["is_default"],
+            "properties": {
+              "is_default": {
+                "const": true
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "code", "is_default"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "code": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "is_default": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "SetupRoles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["builtin_roles", "admin_role", "default_user_role"],
+      "properties": {
+        "builtin_roles": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "system_admin",
+              "security_admin",
+              "audit_admin",
+              "department_admin",
+              "knowledge_base_admin",
+              "employee"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "const": "system_admin"
+              }
+            },
+            {
+              "contains": {
+                "const": "security_admin"
+              }
+            },
+            {
+              "contains": {
+                "const": "audit_admin"
+              }
+            },
+            {
+              "contains": {
+                "const": "department_admin"
+              }
+            },
+            {
+              "contains": {
+                "const": "knowledge_base_admin"
+              }
+            },
+            {
+              "contains": {
+                "const": "employee"
+              }
+            }
+          ]
+        },
+        "admin_role": {
+          "const": "system_admin"
+        },
+        "default_user_role": {
+          "const": "employee"
+        }
+      }
+    },
+    "ActiveConfigV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "config_version",
+        "scope",
+        "secret_provider",
+        "redis",
+        "storage",
+        "vector_store",
+        "keyword_search",
+        "model_gateway",
+        "model",
+        "llm",
+        "auth",
+        "retrieval",
+        "chunk",
+        "import",
+        "permission",
+        "security",
+        "cache",
+        "rate_limit",
+        "timeout",
+        "degrade",
+        "audit",
+        "observability"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "config_version": {
+          "const": 1
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "id"],
+          "properties": {
+            "type": {
+              "const": "global"
+            },
+            "id": {
+              "const": "global"
+            }
+          }
+        },
+        "secret_provider": {
+          "$ref": "#/$defs/SecretProviderConfig"
+        },
+        "redis": {
+          "$ref": "#/$defs/RedisConfig"
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageConfig"
+        },
+        "vector_store": {
+          "$ref": "#/$defs/VectorStoreConfig"
+        },
+        "keyword_search": {
+          "$ref": "#/$defs/KeywordSearchConfig"
+        },
+        "model_gateway": {
+          "$ref": "#/$defs/ModelGatewayConfig"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelConfig"
+        },
+        "llm": {
+          "$ref": "#/$defs/LlmConfig"
+        },
+        "auth": {
+          "$ref": "#/$defs/AuthConfig"
+        },
+        "retrieval": {
+          "$ref": "#/$defs/RetrievalConfig"
+        },
+        "chunk": {
+          "$ref": "#/$defs/ChunkConfig"
+        },
+        "import": {
+          "$ref": "#/$defs/ImportConfig"
+        },
+        "permission": {
+          "$ref": "#/$defs/PermissionConfig"
+        },
+        "security": {
+          "$ref": "#/$defs/SecurityConfig"
+        },
+        "cache": {
+          "$ref": "#/$defs/CacheConfig"
+        },
+        "rate_limit": {
+          "$ref": "#/$defs/RateLimitConfig"
+        },
+        "timeout": {
+          "$ref": "#/$defs/TimeoutConfig"
+        },
+        "degrade": {
+          "$ref": "#/$defs/DegradeConfig"
+        },
+        "audit": {
+          "$ref": "#/$defs/AuditConfig"
+        },
+        "observability": {
+          "$ref": "#/$defs/ObservabilityConfig"
+        }
+      }
+    },
+    "SecretProviderConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "endpoint", "auth_method", "secret_ref_policy"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["postgres_encrypted", "vault", "kms"]
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "auth_method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secret_ref_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allowed_namespaces", "required_prefix"],
+          "properties": {
+            "allowed_namespaces": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9_-]+$"
+              }
+            },
+            "required_prefix": {
+              "type": "string",
+              "pattern": "^secret://[a-z0-9_-]+/$"
+            }
+          }
+        }
+      }
+    },
+    "RedisConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "pool", "cache_strategy"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^redis://"
+        },
+        "pool": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_connections",
+            "connect_timeout_ms",
+            "socket_timeout_ms",
+            "retry_on_timeout"
+          ],
+          "properties": {
+            "max_connections": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "connect_timeout_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "socket_timeout_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "retry_on_timeout": {
+              "type": "boolean"
+            }
+          }
+        },
+        "cache_strategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "permission_context_enabled",
+            "query_cache_enabled",
+            "rate_limit_enabled",
+            "lock_enabled",
+            "config_notify_enabled"
+          ],
+          "properties": {
+            "permission_context_enabled": {
+              "type": "boolean"
+            },
+            "query_cache_enabled": {
+              "type": "boolean"
+            },
+            "rate_limit_enabled": {
+              "type": "boolean"
+            },
+            "lock_enabled": {
+              "type": "boolean"
+            },
+            "config_notify_enabled": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "StorageConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "minio_endpoint",
+        "bucket",
+        "region",
+        "tls_enabled",
+        "access_key_ref",
+        "secret_key_ref",
+        "object_key_prefix"
+      ],
+      "properties": {
+        "provider": {
+          "const": "minio"
+        },
+        "minio_endpoint": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "bucket": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 63
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tls_enabled": {
+          "type": "boolean"
+        },
+        "access_key_ref": {
+          "$ref": "#/$defs/SecretRef"
+        },
+        "secret_key_ref": {
+          "$ref": "#/$defs/SecretRef"
+        },
+        "object_key_prefix": {
+          "type": "string"
+        }
+      }
+    },
+    "VectorStoreConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "qdrant_base_url",
+        "api_key_ref",
+        "collection_prefix",
+        "distance",
+        "write_check_enabled",
+        "delete_check_enabled"
+      ],
+      "properties": {
+        "provider": {
+          "const": "qdrant"
+        },
+        "qdrant_base_url": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "api_key_ref": {
+          "$ref": "#/$defs/NullableSecretRef"
+        },
+        "collection_prefix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "distance": {
+          "type": "string",
+          "enum": ["cosine", "dot", "euclidean"]
+        },
+        "write_check_enabled": {
+          "type": "boolean"
+        },
+        "delete_check_enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "KeywordSearchConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "language",
+        "keyword_analyzer",
+        "dictionary_version",
+        "synonym_version",
+        "stopwords_version",
+        "boosts"
+      ],
+      "properties": {
+        "provider": {
+          "const": "postgres_full_text"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["zh", "en", "mixed"]
+        },
+        "keyword_analyzer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dictionary_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "synonym_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stopwords_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "boosts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "heading_path", "body", "tags"],
+          "properties": {
+            "title": {
+              "type": "number",
+              "minimum": 0
+            },
+            "heading_path": {
+              "type": "number",
+              "minimum": 0
+            },
+            "body": {
+              "type": "number",
+              "minimum": 0
+            },
+            "tags": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "ModelGatewayConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "base_url", "auth_token_ref", "routes", "mock", "healthcheck"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["mock", "single_adapter"]
+        },
+        "base_url": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "auth_token_ref": {
+          "$ref": "#/$defs/NullableSecretRef"
+        },
+        "routes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["embedding", "rerank", "llm"],
+          "properties": {
+            "embedding": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["online_default", "batch_default"],
+              "properties": {
+                "online_default": {
+                  "type": "string"
+                },
+                "batch_default": {
+                  "type": "string"
+                }
+              }
+            },
+            "rerank": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["default"],
+              "properties": {
+                "default": {
+                  "type": "string"
+                }
+              }
+            },
+            "llm": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["default", "fallback"],
+              "properties": {
+                "default": {
+                  "type": "string"
+                },
+                "fallback": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "mock": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "embedding_dimension",
+            "embedding_seed",
+            "rerank_strategy",
+            "llm_answer_mode",
+            "failure_injection_enabled"
+          ],
+          "properties": {
+            "embedding_dimension": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "embedding_seed": {
+              "type": "integer"
+            },
+            "rerank_strategy": {
+              "type": "string",
+              "enum": ["stable_score", "identity", "score_by_length"]
+            },
+            "llm_answer_mode": {
+              "type": "string",
+              "enum": ["citation_required", "retrieval_summary", "empty_answer"]
+            },
+            "failure_injection_enabled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "healthcheck": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "timeout_ms", "failure_threshold"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "failure_threshold": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "ModelConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "embedding_model",
+        "embedding_version",
+        "embedding_dimension",
+        "embedding_normalize",
+        "embedding_tokenizer_version",
+        "rerank_model",
+        "llm_model",
+        "llm_fallback_model"
+      ],
+      "properties": {
+        "embedding_model": {
+          "type": "string"
+        },
+        "embedding_version": {
+          "type": "string"
+        },
+        "embedding_dimension": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "embedding_normalize": {
+          "type": "boolean"
+        },
+        "embedding_tokenizer_version": {
+          "type": "string"
+        },
+        "rerank_model": {
+          "type": "string"
+        },
+        "llm_model": {
+          "type": "string"
+        },
+        "llm_fallback_model": {
+          "type": "string"
+        }
+      }
+    },
+    "LlmConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "temperature",
+        "max_tokens",
+        "first_token_timeout_ms",
+        "total_timeout_ms",
+        "retry_policy"
+      ],
+      "properties": {
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "first_token_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "total_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retry_policy": {
+          "$ref": "#/$defs/RetryPolicyMs"
+        }
+      }
+    },
+    "AuthConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "password_min_length",
+        "password_require_uppercase",
+        "password_require_lowercase",
+        "password_require_digit",
+        "password_require_symbol",
+        "login_failure_limit",
+        "lock_minutes",
+        "access_token_ttl_minutes",
+        "refresh_token_ttl_minutes",
+        "jwt_issuer",
+        "jwt_audience",
+        "jwt_signing_key_ref"
+      ],
+      "properties": {
+        "password_min_length": {
+          "type": "integer",
+          "minimum": 8
+        },
+        "password_require_uppercase": {
+          "type": "boolean"
+        },
+        "password_require_lowercase": {
+          "type": "boolean"
+        },
+        "password_require_digit": {
+          "type": "boolean"
+        },
+        "password_require_symbol": {
+          "type": "boolean"
+        },
+        "login_failure_limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lock_minutes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "access_token_ttl_minutes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "refresh_token_ttl_minutes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "jwt_issuer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "jwt_audience": {
+          "type": "string",
+          "minLength": 1
+        },
+        "jwt_signing_key_ref": {
+          "$ref": "#/$defs/SecretRef"
+        }
+      }
+    },
+    "RetrievalConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vector_top_k",
+        "keyword_top_k",
+        "fusion_method",
+        "fusion_params",
+        "rerank_input_top_k",
+        "final_context_top_k",
+        "max_context_tokens",
+        "rewrite_enabled",
+        "expansion_enabled"
+      ],
+      "properties": {
+        "vector_top_k": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "keyword_top_k": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fusion_method": {
+          "type": "string",
+          "enum": ["rrf", "weighted_sum"]
+        },
+        "fusion_params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rrf_k", "title_boost", "freshness_boost", "low_ocr_penalty"],
+          "properties": {
+            "rrf_k": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "title_boost": {
+              "type": "number",
+              "minimum": 0
+            },
+            "freshness_boost": {
+              "type": "number",
+              "minimum": 0
+            },
+            "low_ocr_penalty": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "rerank_input_top_k": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "final_context_top_k": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_context_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rewrite_enabled": {
+          "type": "boolean"
+        },
+        "expansion_enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ChunkConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_size_tokens", "overlap_tokens", "strategy"],
+      "properties": {
+        "default_size_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "overlap_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "strategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "preserve_tables",
+            "preserve_code_blocks",
+            "preserve_contract_clauses"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["heading_paragraph", "fixed_tokens"]
+            },
+            "preserve_tables": {
+              "type": "boolean"
+            },
+            "preserve_code_blocks": {
+              "type": "boolean"
+            },
+            "preserve_contract_clauses": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "ImportConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_file_mb",
+        "allowed_file_types",
+        "max_concurrent_jobs",
+        "department_concurrent_jobs",
+        "user_concurrent_jobs",
+        "file_concurrency_per_job",
+        "embedding_batch_size",
+        "index_batch_size",
+        "retry_policy"
+      ],
+      "properties": {
+        "max_file_mb": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "allowed_file_types": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": ["pdf", "docx", "txt", "md"]
+          },
+          "uniqueItems": true
+        },
+        "max_concurrent_jobs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "department_concurrent_jobs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "user_concurrent_jobs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "file_concurrency_per_job": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "embedding_batch_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "index_batch_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retry_policy": {
+          "$ref": "#/$defs/RetryPolicySeconds"
+        }
+      }
+    },
+    "PermissionConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default_user_role",
+        "default_visibility",
+        "cache_ttl_seconds",
+        "tightening_block_policy"
+      ],
+      "properties": {
+        "default_user_role": {
+          "const": "employee"
+        },
+        "default_visibility": {
+          "type": "string",
+          "enum": ["department", "enterprise"]
+        },
+        "cache_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tightening_block_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["write_access_block_first", "block_old_index_refs", "fail_closed"],
+          "properties": {
+            "write_access_block_first": {
+              "const": true
+            },
+            "block_old_index_refs": {
+              "const": true
+            },
+            "fail_closed": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "SecurityConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["require_citation", "prompt_leakage_policy", "pii_redaction_policy"],
+      "properties": {
+        "require_citation": {
+          "const": true
+        },
+        "prompt_leakage_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["block_internal_prompt_leakage", "block_secret_ref_leakage"],
+          "properties": {
+            "block_internal_prompt_leakage": {
+              "type": "boolean"
+            },
+            "block_secret_ref_leakage": {
+              "type": "boolean"
+            }
+          }
+        },
+        "pii_redaction_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "redact_logs", "redact_audit_summary"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "redact_logs": {
+              "type": "boolean"
+            },
+            "redact_audit_summary": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "CacheConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "permission_context_ttl_seconds",
+        "query_embedding_enabled",
+        "query_embedding_ttl_seconds",
+        "retrieval_result_enabled",
+        "retrieval_result_ttl_seconds",
+        "final_answer_enabled",
+        "final_answer_ttl_seconds",
+        "cross_user_final_answer_allowed"
+      ],
+      "properties": {
+        "permission_context_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "query_embedding_enabled": {
+          "type": "boolean"
+        },
+        "query_embedding_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retrieval_result_enabled": {
+          "type": "boolean"
+        },
+        "retrieval_result_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "final_answer_enabled": {
+          "const": false
+        },
+        "final_answer_ttl_seconds": {
+          "const": 0
+        },
+        "cross_user_final_answer_allowed": {
+          "const": false
+        }
+      }
+    },
+    "RateLimitConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query_qps_per_user", "ip", "department", "kb", "api_key", "model_pool"],
+      "properties": {
+        "query_qps_per_user": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "ip": {
+          "$ref": "#/$defs/QpsBurstLimit"
+        },
+        "department": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["query_qps", "import_concurrency"],
+          "properties": {
+            "query_qps": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "import_concurrency": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "kb": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["query_qps"],
+          "properties": {
+            "query_qps": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "api_key": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["qps"],
+          "properties": {
+            "qps": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "model_pool": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["qps"],
+          "properties": {
+            "qps": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
+    },
+    "TimeoutConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query_total_ms",
+        "auth_permission_ms",
+        "rewrite_ms",
+        "embedding_ms",
+        "vector_search_ms",
+        "keyword_search_ms",
+        "rerank_ms",
+        "context_ms",
+        "postprocess_ms"
+      ],
+      "properties": {
+        "query_total_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "auth_permission_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rewrite_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "embedding_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "vector_search_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "keyword_search_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rerank_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "context_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "postprocess_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "DegradeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rewrite_timeout",
+        "embedding_timeout",
+        "vector_unavailable",
+        "keyword_unavailable",
+        "rerank_timeout",
+        "llm_timeout",
+        "model_pool_overloaded",
+        "import_backlog"
+      ],
+      "properties": {
+        "rewrite_timeout": {
+          "const": "use_original_query"
+        },
+        "embedding_timeout": {
+          "const": "keyword_only"
+        },
+        "vector_unavailable": {
+          "const": "keyword_and_metadata"
+        },
+        "keyword_unavailable": {
+          "const": "vector_and_metadata"
+        },
+        "rerank_timeout": {
+          "const": "fusion_score"
+        },
+        "llm_timeout": {
+          "const": "return_retrieval_with_citations"
+        },
+        "model_pool_overloaded": {
+          "const": "return_retryable_degraded_response"
+        },
+        "import_backlog": {
+          "const": "slow_down_import"
+        }
+      }
+    },
+    "AuditConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sink",
+        "retention_days",
+        "query_text_mode",
+        "record_full_prompt",
+        "snippet_max_chars",
+        "pii_redaction_enabled"
+      ],
+      "properties": {
+        "sink": {
+          "const": "postgres"
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "query_text_mode": {
+          "type": "string",
+          "enum": ["none", "hash", "plain"]
+        },
+        "record_full_prompt": {
+          "const": false
+        },
+        "snippet_max_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pii_redaction_enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ObservabilityConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metrics_enabled", "trace_enabled", "alert_thresholds"],
+      "properties": {
+        "metrics_enabled": {
+          "type": "boolean"
+        },
+        "trace_enabled": {
+          "type": "boolean"
+        },
+        "alert_thresholds": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "active_config_load_failed",
+            "permission_violation_rate",
+            "draft_index_exposure_count",
+            "import_failure_rate",
+            "worker_queue_backlog",
+            "llm_timeout_rate"
+          ],
+          "properties": {
+            "active_config_load_failed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "permission_violation_rate": {
+              "type": "number",
+              "minimum": 0
+            },
+            "draft_index_exposure_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "import_failure_rate": {
+              "type": "number",
+              "minimum": 0
+            },
+            "worker_queue_backlog": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "llm_timeout_rate": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "RetryPolicyMs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_retries", "backoff_ms"],
+      "properties": {
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "backoff_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "RetryPolicySeconds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_retries", "initial_delay_seconds", "max_delay_seconds", "dead_letter_enabled"],
+      "properties": {
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "initial_delay_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_delay_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dead_letter_enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "QpsBurstLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qps", "burst"],
+      "properties": {
+        "qps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "burst": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

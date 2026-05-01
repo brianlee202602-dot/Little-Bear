@@ -37,7 +37,7 @@
 | 内部服务 API | 后端模块、Worker、Model Gateway | 不允许浏览器前端直接访问 |
 | 运维 API/CLI | 运维人员、部署平台 | healthcheck、setup token 签发、索引检查、任务重试 |
 
-当前后端规范路径以 `/internal/v1` 为准。生产部署时可以由 API Gateway 将公网或内网页面路径 `/api/v1` 转发到后端 `/internal/v1`。
+当前 P0 后端规范路径统一使用 `/internal/v1`。OpenAPI、后端路由、前端 SDK 和测试均以该路径为准。
 
 ## 3. 通用约定
 

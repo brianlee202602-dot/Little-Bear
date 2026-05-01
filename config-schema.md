@@ -4,6 +4,8 @@
 
 本文定义 Little Bear RAG 后端 P0 阶段的初始化配置和 `active_config v1` 契约，作为 `setup-config-validations`、`setup-initialization`、Config Service、ServiceBootstrap、OpenAPI、数据库 Schema 和本地开发环境的共同输入。
 
+机器可校验 JSON Schema 已落地到根目录 `config.schema.json`。本文负责说明字段语义、校验意图和运行约束；实现中的 schema 校验应以 `config.schema.json` 为准。
+
 P0 目标：
 
 - 系统启动配置只包含数据库连接和进程参数。
@@ -720,4 +722,3 @@ P0 必测：
 - embedding 维度和 VectorStore collection 不一致时校验失败。
 - Model Gateway mock 不可用时 ServiceBootstrap not ready。
 - 使用 mock 配置可以完成初始化、导入、索引、查询和降级测试。
-

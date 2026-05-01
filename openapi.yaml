@@ -8,11 +8,12 @@ info:
     indexing operations, query, audit, healthcheck, config, and internal model
     gateway APIs. P0 uses model mocks or a single model adapter and does not
     include complete config approval or rollback workflows.
+
+    Backend contract paths use /internal/v1. OpenAPI, backend routes, frontend
+    SDKs, and contract tests should all use this path prefix consistently.
 servers:
   - url: http://localhost:8000
     description: Local development
-  - url: /api/v1
-    description: API Gateway public prefix mapped to /internal/v1
 tags:
   - name: Setup
   - name: Auth
@@ -2100,13 +2101,29 @@ components:
       enum: [department, enterprise]
     ResourceType:
       type: string
-      enum: [knowledge_base, folder, document, chunk, query, config, setup]
+      enum: [enterprise, department, user, role, role_binding, permission, knowledge_base, folder, document, chunk, import_job, config, query, setup, model_call]
     RiskLevel:
       type: string
       enum: [low, medium, high, critical]
+    SetupStatus:
+      type: string
+      enum:
+        - not_initialized
+        - setup_required
+        - validating_config
+        - testing_dependencies
+        - creating_admin
+        - publishing_config
+        - initialized
+        - validation_failed
+        - dependency_test_failed
+        - initialization_failed
+        - recovery_required
+        - recovery_validating_config
+        - recovery_publishing_config
     LifecycleStatus:
       type: string
-      enum: [draft, active, disabled, archived, deleted, left]
+      enum: [draft, active, disabled, locked, archived, deleted]
     ImportJobStatus:
       type: string
       enum: [queued, running, retrying, partial_success, success, failed, cancelled]
@@ -2356,7 +2373,7 @@ components:
             initialized:
               type: boolean
             setup_status:
-              type: string
+              $ref: "#/components/schemas/SetupStatus"
             system_token_expires_at:
               type: [string, "null"]
               format: date-time
@@ -2821,7 +2838,7 @@ components:
           $ref: "#/components/schemas/ImportJobStatus"
         stage:
           type: string
-          enum: [validate, parse, clean, chunk, embed, index, publish]
+          enum: [validate, parse, clean, chunk, embed, index, publish, cleanup, finished]
         document_ids:
           type: array
           items:
@@ -2866,7 +2883,7 @@ components:
           type: string
         status:
           type: string
-          enum: [active, disabled, left]
+          enum: [active, disabled, locked, deleted]
         departments:
           type: array
           items:
@@ -2905,7 +2922,7 @@ components:
           type: string
         status:
           type: string
-          enum: [active, disabled]
+          enum: [active, disabled, locked]
     AdminPasswordResetRequest:
       type: object
       required: [new_password]
@@ -3227,13 +3244,19 @@ components:
         action:
           type: string
         resource_type:
-          type: string
+          $ref: "#/components/schemas/ResourceType"
         resource_id:
           type: string
         result:
           type: string
         risk_level:
           $ref: "#/components/schemas/RiskLevel"
+        config_version:
+          type: [integer, "null"]
+        permission_version:
+          type: [integer, "null"]
+        index_version_hash:
+          type: [string, "null"]
         summary_json:
           type: object
           additionalProperties: true
@@ -3310,6 +3333,8 @@ components:
           additionalProperties: true
         degraded:
           type: boolean
+        config_version:
+          type: [integer, "null"]
         error_code:
           type: [string, "null"]
     ModelCallLogListResponse:
