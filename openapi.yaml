@@ -90,6 +90,8 @@ paths:
       x-required-scope: setup:initialize
       x-audit-required: true
       x-risk-level: critical
+      x-confirmation-required: true
+      x-confirmation-condition: always
       requestBody:
         required: true
         content:
@@ -188,6 +190,8 @@ paths:
       x-token-type: access
       x-required-scope: auth:password:update:self
       x-audit-required: true
+      x-confirmation-required: true
+      x-confirmation-condition: always
       requestBody:
         required: true
         content:
@@ -610,6 +614,8 @@ paths:
       x-token-type: access
       x-required-scope: knowledge_base:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: default_visibility=enterprise
       requestBody:
         required: true
         content:
@@ -651,6 +657,8 @@ paths:
       x-token-type: access
       x-required-scope: knowledge_base:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: visibility expands
       parameters:
         - $ref: "#/components/parameters/KbId"
       requestBody:
@@ -676,6 +684,8 @@ paths:
       x-required-scope: knowledge_base:manage
       x-audit-required: true
       x-risk-level: critical
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/KbId"
       responses:
@@ -780,6 +790,8 @@ paths:
       x-token-type: access
       x-required-scope: folder:manage
       x-audit-required: true
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/FolderId"
       responses:
@@ -839,6 +851,8 @@ paths:
       x-token-type: access
       x-required-scope: document:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: visibility expands
       parameters:
         - $ref: "#/components/parameters/DocId"
       requestBody:
@@ -864,6 +878,8 @@ paths:
       x-required-scope: document:manage
       x-audit-required: true
       x-risk-level: critical
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/DocId"
       responses:
@@ -884,6 +900,8 @@ paths:
       x-token-type: access
       x-required-scope: document:index
       x-audit-required: true
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/DocId"
       responses:
@@ -983,6 +1001,8 @@ paths:
       x-token-type: access
       x-required-scope: user:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: granting admin role
       requestBody:
         required: true
         content:
@@ -1025,6 +1045,8 @@ paths:
       x-token-type: access
       x-required-scope: user:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: disabling admin
       parameters:
         - $ref: "#/components/parameters/UserId"
       requestBody:
@@ -1050,6 +1072,8 @@ paths:
       x-required-scope: user:manage
       x-audit-required: true
       x-risk-level: critical
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/UserId"
       responses:
@@ -1067,6 +1091,8 @@ paths:
       x-required-scope: user:manage
       x-audit-required: true
       x-risk-level: high
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/UserId"
       requestBody:
@@ -1190,6 +1216,8 @@ paths:
       x-token-type: access
       x-required-scope: org:manage
       x-audit-required: true
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/DepartmentId"
       responses:
@@ -1224,6 +1252,8 @@ paths:
       x-token-type: access
       x-required-scope: org:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: removing primary dept
       parameters:
         - $ref: "#/components/parameters/UserId"
       requestBody:
@@ -1265,6 +1295,8 @@ paths:
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: high-risk scopes
       requestBody:
         required: true
         content:
@@ -1306,6 +1338,8 @@ paths:
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: high-risk scopes
       parameters:
         - $ref: "#/components/parameters/RoleId"
       requestBody:
@@ -1330,6 +1364,8 @@ paths:
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/RoleId"
       responses:
@@ -1365,6 +1401,8 @@ paths:
       x-required-scope: role:manage
       x-audit-required: true
       x-risk-level: critical
+      x-confirmation-required: conditional
+      x-confirmation-condition: high-risk role
       parameters:
         - $ref: "#/components/parameters/UserId"
       requestBody:
@@ -1390,6 +1428,8 @@ paths:
       x-required-scope: role:manage
       x-audit-required: true
       x-risk-level: critical
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/UserId"
       requestBody:
@@ -1416,6 +1456,8 @@ paths:
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: removing last admin
       parameters:
         - $ref: "#/components/parameters/UserId"
         - $ref: "#/components/parameters/BindingId"
@@ -1468,6 +1510,8 @@ paths:
       x-required-scope: permission:manage
       x-audit-required: true
       x-risk-level: critical
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/KbId"
       requestBody:
@@ -1495,6 +1539,8 @@ paths:
       x-required-scope: permission:manage
       x-audit-required: true
       x-risk-level: critical
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/DocId"
       requestBody:
@@ -1560,6 +1606,8 @@ paths:
       x-token-type: access
       x-required-scope: config:manage
       x-audit-required: true
+      x-confirmation-required: conditional
+      x-confirmation-condition: high-risk key
       parameters:
         - $ref: "#/components/parameters/ConfigKey"
       requestBody:
@@ -1623,6 +1671,8 @@ paths:
       x-required-scope: config:manage
       x-audit-required: true
       x-risk-level: critical
+      x-confirmation-required: true
+      x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/ConfigVersion"
       requestBody:

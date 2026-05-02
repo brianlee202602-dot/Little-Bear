@@ -687,7 +687,7 @@ P0 内置角色：
 | `kb_id` | `uuid` | 是 | FK `knowledge_bases.id`, idx | 知识库 |
 | `document_id` | `uuid` | 是 | FK `documents.id`, idx | 单文档任务 |
 | `document_version_id` | `uuid` | 是 | FK `document_versions.id`, idx | 文档版本 |
-| `status` | `text` | 否 | idx, CHECK `import_job_status` | queued/running/success/failed/cancelled |
+| `status` | `text` | 否 | idx, CHECK `import_job_status` | queued/running/retrying/partial_success/success/failed/cancelled |
 | `stage` | `text` | 否 | idx, CHECK `import_job_stage` | validate/parse/clean/chunk/embed/index/publish/cleanup/finished |
 | `request_json` | `jsonb` | 否 |  | 请求摘要，不含 secret |
 | `result_json` | `jsonb` | 是 |  | 结果摘要 |
@@ -699,6 +699,8 @@ P0 内置角色：
 | `locked_by` | `text` | 是 | idx | Worker ID |
 | `locked_until` | `timestamptz` | 是 | idx | 锁过期时间 |
 | `next_retry_at` | `timestamptz` | 是 | idx | 下次重试时间 |
+| `cancel_requested_at` | `timestamptz` | 是 | idx | 运行中任务取消请求时间；由 Worker 在阶段边界确认 |
+| `cancel_requested_by` | `uuid` | 是 | FK `users.id`, idx | 发起取消的用户；系统任务可为空 |
 | `created_by` | `uuid` | 是 | FK `users.id`, idx | 创建者 |
 | `created_at` | `timestamptz` | 否 | idx | 创建时间 |
 | `updated_at` | `timestamptz` | 否 | idx | 更新时间 |
