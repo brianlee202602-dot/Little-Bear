@@ -60,7 +60,7 @@ paths:
       security:
         - bearerAuth: []
       x-token-type: setup
-      x-required-scope: setup:initialize
+      x-required-scope: setup:validate
       x-audit-required: true
       x-risk-level: high
       requestBody:
@@ -136,7 +136,7 @@ paths:
       summary: Revoke current session
       operationId: deleteCurrentSession
       x-token-type: access
-      x-required-scope: session:write
+      x-required-scope: auth:session
       x-audit-required: true
       responses:
         "204":
@@ -169,7 +169,7 @@ paths:
       summary: Get current user
       operationId: getCurrentUser
       x-token-type: access
-      x-required-scope: user:read:self
+      x-required-scope: auth:session
       responses:
         "200":
           description: Current user
@@ -186,7 +186,7 @@ paths:
       summary: Change current user password
       operationId: putCurrentUserPassword
       x-token-type: access
-      x-required-scope: user:write:self
+      x-required-scope: auth:password:update:self
       x-audit-required: true
       requestBody:
         required: true
@@ -434,6 +434,7 @@ paths:
       operationId: listDocumentChunks
       x-token-type: access
       x-required-scope: document:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/DocId"
       responses:
@@ -472,7 +473,7 @@ paths:
       summary: Get import job
       operationId: getImportJob
       x-token-type: access
-      x-required-scope: document:import
+      x-required-scope: import_job:read:self
       parameters:
         - $ref: "#/components/parameters/JobId"
       responses:
@@ -489,7 +490,7 @@ paths:
       summary: Update import job status
       operationId: patchImportJob
       x-token-type: access
-      x-required-scope: document:import
+      x-required-scope: import_job:manage:self
       x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/JobId"
@@ -515,7 +516,7 @@ paths:
       summary: Create import job retry
       operationId: createImportJobRetry
       x-token-type: access
-      x-required-scope: document:import
+      x-required-scope: import_job:manage:self
       x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/JobId"
@@ -674,7 +675,7 @@ paths:
       x-token-type: access
       x-required-scope: knowledge_base:manage
       x-audit-required: true
-      x-risk-level: high
+      x-risk-level: critical
       parameters:
         - $ref: "#/components/parameters/KbId"
       responses:
@@ -862,7 +863,7 @@ paths:
       x-token-type: access
       x-required-scope: document:manage
       x-audit-required: true
-      x-risk-level: high
+      x-risk-level: critical
       parameters:
         - $ref: "#/components/parameters/DocId"
       responses:
@@ -921,6 +922,7 @@ paths:
       operationId: adminListDocumentChunks
       x-token-type: access
       x-required-scope: document:manage
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/DocId"
       responses:
@@ -939,7 +941,7 @@ paths:
       summary: Admin list document index versions
       operationId: adminListDocumentIndexVersions
       x-token-type: access
-      x-required-scope: document:manage
+      x-required-scope: document:index
       parameters:
         - $ref: "#/components/parameters/DocId"
       responses:
@@ -958,7 +960,8 @@ paths:
       summary: Admin list users
       operationId: adminListUsers
       x-token-type: access
-      x-required-scope: user:manage
+      x-required-scope: user:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -1002,7 +1005,8 @@ paths:
       summary: Admin get user
       operationId: adminGetUser
       x-token-type: access
-      x-required-scope: user:manage
+      x-required-scope: user:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/UserId"
       responses:
@@ -1045,7 +1049,7 @@ paths:
       x-token-type: access
       x-required-scope: user:manage
       x-audit-required: true
-      x-risk-level: high
+      x-risk-level: critical
       parameters:
         - $ref: "#/components/parameters/UserId"
       responses:
@@ -1099,7 +1103,7 @@ paths:
       summary: Admin list departments
       operationId: adminListDepartments
       x-token-type: access
-      x-required-scope: org:manage
+      x-required-scope: org:read
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -1143,7 +1147,7 @@ paths:
       summary: Admin get department
       operationId: adminGetDepartment
       x-token-type: access
-      x-required-scope: org:manage
+      x-required-scope: org:read
       parameters:
         - $ref: "#/components/parameters/DepartmentId"
       responses:
@@ -1200,7 +1204,8 @@ paths:
       summary: Admin get user departments
       operationId: adminGetUserDepartments
       x-token-type: access
-      x-required-scope: org:manage
+      x-required-scope: org:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/UserId"
       responses:
@@ -1243,7 +1248,7 @@ paths:
       summary: Admin list roles
       operationId: adminListRoles
       x-token-type: access
-      x-required-scope: role:manage
+      x-required-scope: role:read
       responses:
         "200":
           description: Roles
@@ -1282,7 +1287,7 @@ paths:
       summary: Admin get role
       operationId: adminGetRole
       x-token-type: access
-      x-required-scope: role:manage
+      x-required-scope: role:read
       parameters:
         - $ref: "#/components/parameters/RoleId"
       responses:
@@ -1339,7 +1344,8 @@ paths:
       summary: Admin list user role bindings
       operationId: adminListUserRoleBindings
       x-token-type: access
-      x-required-scope: role:manage
+      x-required-scope: role:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/UserId"
       responses:
@@ -1358,7 +1364,7 @@ paths:
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
-      x-risk-level: high
+      x-risk-level: critical
       parameters:
         - $ref: "#/components/parameters/UserId"
       requestBody:
@@ -1383,7 +1389,7 @@ paths:
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
-      x-risk-level: high
+      x-risk-level: critical
       parameters:
         - $ref: "#/components/parameters/UserId"
       requestBody:
@@ -1425,7 +1431,8 @@ paths:
       summary: Evaluate resource permission
       operationId: getPermissionEvaluation
       x-token-type: access
-      x-required-scope: permission:read
+      x-required-scope: permission:evaluate
+      x-audit-required: true
       parameters:
         - name: resource_type
           in: query
@@ -1460,6 +1467,7 @@ paths:
       x-token-type: access
       x-required-scope: permission:manage
       x-audit-required: true
+      x-risk-level: critical
       parameters:
         - $ref: "#/components/parameters/KbId"
       requestBody:
@@ -1486,7 +1494,7 @@ paths:
       x-token-type: access
       x-required-scope: permission:manage
       x-audit-required: true
-      x-risk-level: high
+      x-risk-level: critical
       parameters:
         - $ref: "#/components/parameters/DocId"
       requestBody:
@@ -1511,7 +1519,8 @@ paths:
       summary: Admin list configs
       operationId: adminListConfigs
       x-token-type: access
-      x-required-scope: config:manage
+      x-required-scope: config:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -1531,7 +1540,8 @@ paths:
       summary: Admin get config
       operationId: adminGetConfig
       x-token-type: access
-      x-required-scope: config:manage
+      x-required-scope: config:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/ConfigKey"
       responses:
@@ -1574,7 +1584,8 @@ paths:
       summary: Admin list config versions
       operationId: adminListConfigVersions
       x-token-type: access
-      x-required-scope: config:manage
+      x-required-scope: config:read
+      x-audit-required: true
       responses:
         "200":
           description: Config versions
@@ -1591,7 +1602,8 @@ paths:
       summary: Admin get config version
       operationId: adminGetConfigVersion
       x-token-type: access
-      x-required-scope: config:manage
+      x-required-scope: config:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/ConfigVersion"
       responses:
@@ -1610,7 +1622,7 @@ paths:
       x-token-type: access
       x-required-scope: config:manage
       x-audit-required: true
-      x-risk-level: high
+      x-risk-level: critical
       parameters:
         - $ref: "#/components/parameters/ConfigVersion"
       requestBody:
@@ -1660,6 +1672,7 @@ paths:
       operationId: adminListAuditLogs
       x-token-type: access
       x-required-scope: audit:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -1700,6 +1713,7 @@ paths:
       operationId: adminGetAuditLog
       x-token-type: access
       x-required-scope: audit:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/AuditId"
       responses:
@@ -1719,6 +1733,7 @@ paths:
       operationId: adminListQueryLogs
       x-token-type: access
       x-required-scope: audit:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -1751,6 +1766,7 @@ paths:
       operationId: adminGetQueryLog
       x-token-type: access
       x-required-scope: audit:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/QueryLogId"
       responses:
@@ -1770,6 +1786,7 @@ paths:
       operationId: adminListModelCallLogs
       x-token-type: access
       x-required-scope: audit:read
+      x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -1831,7 +1848,7 @@ paths:
       summary: Internal create embeddings
       operationId: createModelEmbeddings
       x-token-type: service
-      x-required-scope: model:call
+      x-required-scope: model_gateway:invoke
       x-audit-required: true
       requestBody:
         required: true
@@ -1855,7 +1872,7 @@ paths:
       summary: Internal rerank documents
       operationId: createModelReranking
       x-token-type: service
-      x-required-scope: model:call
+      x-required-scope: model_gateway:invoke
       x-audit-required: true
       requestBody:
         required: true
@@ -1879,7 +1896,7 @@ paths:
       summary: Internal create chat completion
       operationId: createModelChatCompletion
       x-token-type: service
-      x-required-scope: model:call
+      x-required-scope: model_gateway:invoke
       x-audit-required: true
       requestBody:
         required: true
@@ -1903,7 +1920,7 @@ paths:
       summary: Internal list model catalog
       operationId: getModelCatalog
       x-token-type: service
-      x-required-scope: model:read
+      x-required-scope: model_gateway:read
       responses:
         "200":
           description: Model catalog
@@ -1920,7 +1937,7 @@ paths:
       summary: Internal model gateway health
       operationId: getModelHealth
       x-token-type: service
-      x-required-scope: model:read
+      x-required-scope: model_gateway:read
       responses:
         "200":
           description: Model gateway health
@@ -3111,6 +3128,7 @@ components:
 
     ResourcePermissionPutRequest:
       type: object
+      additionalProperties: false
       required: [visibility]
       properties:
         visibility:
@@ -3160,7 +3178,7 @@ components:
           type: string
         status:
           type: string
-          enum: [draft, active, archived]
+          enum: [draft, validating, active, archived, failed]
         version:
           type: integer
     ConfigPutRequest:
@@ -3195,7 +3213,7 @@ components:
           type: integer
         status:
           type: string
-          enum: [draft, active, archived]
+          enum: [draft, validating, active, archived, failed]
         risk_level:
           $ref: "#/components/schemas/RiskLevel"
         created_by:
