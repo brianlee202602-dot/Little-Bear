@@ -2315,7 +2315,7 @@ components:
           const: 1
         config_version:
           type: integer
-          const: 1
+          minimum: 1
         scope:
           type: object
           required: [type, id]
@@ -3305,16 +3305,22 @@ components:
       properties:
         id:
           type: string
+        request_id:
+          type: [string, "null"]
+        trace_id:
+          type: [string, "null"]
+        event_name:
+          type: string
         actor_type:
           type: string
         actor_id:
-          type: string
+          type: [string, "null"]
         action:
           type: string
         resource_type:
           $ref: "#/components/schemas/ResourceType"
         resource_id:
-          type: string
+          type: [string, "null"]
         result:
           type: string
         risk_level:
@@ -3328,6 +3334,8 @@ components:
         summary_json:
           type: object
           additionalProperties: true
+        error_code:
+          type: [string, "null"]
         created_at:
           $ref: "#/components/schemas/Timestamp"
     AuditLogResponse:
@@ -3353,20 +3361,44 @@ components:
       properties:
         id:
           type: string
+        request_id:
+          type: string
+        trace_id:
+          type: string
         user_id:
           type: string
         kb_ids:
           type: array
           items:
             type: string
+        query_hash:
+          type: string
         status:
           type: string
         degraded:
           type: boolean
+        degrade_reason:
+          type: [string, "null"]
         config_version:
           type: integer
         permission_version:
           type: integer
+        permission_filter_hash:
+          type: string
+        index_version_hash:
+          type: [string, "null"]
+        model_route_hash:
+          type: [string, "null"]
+        latency_ms:
+          type: integer
+        candidate_count:
+          type: integer
+        citation_count:
+          type: integer
+        error_code:
+          type: [string, "null"]
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
     QueryLogResponse:
       type: object
       properties:
@@ -3390,21 +3422,41 @@ components:
       properties:
         id:
           type: string
-        model:
+        request_id:
+          type: [string, "null"]
+        trace_id:
           type: string
-        route_hash:
+        caller:
+          type: string
+        model_type:
+          type: string
+        model_name:
+          type: string
+        model_version:
+          type: [string, "null"]
+        model_route_hash:
+          type: string
+        status:
           type: string
         latency_ms:
           type: integer
-        token_usage:
+        token_usage_json:
           type: object
           additionalProperties: true
         degraded:
           type: boolean
         config_version:
           type: [integer, "null"]
+        prompt_hash:
+          type: [string, "null"]
+        input_hash:
+          type: [string, "null"]
+        output_hash:
+          type: [string, "null"]
         error_code:
           type: [string, "null"]
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
     ModelCallLogListResponse:
       type: object
       properties:

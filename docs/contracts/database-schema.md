@@ -7,8 +7,8 @@
 设计依据：
 
 - `docs/MVP范围说明.md`
-- `config.schema.json`
-- `openapi.yaml`
+- `docs/contracts/config.schema.json`
+- `docs/contracts/openapi.yaml`
 - `docs/modules/14-核心数据模型设计实现文档.md`
 - `docs/modules/01-初始化服务设计实现文档.md`
 - `docs/modules/02-认证服务设计实现文档.md`
@@ -181,7 +181,7 @@ P0 必需 key：
 
 ### 5.4 `system_configs`
 
-用途：保存配置版本下的配置项。P0 使用 global scope 和 `config.schema.json` 的顶层配置 key。
+用途：保存配置版本下的配置项。P0 使用 global scope 和 `docs/contracts/config.schema.json` 的顶层配置 key。
 
 | 字段 | 类型 | Null | 约束/索引 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -224,7 +224,7 @@ P0 必需 key：
 约束：
 
 - API 响应和普通日志不得返回 `ciphertext` 或 secret 明文。
-- `secret_ref` 必须匹配 `config.schema.json` 中 SecretRef 格式。
+- `secret_ref` 必须匹配 `docs/contracts/config.schema.json` 中 SecretRef 格式。
 
 ## 6. 认证、组织与权限
 

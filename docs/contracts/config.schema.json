@@ -233,7 +233,8 @@
           "const": 1
         },
         "config_version": {
-          "const": 1
+          "type": "integer",
+          "minimum": 1
         },
         "scope": {
           "type": "object",

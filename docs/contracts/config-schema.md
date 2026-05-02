@@ -4,7 +4,7 @@
 
 本文定义 Little Bear RAG 后端 P0 阶段的初始化配置和 `active_config v1` 契约，作为 `setup-config-validations`、`setup-initialization`、Config Service、ServiceBootstrap、OpenAPI、数据库 Schema 和本地开发环境的共同输入。
 
-机器可校验 JSON Schema 已落地到根目录 `config.schema.json`。本文负责说明字段语义、校验意图和运行约束；实现中的 schema 校验应以 `config.schema.json` 为准。
+机器可校验 JSON Schema 已落地到 `docs/contracts/config.schema.json`。本文负责说明字段语义、校验意图和运行约束；实现中的 schema 校验应以 `docs/contracts/config.schema.json` 为准。
 
 P0 目标：
 
@@ -160,7 +160,7 @@ P0 部门不建模上下级递归，不包含 `parent_id`、`path` 或 closure t
 | 字段 | 类型 | 必填 | 规则 |
 | --- | --- | --- | --- |
 | `schema_version` | integer | 是 | P0 固定为 `1` |
-| `config_version` | integer | 是 | 初始化发布固定为 `1` |
+| `config_version` | integer | 是 | 运行配置版本；首次初始化发布为 `1`，后续发布必须与数据库 `config_versions.version` 一致 |
 | `scope.type` | string | 是 | P0 固定为 `global` |
 | `scope.id` | string | 是 | P0 固定为 `global` |
 

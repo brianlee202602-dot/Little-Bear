@@ -1,6 +1,6 @@
 # RAG 后端设计文档索引
 
-本目录是企业内部高并发生产级 RAG 检索系统的工程设计文档集，基于根目录的总设计文档拆分而来，用于指导后续代码实现、评审、测试和上线。
+本目录是企业内部高并发生产级 RAG 检索系统的工程设计文档集，用于指导后续代码实现、评审、测试和上线。
 
 ## 阅读顺序
 
@@ -9,7 +9,8 @@
 3. [公共实现约束](modules/00-公共实现约束.md)
 4. [核心数据模型](modules/14-核心数据模型设计实现文档.md)
 5. [项目执行流程图](项目执行流程图.md)
-6. 按模块阅读 `docs/modules/` 下的实现设计文档
+6. [正式编码前任务追踪](planning/正式编码前任务追踪.md)
+7. 按模块阅读 `docs/modules/` 下的实现设计文档
 
 ## 文档清单
 
@@ -18,6 +19,36 @@
 | [架构设计文档.md](架构设计文档.md) | 总体架构、部署拓扑、关键链路、状态流转、演进路线 |
 | [MVP范围说明.md](MVP范围说明.md) | 第一阶段 MVP 闭环、P0 功能范围、暂不实现范围、成功标准和验收路径 |
 | [项目执行流程图.md](项目执行流程图.md) | 项目总执行流程图、各功能模块流程图、关键执行约束 |
+| [planning/正式编码前任务追踪.md](planning/正式编码前任务追踪.md) | 编码前 P0/P1 任务追踪、准入标准、风险清单 |
+
+## 工程契约
+
+| 文档 | 内容 |
+| --- | --- |
+| [contracts/openapi.yaml](contracts/openapi.yaml) | REST API、错误结构、鉴权声明和响应 schema |
+| [contracts/config.schema.json](contracts/config.schema.json) | 初始化配置和 active config 的机器可校验 JSON Schema |
+| [contracts/config-schema.md](contracts/config-schema.md) | 初始化配置和 active config 字段语义 |
+| [contracts/database-schema.md](contracts/database-schema.md) | PostgreSQL 事实源 schema、索引和 migration 草案 |
+| [contracts/权限矩阵.md](contracts/权限矩阵.md) | endpoint 级权限、确认和补偿策略 |
+| [contracts/状态机设计.md](contracts/状态机设计.md) | P0 核心状态机、迁移、重试和补偿策略 |
+| [contracts/审计事件字典.md](contracts/审计事件字典.md) | P0 审计事件、summary_json 和脱敏规则 |
+
+## 执行与验收
+
+| 文档 | 内容 |
+| --- | --- |
+| [testing/测试计划.md](testing/测试计划.md) | P0 自动化测试、CI 门禁和验收边界 |
+| [development/本地开发环境.md](development/本地开发环境.md) | 本地依赖启动、初始化和 P0 验收路径 |
+| [admin/管理后台交互契约.md](admin/管理后台交互契约.md) | 管理后台路由、菜单、表单、确认和审计展示 |
+| [operations/配置变更与热更新策略.md](operations/配置变更与热更新策略.md) | 配置 diff、风险、热更新、失败和阶段 2 回滚边界 |
+| [operations/部署与发布检查清单.md](operations/部署与发布检查清单.md) | migration、备份恢复、发布演练和 Go / No-Go 条件 |
+| [observability/审计查询与展示扩展.md](observability/审计查询与展示扩展.md) | 审计查询、展示、导出、retention 和脱敏扩展 |
+| [evaluation/模型与检索评测基线.md](evaluation/模型与检索评测基线.md) | 检索、citation、拒答、延迟和成本评测基线 |
+
+## 模块设计
+
+| 文档 | 内容 |
+| --- | --- |
 | [00-公共实现约束.md](modules/00-公共实现约束.md) | 代码分层、依赖方向、事务、错误、配置、测试规范 |
 | [01-初始化服务设计实现文档.md](modules/01-初始化服务设计实现文档.md) | 首次初始化、临时 system token、初始化状态机 |
 | [02-认证服务设计实现文档.md](modules/02-认证服务设计实现文档.md) | 本地账号、登录、会话/JWT、服务端鉴权 |
@@ -34,6 +65,14 @@
 | [13-部署与运维设计实现文档.md](modules/13-部署与运维设计实现文档.md) | Docker Compose 部署、容量规划、备份、上线检查 |
 | [14-核心数据模型设计实现文档.md](modules/14-核心数据模型设计实现文档.md) | 知识库、文档、chunk、权限快照、索引版本、删除阻断、查询缓存 |
 | [15-前端与管理后台API设计实现文档.md](modules/15-前端与管理后台API设计实现文档.md) | 普通前端、管理后台、初始化、运维和内部服务 API 边界 |
+
+## 归档与示例
+
+| 路径 | 内容 |
+| --- | --- |
+| [archive/企业内部高并发生产级RAG检索系统后端设计.md](archive/企业内部高并发生产级RAG检索系统后端设计.md) | 原始总设计文档归档 |
+| [examples/setup-initialization.local.p0.json](examples/setup-initialization.local.p0.json) | 本地 P0 初始化 payload 示例 |
+| [examples/eval-dataset.local.p1.jsonl](examples/eval-dataset.local.p1.jsonl) | P1 本地评测 smoke 数据集 |
 
 ## 实施约定
 
