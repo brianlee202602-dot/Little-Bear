@@ -284,7 +284,7 @@ secret://rag/<service>/<name>
 {
   "provider": "postgres_full_text",
   "language": "zh",
-  "keyword_analyzer": "simple",
+  "keyword_analyzer": "zhparser",
   "dictionary_version": "dict-p0-v1",
   "synonym_version": "syn-p0-v1",
   "stopwords_version": "stop-p0-v1",
@@ -297,7 +297,7 @@ secret://rag/<service>/<name>
 }
 ```
 
-P0 可使用 PostgreSQL Full Text 和预分词字段；中文分词器高级治理进入后续阶段。
+P0 默认使用 PostgreSQL Full Text + `zhparser` 作为中文分词方案。企业词库、同义词、停用词和更细粒度的中文分词治理进入后续阶段；如果运行环境不提供 `zhparser`，则必须退回预分词字段方案，不能直接宣称中文关键词召回可用于生产。
 
 ### 6.6 model_gateway
 

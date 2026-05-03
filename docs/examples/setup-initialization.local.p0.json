@@ -87,7 +87,7 @@
     "keyword_search": {
       "provider": "postgres_full_text",
       "language": "zh",
-      "keyword_analyzer": "simple",
+      "keyword_analyzer": "zhparser",
       "dictionary_version": "dict-p0-v1",
       "synonym_version": "syn-p0-v1",
       "stopwords_version": "stop-p0-v1",

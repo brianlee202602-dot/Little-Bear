@@ -1,0 +1,84 @@
+# Little Bear
+
+Little Bear 是一个面向企业内部知识检索与问答场景的 RAG 系统工作区。当前仓库已整理设计文档，并搭好了后端 API、Worker、Model Gateway、Vue3 普通前端和 Vue3 管理后台的最小骨架。
+
+## 目录结构
+
+```text
+apps/
+  api/            FastAPI API
+  worker/         导入与索引 Worker
+  model-gateway/  本地模型网关服务
+  web/            Vue3 普通前端
+  admin/          Vue3 管理后台
+
+packages/
+  shared-contracts/
+  frontend-sdk/
+  ui/
+
+infra/
+tests/
+docs/
+```
+
+## 现有基础设施
+
+仓库保留了本地开发依赖：
+
+- PostgreSQL
+- Redis
+- MinIO
+- Qdrant
+- mock Model Gateway
+
+启动：
+
+```bash
+make env
+make up
+make health
+```
+
+## 本地开发入口
+
+后端：
+
+```bash
+make api
+make worker
+make model-gateway
+```
+
+其中 `make api` 使用 `uvicorn` 启动 FastAPI ASGI 应用：
+
+```bash
+PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --reload
+```
+
+前端：
+
+```bash
+npm install
+make web
+make admin
+```
+
+## 开发约定
+
+- 项目代码中的注释、docstring 和面向开发者的说明默认使用中文。
+- 注释优先解释设计意图、权限边界、事务边界、幂等、降级和安全限制，不重复描述显而易见的代码行为。
+- 错误码、API 字段、数据库字段、配置 key、scope、枚举值和第三方协议术语保持契约中的原始名称。
+
+## 当前状态
+
+- 设计文档已收敛。
+- 工程骨架已建立。
+- 业务模块仍待按设计顺序逐步实现。
+
+建议先进入：
+
+1. FastAPI 错误结构和设置校验补齐。
+2. SQLAlchemy / Alembic 初始化。
+3. Setup Service 与 active config 流程。
+4. Auth / Org / Permission 基础实现。

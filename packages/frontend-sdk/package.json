@@ -1,0 +1,6 @@
+{
+  "name": "@little-bear/frontend-sdk",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module"
+}

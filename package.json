@@ -1,0 +1,20 @@
+{
+  "name": "little-bear-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/web",
+    "apps/admin",
+    "packages/shared-contracts",
+    "packages/frontend-sdk",
+    "packages/ui"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace @little-bear/web run dev",
+    "dev:admin": "npm --workspace @little-bear/admin run dev",
+    "build:web": "npm --workspace @little-bear/web run build",
+    "build:admin": "npm --workspace @little-bear/admin run build",
+    "typecheck:web": "npm --workspace @little-bear/web run typecheck",
+    "typecheck:admin": "npm --workspace @little-bear/admin run typecheck"
+  }
+}

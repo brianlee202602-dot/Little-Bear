@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: zhparser/zhparser:alpine-16
     container_name: little-bear-postgres
     restart: unless-stopped
     environment:
@@ -112,4 +112,3 @@ volumes:
   redis-data:
   minio-data:
   qdrant-data:
-

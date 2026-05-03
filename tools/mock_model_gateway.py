@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal local Model Gateway mock for P0 development."""
+"""用于 P0 开发的本地最小 Model Gateway mock。"""
 
 from __future__ import annotations
 
