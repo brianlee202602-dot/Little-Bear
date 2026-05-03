@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: zhparser/zhparser:alpine-16
+    image: zhparser/zhparser
     container_name: little-bear-postgres
     restart: unless-stopped
     environment:
@@ -18,7 +18,7 @@ services:
       retries: 20
 
   redis:
-    image: redis:7-alpine
+    image: redis:alpine
     container_name: little-bear-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
@@ -33,7 +33,7 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio:RELEASE.2026-04-10T19-54-16Z
+    image: minio/minio
     container_name: little-bear-minio
     restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]
@@ -52,7 +52,7 @@ services:
       retries: 20
 
   minio-init:
-    image: minio/mc:RELEASE.2026-04-08T15-31-08Z
+    image: minio/mc
     container_name: little-bear-minio-init
     depends_on:
       minio:
@@ -71,7 +71,7 @@ services:
     restart: "no"
 
   qdrant:
-    image: qdrant/qdrant:v1.14.1
+    image: qdrant/qdrant
     container_name: little-bear-qdrant
     restart: unless-stopped
     ports:
