@@ -17,7 +17,8 @@ depends_on = None
 
 def _run(sql: str) -> None:
     # 任务、审计和缓存表包含表达式索引与 JSON/数组字段，使用原生 SQL 保持约束清晰。
-    op.execute(sql)
+    # 这里直接走驱动层执行，避免 SQLAlchemy 误解析原始 SQL 中的 JSON/类型转换语法。
+    op.get_bind().exec_driver_sql(sql)
 
 
 def upgrade() -> None:

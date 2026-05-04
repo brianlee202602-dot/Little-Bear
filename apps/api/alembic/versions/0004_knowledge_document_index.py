@@ -17,7 +17,8 @@ depends_on = None
 
 def _run(sql: str) -> None:
     # 索引和可见性约束依赖 PostgreSQL partial index / GIN，使用原生 SQL 更直观。
-    op.execute(sql)
+    # 这里直接走驱动层执行，避免 SQLAlchemy 误解析原始 SQL 中的 JSON/类型转换语法。
+    op.get_bind().exec_driver_sql(sql)
 
 
 def upgrade() -> None:

@@ -17,7 +17,8 @@ depends_on = None
 
 def _run(sql: str) -> None:
     # 迁移中大量使用 PostgreSQL 专有能力，保留原生 SQL 便于审查约束和索引。
-    op.execute(sql)
+    # 这里直接走驱动层执行，避免 SQLAlchemy 将 JSON 文本中的冒号误判为绑定参数。
+    op.get_bind().exec_driver_sql(sql)
 
 
 def upgrade() -> None:

@@ -32,22 +32,32 @@ docs/
 - Qdrant
 - mock Model Gateway
 
-启动：
+基础设施当前通过 `Makefile` 封装 Docker Compose 启动：
 
 ```bash
 make env
 make up
-make health
+make ps
 ```
+
+PostgreSQL 容器健康后，需要先执行 Alembic 迁移初始化数据库结构。迁移必须在安装了项目 Python 依赖的环境中执行，并且从仓库根目录运行：
+
+```bash
+python3 -m alembic --version
+PYTHONPATH=apps/api python3 -m alembic upgrade head
+PYTHONPATH=apps/api python3 -m alembic current
+```
+
+如果 `python3 -m alembic --version` 提示找不到 `alembic`，说明当前解释器不是项目开发环境，需要先激活 venv/conda 环境或显式使用对应环境里的 Python。
 
 ## 本地开发入口
 
-后端：
+当前 `Makefile` 保留基础设施生命周期、FastAPI 主程序和前端开发入口：
 
 ```bash
 make api
-make worker
-make model-gateway
+make web
+make admin
 ```
 
 其中 `make api` 使用 `uvicorn` 启动 FastAPI ASGI 应用：
@@ -56,13 +66,14 @@ make model-gateway
 PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --reload
 ```
 
-前端：
+数据库迁移、Worker、模型网关服务等命令当前不收敛到 `Makefile`，需要时直接使用原生命令，例如：
 
 ```bash
-npm install
-make web
-make admin
+PYTHONPATH=apps/api python3 -m alembic upgrade head
+python3 apps/worker/app/main.py
 ```
+
+数据库迁移完成后再启动 API。空库完成迁移但尚未执行业务初始化时，`GET /internal/v1/setup-state` 应返回未初始化状态，随后才能进入 `setup-config-validations` 和 `setup-initialization` 流程。
 
 ## 开发约定
 

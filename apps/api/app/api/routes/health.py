@@ -30,6 +30,6 @@ async def ready() -> dict[str, object]:
             "active_config": active_config,
             "service_bootstrap": service_bootstrap,
         },
-        "setup_status": setup_state.setup_status if setup_state else None,
+        "setup_status": setup_state.setup_status.value if setup_state else None,
         "error": database.error,
     }
