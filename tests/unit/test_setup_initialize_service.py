@@ -80,3 +80,17 @@ def test_setup_initialize_validation_rejects_cross_user_final_answer_cache(
         issue["path"] == "$.config.cache.cross_user_final_answer_allowed"
         for issue in result.errors
     )
+
+
+def test_setup_initialize_validation_handles_malformed_config_without_crashing(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.modules.setup.initialize_service.Draft202012Validator", None)
+    payload = deepcopy(_valid_payload())
+    payload["config"]["auth"]["password_min_length"] = "abc"
+    payload["config"]["storage"] = "bad"
+
+    result = SetupInitializationService().validate_payload(payload)
+
+    assert result.valid is False
+    assert any(issue["path"] == "$.config.storage.access_key_ref" for issue in result.errors)

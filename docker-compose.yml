@@ -1,18 +1,19 @@
+version: "3"
 services:
   postgres:
     image: zhparser/zhparser
     container_name: little-bear-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-little_bear}
-      POSTGRES_USER: ${POSTGRES_USER:-little_bear}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-little_bear_dev}
+      POSTGRES_DB: little_bear       # 直接指定数据库名称
+      POSTGRES_USER: little_bear     # 直接指定数据库用户名
+      POSTGRES_PASSWORD: little_bear_dev  # 直接指定数据库密码
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-little_bear} -d ${POSTGRES_DB:-little_bear}"]
+      test: ["CMD-SHELL", "pg_isready -U little_bear -d little_bear"]  # 直接指定用户名和数据库名称
       interval: 5s
       timeout: 3s
       retries: 20
@@ -23,7 +24,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -38,11 +39,11 @@ services:
     restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_ROOT_USER: minioadmin      # 直接指定 MinIO 用户名
+      MINIO_ROOT_PASSWORD: minioadmin  # 直接指定 MinIO 密码
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -58,9 +59,9 @@ services:
       minio:
         condition: service_healthy
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      MINIO_BUCKET: ${MINIO_BUCKET:-little-bear-rag}
+      MINIO_ROOT_USER: minioadmin      # 直接指定 MinIO 用户名
+      MINIO_ROOT_PASSWORD: minioadmin  # 直接指定 MinIO 密码
+      MINIO_BUCKET: little-bear-rag    # 直接指定 Bucket 名称
     entrypoint:
       - /bin/sh
       - -c
@@ -75,8 +76,8 @@ services:
     container_name: little-bear-qdrant
     restart: unless-stopped
     ports:
-      - "${QDRANT_HTTP_PORT:-6333}:6333"
-      - "${QDRANT_GRPC_PORT:-6334}:6334"
+      - "6333:6333"                   # 直接映射 HTTP 端口
+      - "6334:6334"                   # 直接映射 gRPC 端口
     volumes:
       - qdrant-data:/qdrant/storage
     healthcheck:
@@ -85,30 +86,43 @@ services:
       timeout: 3s
       retries: 20
 
-  model-gateway:
-    image: python:3.12-alpine
-    container_name: little-bear-model-gateway
+  # 仅用于演示的本地模型服务。
+  # 如果您已有外部嵌入/重排序提供程序，请移除这两个
+  # 服务，并将 active_config 中的 model_gateway.providers.*.base_url 指向
+  # 您在设置初始化期间使用的实际提供程序 URL。
+  tei-embedding:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: little-bear-tei-embedding
     restart: unless-stopped
-    working_dir: /app
-    command: ["python", "/app/tools/mock_model_gateway.py"]
+    command:
+      - --model-id
+      - sentence-transformers/all-MiniLM-L12-v2
+      - --served-model-name
+      - all-MiniLM-L12-v2
     ports:
-      - "${MODEL_GATEWAY_PORT:-8080}:8080"
+      - "8081:80"
     volumes:
-      - ./:/app:ro
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/internal/v1/model-health', timeout=2)",
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      - tei-embedding-data:/data
+
+  tei-rerank:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: little-bear-tei-rerank
+    restart: unless-stopped
+    command:
+      - --model-id
+      - BAAI/bge-reranker-base
+      - --served-model-name
+      - bge-reranker-base
+    ports:
+      - "8082:80"
+    volumes:
+      - tei-rerank-data:/data
 
 volumes:
   postgres-data:
   redis-data:
   minio-data:
   qdrant-data:
+  # 如果您已有外部嵌入/重排序提供程序，请移除这两个
+  tei-embedding-data:
+  tei-rerank-data:

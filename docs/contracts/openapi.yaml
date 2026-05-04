@@ -6,8 +6,9 @@ info:
     P0 OpenAPI contract for Little Bear RAG backend. The contract covers setup,
     authentication, organization, permission, knowledge base, document import,
     indexing operations, query, audit, healthcheck, config, and internal model
-    gateway APIs. P0 uses model mocks or a single model adapter and does not
-    include complete config approval or rollback workflows.
+    gateway APIs. P0 uses external embedding, rerank, and LLM provider
+    endpoints instead of built-in model simulators, and does not include complete
+    config approval or rollback workflows.
 
     Backend contract paths use /internal/v1. OpenAPI, backend routes, frontend
     SDKs, and contract tests should all use this path prefix consistently.
@@ -2382,24 +2383,46 @@ components:
           additionalProperties: true
     ModelGatewayConfig:
       type: object
-      required: [mode, base_url, routes, mock, healthcheck]
+      required: [mode, auth_token_ref, providers, routes, healthcheck]
       properties:
         mode:
           type: string
-          enum: [mock, single_adapter]
-        base_url:
-          type: string
+          enum: [external]
         auth_token_ref:
           type: [string, "null"]
-        routes:
+        providers:
           type: object
-          additionalProperties: true
-        mock:
+          required: [embedding, rerank, llm]
+          properties:
+            embedding:
+              $ref: "#/components/schemas/ModelProviderConfig"
+            rerank:
+              $ref: "#/components/schemas/ModelProviderConfig"
+            llm:
+              $ref: "#/components/schemas/ModelProviderConfig"
+        routes:
           type: object
           additionalProperties: true
         healthcheck:
           type: object
           additionalProperties: true
+    ModelProviderConfig:
+      type: object
+      required: [type, base_url, healthcheck_path]
+      properties:
+        type:
+          type: string
+          enum: [tei, openai_compatible, http]
+        base_url:
+          type: string
+        healthcheck_path:
+          type: string
+        embeddings_path:
+          type: string
+        rerank_path:
+          type: string
+        chat_completions_path:
+          type: string
     ModelConfig:
       type: object
       required:

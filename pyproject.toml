@@ -33,5 +33,5 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["apps/api", "apps/worker", "apps/model-gateway"]
+pythonpath = ["apps/api", "apps/worker"]
 asyncio_mode = "auto"

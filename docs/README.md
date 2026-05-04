@@ -59,7 +59,7 @@
 | [07-索引服务设计实现文档.md](modules/07-索引服务设计实现文档.md) | 向量索引、关键词索引、索引版本、发布与回滚 |
 | [08-查询服务设计实现文档.md](modules/08-查询服务设计实现文档.md) | 查询 API、请求上下文、限流、流式响应 |
 | [09-检索上下文与答案生成设计实现文档.md](modules/09-检索上下文与答案生成设计实现文档.md) | rewrite、召回、融合、rerank、上下文、答案生成 |
-| [10-模型网关设计实现文档.md](modules/10-模型网关设计实现文档.md) | Embedding、Rerank、LLM 统一模型网关 |
+| [10-模型网关设计实现文档.md](modules/10-模型网关设计实现文档.md) | Embedding、Rerank、LLM 统一 Provider Adapter |
 | [11-审计与可观测性设计实现文档.md](modules/11-审计与可观测性设计实现文档.md) | 日志、审计、指标、Trace、质量评测 |
 | [12-接口网关与高并发设计实现文档.md](modules/12-接口网关与高并发设计实现文档.md) | 请求入口、限流、超时、降级、缓存 |
 | [13-部署与运维设计实现文档.md](modules/13-部署与运维设计实现文档.md) | Docker Compose 部署、容量规划、备份、上线检查 |
@@ -77,7 +77,7 @@
 ## 实施约定
 
 - 最小生产阶段采用模块化单体 + 轻量导入 Worker。
-- API、Worker 和 Model Gateway 管理进程的启动配置只包含数据库连接内容，业务配置全部来自初始化接口发布后的 active config。
+- API、Worker 和模型 Provider Adapter 进程的启动配置只包含数据库连接内容，业务配置全部来自初始化接口发布后的 active config。
 - Redis、Secret Provider、MinIO、Qdrant、模型服务和业务策略都从数据库 active config 读取。
 - 未初始化时只开放 setup 状态和初始化接口，普通业务 API 必须返回 `SETUP_REQUIRED`。
 - 权限过滤必须下推到向量检索和关键词检索，禁止全量召回后再做应用层过滤。

@@ -34,6 +34,16 @@ type FieldOption = {
   value: string;
 };
 
+type Tone = "success" | "error" | "warning" | "neutral";
+type LocalIssueTone = "error" | "warning";
+
+type LocalValidationIssue = {
+  field?: keyof SetupFormModel;
+  section: string;
+  tone: LocalIssueTone;
+  message: string;
+};
+
 type FieldDefinition = {
   key: keyof SetupFormModel;
   label: string;
@@ -43,6 +53,7 @@ type FieldDefinition = {
   step?: number;
   span?: "full" | "half";
   options?: FieldOption[];
+  required?: boolean;
 };
 
 type FieldSection = {
@@ -62,8 +73,9 @@ const busy = reactive({
 const setupState = ref<SetupStateData | null>(null);
 const validationResult = ref<SetupValidationData | null>(null);
 const initializationResult = ref<SetupInitializationData | null>(null);
-const feedback = ref<{ tone: "success" | "error" | "neutral"; message: string } | null>(null);
+const feedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
 const submitConfirmed = ref(false);
+const lastValidatedPayload = ref<string | null>(null);
 
 const statusLabels: Record<string, string> = {
   not_initialized: "未初始化",
@@ -86,10 +98,11 @@ const accessSection: FieldSection = {
   fields: [
     {
       key: "setupToken",
-      label: "Setup Token",
+      label: "初始化令牌",
       input: "password",
-      placeholder: "可选，后端接入 setup JWT 后填写",
+      placeholder: "从后端启动日志复制初始化令牌（JWT）",
       span: "full",
+      required: true,
     },
   ],
 };
@@ -97,9 +110,9 @@ const accessSection: FieldSection = {
 const adminSection: FieldSection = {
   title: "首个管理员",
   fields: [
-    { key: "adminUsername", label: "登录名", input: "text" },
-    { key: "adminDisplayName", label: "显示名", input: "text" },
-    { key: "adminPassword", label: "初始密码", input: "password" },
+    { key: "adminUsername", label: "登录名", input: "text", required: true },
+    { key: "adminDisplayName", label: "显示名", input: "text", required: true },
+    { key: "adminPassword", label: "初始密码", input: "password", required: true },
     { key: "adminEmail", label: "邮箱", input: "email" },
     { key: "adminPhone", label: "手机号", input: "text" },
   ],
@@ -108,34 +121,53 @@ const adminSection: FieldSection = {
 const organizationSection: FieldSection = {
   title: "组织初始化",
   fields: [
-    { key: "enterpriseName", label: "企业名称", input: "text" },
-    { key: "enterpriseCode", label: "企业编码", input: "text" },
-    { key: "departmentName", label: "默认部门名称", input: "text" },
-    { key: "departmentCode", label: "默认部门编码", input: "text" },
+    { key: "enterpriseName", label: "企业名称", input: "text", required: true },
+    { key: "enterpriseCode", label: "企业编码", input: "text", required: true },
+    { key: "departmentName", label: "默认部门名称", input: "text", required: true },
+    { key: "departmentCode", label: "默认部门编码", input: "text", required: true },
   ],
 };
 
 const infraSection: FieldSection = {
   title: "基础设施",
   fields: [
-    { key: "secretProviderEndpoint", label: "Secret Provider Endpoint", input: "text", span: "full" },
-    { key: "redisUrl", label: "Redis URL", input: "text", span: "full" },
-    { key: "minioEndpoint", label: "MinIO Endpoint", input: "text" },
-    { key: "minioBucket", label: "Bucket", input: "text" },
-    { key: "minioRegion", label: "Region", input: "text" },
-    { key: "objectKeyPrefix", label: "Object Prefix", input: "text" },
-    { key: "minioAccessKeyRef", label: "MinIO Access Key Ref", input: "text", span: "full" },
-    { key: "minioSecretKeyRef", label: "MinIO Secret Key Ref", input: "text", span: "full" },
-    { key: "qdrantBaseUrl", label: "Qdrant URL", input: "text" },
-    { key: "collectionPrefix", label: "Collection Prefix", input: "text" },
+    {
+      key: "secretProviderEndpoint",
+      label: "密钥服务地址",
+      input: "text",
+      span: "full",
+      required: true,
+    },
+    { key: "redisUrl", label: "Redis 地址", input: "text", span: "full", required: true },
+    { key: "minioEndpoint", label: "MinIO 地址", input: "text", required: true },
+    { key: "minioBucket", label: "存储桶名称", input: "text", required: true },
+    { key: "minioRegion", label: "存储区域", input: "text", required: true },
+    { key: "objectKeyPrefix", label: "对象路径前缀", input: "text", required: true },
+    {
+      key: "minioAccessKeyRef",
+      label: "MinIO 访问密钥引用",
+      input: "text",
+      span: "full",
+      required: true,
+    },
+    {
+      key: "minioSecretKeyRef",
+      label: "MinIO 私有密钥引用",
+      input: "text",
+      span: "full",
+      required: true,
+    },
+    { key: "qdrantBaseUrl", label: "Qdrant 地址", input: "text", required: true },
+    { key: "collectionPrefix", label: "向量集合前缀", input: "text", required: true },
     {
       key: "vectorDistance",
       label: "向量距离",
       input: "select",
+      required: true,
       options: [
-        { label: "cosine", value: "cosine" },
-        { label: "dot", value: "dot" },
-        { label: "euclid", value: "euclid" },
+        { label: "余弦距离", value: "cosine" },
+        { label: "点积距离", value: "dot" },
+        { label: "欧氏距离", value: "euclid" },
       ],
     },
   ],
@@ -146,49 +178,84 @@ const modelSection: FieldSection = {
   fields: [
     {
       key: "modelGatewayMode",
-      label: "网关模式",
+      label: "模型服务模式",
       input: "select",
-      options: [{ label: "mock", value: "mock" }],
+      required: true,
+      options: [{ label: "外部服务", value: "external" }],
     },
-    { key: "modelGatewayBaseUrl", label: "Model Gateway URL", input: "text", span: "full" },
-    { key: "embeddingDimension", label: "Embedding 维度", input: "number", min: 1, step: 1 },
-    { key: "embeddingModel", label: "Embedding 模型", input: "text" },
-    { key: "rerankModel", label: "Rerank 模型", input: "text" },
-    { key: "llmModel", label: "主 LLM 模型", input: "text" },
-    { key: "llmFallbackModel", label: "回退 LLM 模型", input: "text" },
-    { key: "keywordLanguage", label: "关键词语言", input: "text" },
-    { key: "keywordAnalyzer", label: "分词器", input: "text" },
-    { key: "vectorTopK", label: "向量 Top K", input: "number", min: 1, step: 1 },
-    { key: "keywordTopK", label: "关键词 Top K", input: "number", min: 1, step: 1 },
-    { key: "rerankInputTopK", label: "Rerank 输入 Top K", input: "number", min: 1, step: 1 },
-    { key: "finalContextTopK", label: "最终上下文 Top K", input: "number", min: 1, step: 1 },
-    { key: "maxContextTokens", label: "最大上下文 Token", input: "number", min: 1, step: 1 },
+    {
+      key: "embeddingProviderBaseUrl",
+      label: "向量模型服务地址",
+      input: "text",
+      span: "full",
+      required: true,
+    },
+    {
+      key: "rerankProviderBaseUrl",
+      label: "重排模型服务地址",
+      input: "text",
+      span: "full",
+      required: true,
+    },
+    {
+      key: "llmProviderBaseUrl",
+      label: "大模型服务地址",
+      input: "text",
+      span: "full",
+      required: true,
+    },
+    { key: "embeddingDimension", label: "向量维度", input: "number", min: 1, step: 1, required: true },
+    { key: "embeddingModel", label: "向量模型", input: "text", required: true },
+    { key: "rerankModel", label: "重排模型", input: "text", required: true },
+    { key: "llmModel", label: "主大模型", input: "text", required: true },
+    { key: "llmFallbackModel", label: "回退大模型", input: "text", required: true },
+    { key: "keywordLanguage", label: "关键词语言", input: "text", required: true },
+    { key: "keywordAnalyzer", label: "分词器", input: "text", required: true },
+    { key: "vectorTopK", label: "向量召回数量", input: "number", min: 1, step: 1 },
+    { key: "keywordTopK", label: "关键词召回数量", input: "number", min: 1, step: 1 },
+    { key: "rerankInputTopK", label: "重排输入数量", input: "number", min: 1, step: 1 },
+    { key: "finalContextTopK", label: "最终上下文数量", input: "number", min: 1, step: 1 },
+    { key: "maxContextTokens", label: "最大上下文 Token 数", input: "number", min: 1, step: 1 },
   ],
 };
 
 const policySection: FieldSection = {
   title: "认证与运行策略",
   fields: [
-    { key: "passwordMinLength", label: "密码最小长度", input: "number", min: 8, step: 1 },
-    { key: "accessTokenTtlMinutes", label: "Access Token TTL", input: "number", min: 1, step: 1 },
-    { key: "refreshTokenTtlMinutes", label: "Refresh Token TTL", input: "number", min: 1, step: 1 },
-    { key: "jwtIssuer", label: "JWT Issuer", input: "text" },
-    { key: "jwtAudience", label: "JWT Audience", input: "text" },
-    { key: "jwtSigningKeyRef", label: "JWT Signing Key Ref", input: "text", span: "full" },
+    { key: "passwordMinLength", label: "密码最小长度", input: "number", min: 8, step: 1, required: true },
+    {
+      key: "accessTokenTtlMinutes",
+      label: "访问令牌有效期（分钟）",
+      input: "number",
+      min: 1,
+      step: 1,
+      required: true,
+    },
+    {
+      key: "refreshTokenTtlMinutes",
+      label: "刷新令牌有效期（分钟）",
+      input: "number",
+      min: 1,
+      step: 1,
+      required: true,
+    },
+    { key: "jwtIssuer", label: "JWT 签发方", input: "text", required: true },
+    { key: "jwtAudience", label: "JWT 受众", input: "text", required: true },
+    { key: "jwtSigningKeyRef", label: "JWT 签名密钥引用", input: "text", span: "full", required: true },
     { key: "maxFileMb", label: "文件大小上限 MB", input: "number", min: 1, step: 1 },
     { key: "maxConcurrentJobs", label: "最大并发任务数", input: "number", min: 1, step: 1 },
-    { key: "embeddingBatchSize", label: "Embedding Batch Size", input: "number", min: 1, step: 1 },
-    { key: "indexBatchSize", label: "Index Batch Size", input: "number", min: 1, step: 1 },
-    { key: "queryQpsPerUser", label: "单用户 Query QPS", input: "number", min: 1, step: 1 },
+    { key: "embeddingBatchSize", label: "向量化批大小", input: "number", min: 1, step: 1 },
+    { key: "indexBatchSize", label: "索引写入批大小", input: "number", min: 1, step: 1 },
+    { key: "queryQpsPerUser", label: "单用户查询 QPS", input: "number", min: 1, step: 1 },
     { key: "auditRetentionDays", label: "审计保留天数", input: "number", min: 1, step: 1 },
     {
       key: "auditQueryTextMode",
       label: "查询文本记录方式",
       input: "select",
       options: [
-        { label: "hash", value: "hash" },
-        { label: "masked", value: "masked" },
-        { label: "plain", value: "plain" },
+        { label: "不记录", value: "none" },
+        { label: "仅记录哈希", value: "hash" },
+        { label: "记录明文", value: "plain" },
       ],
     },
   ],
@@ -216,13 +283,53 @@ const sections = [
 
 const payload = computed(() => buildSetupPayload(form));
 const payloadPreview = computed(() => JSON.stringify(payload.value, null, 2));
+const payloadSignature = computed(() => payloadPreview.value);
+const localValidationIssues = computed(() => validateLocalForm(form, setupState.value));
+const localBlockingIssues = computed(() =>
+  localValidationIssues.value.filter((issue) => issue.tone === "error"),
+);
+const localWarningIssues = computed(() =>
+  localValidationIssues.value.filter((issue) => issue.tone === "warning"),
+);
+const localChecksPassed = computed(() => localBlockingIssues.value.length === 0);
+const backendValidationFresh = computed(
+  () => validationResult.value?.valid === true && lastValidatedPayload.value === payloadSignature.value,
+);
+const setupWritable = computed(
+  () => !(setupState.value?.initialized ?? false) || setupState.value?.recovery_setup_allowed === true,
+);
+const fieldIssueMap = computed(() => {
+  const result = new Map<keyof SetupFormModel, LocalValidationIssue[]>();
+  for (const issue of localValidationIssues.value) {
+    if (!issue.field) {
+      continue;
+    }
+    const issues = result.get(issue.field) ?? [];
+    issues.push(issue);
+    result.set(issue.field, issues);
+  }
+  return result;
+});
+const sectionCheckItems = computed<Array<{ title: string; errors: number; warnings: number; tone: Tone }>>(() =>
+  sections.map((section) => {
+    const issues = localValidationIssues.value.filter((issue) => issue.section === section.title);
+    const errors = issues.filter((issue) => issue.tone === "error").length;
+    const warnings = issues.filter((issue) => issue.tone === "warning").length;
+    return {
+      title: section.title,
+      errors,
+      warnings,
+      tone: errors > 0 ? "error" : warnings > 0 ? "warning" : "success",
+    };
+  }),
+);
 const statusLabel = computed(() => {
   if (!setupState.value) {
     return "状态未知";
   }
   return statusLabels[setupState.value.setup_status] ?? setupState.value.setup_status;
 });
-const statusTone = computed(() => {
+const statusTone = computed<Tone>(() => {
   if (!setupState.value) {
     return "neutral";
   }
@@ -234,25 +341,81 @@ const statusTone = computed(() => {
   }
   return "warning";
 });
-const canValidate = computed(() => !busy.validating && !busy.submitting);
+const recoveryMode = computed(() => setupState.value?.recovery_setup_allowed === true);
+const canValidate = computed(
+  () => !busy.validating && !busy.submitting && localChecksPassed.value && setupWritable.value,
+);
 const canSubmit = computed(() => {
   return (
     !busy.submitting &&
     !busy.validating &&
     submitConfirmed.value &&
-    !(setupState.value?.initialized ?? false)
+    setupWritable.value &&
+    localChecksPassed.value &&
+    backendValidationFresh.value
   );
+});
+const validationGateMessage = computed(() => {
+  if (!setupWritable.value) {
+    return "当前系统已初始化，初始化写接口应保持关闭。";
+  }
+  if (!localChecksPassed.value) {
+    return `还有 ${localBlockingIssues.value.length} 个本地阻断项需要处理。`;
+  }
+  if (backendValidationFresh.value) {
+    return "后端配置校验已通过，且请求体未变化。";
+  }
+  if (validationResult.value?.valid === true) {
+    return "请求体已变化，需要重新执行配置校验。";
+  }
+  return "本地核查通过后，先执行后端配置校验。";
+});
+const flowItems = computed<Array<{ label: string; value: string; tone: Tone }>>(() => [
+  {
+    label: "初始化令牌",
+    value: form.setupToken.trim() ? "已填写" : "缺失",
+    tone: form.setupToken.trim() ? "success" : "error",
+  },
+  {
+    label: "本地核查",
+    value: localChecksPassed.value ? "通过" : `${localBlockingIssues.value.length} 个阻断项`,
+    tone: localChecksPassed.value ? "success" : "error",
+  },
+  {
+    label: "后端校验",
+    value: backendValidationFresh.value ? "通过" : "待校验",
+    tone: backendValidationFresh.value ? "success" : "neutral",
+  },
+  {
+    label: "初始化提交",
+    value: canSubmit.value ? "可提交" : "受控",
+    tone: canSubmit.value ? "success" : "neutral",
+  },
+]);
+const submitConfirmationText = computed(() =>
+  recoveryMode.value ? "确认恢复当前生效配置" : "确认写入首个管理员、默认组织和当前生效配置",
+);
+const submitButtonText = computed(() => {
+  if (busy.submitting) {
+    return "提交中...";
+  }
+  return recoveryMode.value ? "执行恢复初始化" : "执行初始化";
 });
 const summaryItems = computed(() => [
   { label: "企业编码", value: form.enterpriseCode },
   { label: "默认部门", value: form.departmentCode },
   { label: "配置版本", value: "1" },
-  { label: "Embedding 维度", value: String(form.embeddingDimension) },
-  { label: "Model Gateway", value: form.modelGatewayBaseUrl },
-  { label: "Qdrant", value: form.qdrantBaseUrl },
+  { label: "向量维度", value: String(form.embeddingDimension) },
+  { label: "向量模型服务", value: form.embeddingProviderBaseUrl },
+  { label: "重排模型服务", value: form.rerankProviderBaseUrl },
+  { label: "大模型服务", value: form.llmProviderBaseUrl },
+  { label: "向量库", value: form.qdrantBaseUrl },
 ]);
 
 onMounted(async () => {
+  if (window.location.pathname === "/admin" || window.location.pathname === "/admin/") {
+    window.history.replaceState(null, "", "/admin/setup-initialization");
+  }
   await refreshState();
 });
 
@@ -273,10 +436,18 @@ async function refreshState(): Promise<void> {
 }
 
 async function runValidation(): Promise<void> {
+  if (!canValidate.value) {
+    feedback.value = {
+      tone: "error",
+      message: validationGateMessage.value,
+    };
+    return;
+  }
   busy.validating = true;
   try {
     const response = await validateSetupConfig(payload.value, form.setupToken || undefined);
     validationResult.value = response.data;
+    lastValidatedPayload.value = response.data.valid ? payloadSignature.value : null;
     feedback.value = {
       tone: response.data.valid ? "success" : "error",
       message: response.data.valid ? "配置校验通过" : "配置校验未通过",
@@ -284,6 +455,7 @@ async function runValidation(): Promise<void> {
     await refreshState();
   } catch (error) {
     validationResult.value = null;
+    lastValidatedPayload.value = null;
     feedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "配置校验失败"),
@@ -294,6 +466,13 @@ async function runValidation(): Promise<void> {
 }
 
 async function runInitialization(): Promise<void> {
+  if (!canSubmit.value) {
+    feedback.value = {
+      tone: "error",
+      message: validationGateMessage.value,
+    };
+    return;
+  }
   busy.submitting = true;
   try {
     const response = await initializeSetup(payload.value, form.setupToken || undefined);
@@ -318,6 +497,7 @@ async function runInitialization(): Promise<void> {
 function resetForm(): void {
   Object.assign(form, createDefaultSetupForm());
   validationResult.value = null;
+  lastValidatedPayload.value = null;
   initializationResult.value = null;
   feedback.value = {
     tone: "neutral",
@@ -377,7 +557,41 @@ function setFormValue<K extends keyof SetupFormModel>(key: K, value: SetupFormMo
   form[key] = value;
 }
 
-function toneClass(tone: "success" | "error" | "warning" | "neutral"): string {
+function fieldIssues(key: keyof SetupFormModel): LocalValidationIssue[] {
+  return fieldIssueMap.value.get(key) ?? [];
+}
+
+function hasFieldError(key: keyof SetupFormModel): boolean {
+  return fieldIssues(key).some((issue) => issue.tone === "error");
+}
+
+function hasFieldWarning(key: keyof SetupFormModel): boolean {
+  return fieldIssues(key).some((issue) => issue.tone === "warning");
+}
+
+function sectionToneText(item: { errors: number; warnings: number }): string {
+  if (item.errors > 0) {
+    return `${item.errors} 阻断`;
+  }
+  if (item.warnings > 0) {
+    return `${item.warnings} 提醒`;
+  }
+  return "通过";
+}
+
+function issueToneText(tone: LocalIssueTone): string {
+  return tone === "error" ? "阻断" : "提醒";
+}
+
+function formatBoolean(value: boolean): string {
+  return value ? "是" : "否";
+}
+
+function formatSetupStatus(status: string): string {
+  return statusLabels[status] ?? `未知状态（${status}）`;
+}
+
+function toneClass(tone: Tone): string {
   return `tone tone--${tone}`;
 }
 
@@ -395,13 +609,207 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   }
   return fallback;
 }
+
+function validateLocalForm(
+  current: SetupFormModel,
+  currentSetupState: SetupStateData | null,
+): LocalValidationIssue[] {
+  const issues: LocalValidationIssue[] = [];
+  const add = (
+    tone: LocalIssueTone,
+    section: string,
+    message: string,
+    field?: keyof SetupFormModel,
+  ) => {
+    issues.push({ tone, section, message, field });
+  };
+
+  if (currentSetupState?.initialized && currentSetupState.recovery_setup_allowed !== true) {
+    add("error", "访问凭证", "系统已初始化，不能再次提交初始化。");
+  }
+  if (!current.setupToken.trim()) {
+    add("error", "访问凭证", "必须填写启动日志中打印的初始化 JWT。", "setupToken");
+  } else if (!looksLikeJwt(current.setupToken)) {
+    add("warning", "访问凭证", "初始化令牌不是标准 JWT 三段格式。", "setupToken");
+  }
+
+  if (!/^[A-Za-z0-9._-]{3,64}$/.test(current.adminUsername)) {
+    add("error", "首个管理员", "登录名只能包含字母、数字、点、下划线或连字符，长度 3 到 64。", "adminUsername");
+  }
+  if (!current.adminDisplayName.trim()) {
+    add("error", "首个管理员", "管理员显示名不能为空。", "adminDisplayName");
+  }
+  if (current.adminPassword.length < current.passwordMinLength) {
+    add("error", "首个管理员", "初始密码长度不能小于密码策略。", "adminPassword");
+  }
+  if (!/[A-Z]/.test(current.adminPassword) || !/[a-z]/.test(current.adminPassword) || !/\d/.test(current.adminPassword)) {
+    add("error", "首个管理员", "初始密码必须同时包含大写字母、小写字母和数字。", "adminPassword");
+  }
+  if (current.adminPassword === "ChangeMe_123456") {
+    add("warning", "首个管理员", "当前仍是本地默认密码。", "adminPassword");
+  }
+  if (current.adminEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(current.adminEmail)) {
+    add("error", "首个管理员", "邮箱格式不合法。", "adminEmail");
+  }
+  if (current.adminPhone.length > 32) {
+    add("error", "首个管理员", "手机号长度不能超过 32。", "adminPhone");
+  }
+
+  validateRequiredCode(current.enterpriseCode, "企业编码", "enterpriseCode", "组织初始化", add);
+  validateRequiredCode(current.departmentCode, "默认部门编码", "departmentCode", "组织初始化", add);
+  if (!current.enterpriseName.trim()) {
+    add("error", "组织初始化", "企业名称不能为空。", "enterpriseName");
+  }
+  if (!current.departmentName.trim()) {
+    add("error", "组织初始化", "默认部门名称不能为空。", "departmentName");
+  }
+
+  if (!current.secretProviderEndpoint.trim()) {
+    add("error", "基础设施", "密钥服务地址不能为空。", "secretProviderEndpoint");
+  }
+  if (!current.redisUrl.startsWith("redis://")) {
+    add("error", "基础设施", "Redis 地址必须以 redis:// 开头。", "redisUrl");
+  }
+  validateHttpUrl(current.minioEndpoint, "MinIO 地址", "minioEndpoint", "基础设施", add);
+  validateHttpUrl(current.qdrantBaseUrl, "Qdrant 地址", "qdrantBaseUrl", "基础设施", add);
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(current.minioBucket)) {
+    add("error", "基础设施", "存储桶名称需符合 S3 命名规则。", "minioBucket");
+  }
+  if (!current.minioRegion.trim()) {
+    add("error", "基础设施", "存储区域不能为空。", "minioRegion");
+  }
+  if (current.objectKeyPrefix.startsWith("/")) {
+    add("error", "基础设施", "对象路径前缀不能以 / 开头。", "objectKeyPrefix");
+  }
+  if (!current.objectKeyPrefix.endsWith("/")) {
+    add("warning", "基础设施", "对象路径前缀建议以 / 结尾。", "objectKeyPrefix");
+  }
+  validateSecretRef(current.minioAccessKeyRef, "MinIO 访问密钥引用", "minioAccessKeyRef", "基础设施", add);
+  validateSecretRef(current.minioSecretKeyRef, "MinIO 私有密钥引用", "minioSecretKeyRef", "基础设施", add);
+  validateCollectionPrefix(current.collectionPrefix, add);
+
+  if (current.modelGatewayMode !== "external") {
+    add("error", "模型与检索", "模型服务模式必须为外部服务。", "modelGatewayMode");
+  }
+  validateHttpUrl(current.embeddingProviderBaseUrl, "向量模型服务地址", "embeddingProviderBaseUrl", "模型与检索", add);
+  validateHttpUrl(current.rerankProviderBaseUrl, "重排模型服务地址", "rerankProviderBaseUrl", "模型与检索", add);
+  validateHttpUrl(current.llmProviderBaseUrl, "大模型服务地址", "llmProviderBaseUrl", "模型与检索", add);
+  if (isComposeDemoProvider(current.embeddingProviderBaseUrl) || isComposeDemoProvider(current.rerankProviderBaseUrl)) {
+    add("warning", "模型与检索", "当前 TEI 容器服务仅适合本地演示，生产应替换为真实模型服务。");
+  }
+  if (!Number.isInteger(current.embeddingDimension) || current.embeddingDimension <= 0) {
+    add("error", "模型与检索", "向量维度必须是正整数。", "embeddingDimension");
+  }
+  validateNonEmpty(current.embeddingModel, "向量模型", "embeddingModel", "模型与检索", add);
+  validateNonEmpty(current.rerankModel, "重排模型", "rerankModel", "模型与检索", add);
+  validateNonEmpty(current.llmModel, "主大模型", "llmModel", "模型与检索", add);
+  validateNonEmpty(current.llmFallbackModel, "回退大模型", "llmFallbackModel", "模型与检索", add);
+  if (current.finalContextTopK > current.rerankInputTopK) {
+    add("error", "模型与检索", "最终上下文数量不能大于重排输入数量。", "finalContextTopK");
+  }
+  if (current.rerankInputTopK > current.vectorTopK + current.keywordTopK) {
+    add("warning", "模型与检索", "重排输入数量大于向量和关键词召回总量。", "rerankInputTopK");
+  }
+
+  if (current.passwordMinLength < 12) {
+    add("warning", "认证与运行策略", "生产环境建议密码最小长度不低于 12。", "passwordMinLength");
+  }
+  if (current.refreshTokenTtlMinutes <= current.accessTokenTtlMinutes) {
+    add("error", "认证与运行策略", "刷新令牌有效期必须大于访问令牌有效期。", "refreshTokenTtlMinutes");
+  }
+  validateNonEmpty(current.jwtIssuer, "JWT 签发方", "jwtIssuer", "认证与运行策略", add);
+  validateNonEmpty(current.jwtAudience, "JWT 受众", "jwtAudience", "认证与运行策略", add);
+  validateSecretRef(current.jwtSigningKeyRef, "JWT 签名密钥引用", "jwtSigningKeyRef", "认证与运行策略", add);
+  if (current.auditQueryTextMode === "plain") {
+    add("warning", "认证与运行策略", "记录明文会保存查询原文，需确认审计和隐私策略。", "auditQueryTextMode");
+  }
+
+  if (current.finalAnswerEnabled) {
+    add("warning", "缓存开关", "最终答案缓存会放大权限变更后的风险，P0 默认应关闭。", "finalAnswerEnabled");
+  }
+  if (current.crossUserFinalAnswerAllowed) {
+    add("error", "缓存开关", "不允许跨用户复用最终答案缓存。", "crossUserFinalAnswerAllowed");
+  }
+
+  return issues;
+}
+
+function validateRequiredCode(
+  value: string,
+  label: string,
+  field: keyof SetupFormModel,
+  section: string,
+  add: (tone: LocalIssueTone, section: string, message: string, field?: keyof SetupFormModel) => void,
+): void {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(value)) {
+    add("error", section, `${label}只能包含字母、数字、下划线或连字符，长度 1 到 64。`, field);
+  }
+}
+
+function validateHttpUrl(
+  value: string,
+  label: string,
+  field: keyof SetupFormModel,
+  section: string,
+  add: (tone: LocalIssueTone, section: string, message: string, field?: keyof SetupFormModel) => void,
+): void {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      add("error", section, `${label} 必须使用 http:// 或 https://。`, field);
+    }
+  } catch {
+    add("error", section, `${label} 不是合法 URL。`, field);
+  }
+}
+
+function validateSecretRef(
+  value: string,
+  label: string,
+  field: keyof SetupFormModel,
+  section: string,
+  add: (tone: LocalIssueTone, section: string, message: string, field?: keyof SetupFormModel) => void,
+): void {
+  if (!/^secret:\/\/rag\/[A-Za-z0-9._-]+\/[A-Za-z0-9._/-]+$/.test(value)) {
+    add("error", section, `${label} 必须使用 secret://rag/... 引用。`, field);
+  }
+}
+
+function validateCollectionPrefix(
+  value: string,
+  add: (tone: LocalIssueTone, section: string, message: string, field?: keyof SetupFormModel) => void,
+): void {
+  if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) {
+    add("error", "基础设施", "向量集合前缀必须以字母开头，只能包含字母、数字、下划线或连字符。", "collectionPrefix");
+  }
+}
+
+function validateNonEmpty(
+  value: string,
+  label: string,
+  field: keyof SetupFormModel,
+  section: string,
+  add: (tone: LocalIssueTone, section: string, message: string, field?: keyof SetupFormModel) => void,
+): void {
+  if (!value.trim()) {
+    add("error", section, `${label}不能为空。`, field);
+  }
+}
+
+function looksLikeJwt(value: string): boolean {
+  return value.split(".").length === 3;
+}
+
+function isComposeDemoProvider(value: string): boolean {
+  return value.includes("tei-embedding") || value.includes("tei-rerank");
+}
 </script>
 
 <template>
   <main class="shell">
     <aside class="sidebar">
       <div class="sidebar__block">
-        <p class="brand">Little Bear Admin</p>
+        <p class="brand">Little Bear 管理后台</p>
         <h1 class="title">首次初始化配置</h1>
         <p :class="toneClass(statusTone)">{{ statusLabel }}</p>
       </div>
@@ -414,6 +822,24 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
             <dd>{{ item.value }}</dd>
           </div>
         </dl>
+      </div>
+
+      <div class="sidebar__block">
+        <h2 class="section-title">本地核查</h2>
+        <div class="check-counter">
+          <span :class="toneClass(localChecksPassed ? 'success' : 'error')">
+            {{ localChecksPassed ? "可校验" : `${localBlockingIssues.length} 阻断` }}
+          </span>
+          <span :class="toneClass(localWarningIssues.length ? 'warning' : 'neutral')">
+            {{ localWarningIssues.length }} 提醒
+          </span>
+        </div>
+        <ul class="section-checks">
+          <li v-for="item in sectionCheckItems" :key="item.title">
+            <span>{{ item.title }}</span>
+            <span :class="toneClass(item.tone)">{{ sectionToneText(item) }}</span>
+          </li>
+        </ul>
       </div>
 
       <div class="sidebar__block">
@@ -435,19 +861,29 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
     <section class="workspace">
       <header class="toolbar">
         <div>
-          <p class="eyebrow">/admin</p>
-          <h2>Setup Initialization Workspace</h2>
+          <p class="eyebrow">/admin/setup-initialization</p>
+          <h2>初始化配置工作台</h2>
         </div>
         <div v-if="feedback" :class="['feedback', `feedback--${feedback.tone}`]">
           {{ feedback.message }}
         </div>
       </header>
 
+      <section class="flow-strip">
+        <div v-for="item in flowItems" :key="item.label" class="flow-step">
+          <span>{{ item.label }}</span>
+          <strong :class="toneClass(item.tone)">{{ item.value }}</strong>
+        </div>
+      </section>
+
       <div class="content-grid">
         <section class="editor">
           <section v-for="section in sections" :key="section.title" class="panel">
             <header class="panel__header">
               <h3>{{ section.title }}</h3>
+              <span :class="toneClass(sectionCheckItems.find((item) => item.title === section.title)?.tone ?? 'neutral')">
+                {{ sectionToneText(sectionCheckItems.find((item) => item.title === section.title) ?? { errors: 0, warnings: 0 }) }}
+              </span>
             </header>
             <div class="form-grid">
               <label
@@ -457,6 +893,8 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
                 :class="{
                   'field--full': field.span === 'full',
                   'field--checkbox': field.input === 'checkbox',
+                  'field--error': hasFieldError(field.key),
+                  'field--warning': hasFieldWarning(field.key),
                 }"
               >
                 <template v-if="field.input === 'checkbox'">
@@ -470,7 +908,10 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
                 </template>
 
                 <template v-else>
-                  <span class="field__label">{{ field.label }}</span>
+                  <span class="field__label">
+                    {{ field.label }}
+                    <span v-if="field.required" class="required-mark">必填</span>
+                  </span>
                   <select
                     v-if="field.input === 'select'"
                     class="control"
@@ -494,6 +935,15 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
                     "
                   />
                 </template>
+                <ul v-if="fieldIssues(field.key).length" class="field-issues">
+                  <li
+                    v-for="issue in fieldIssues(field.key)"
+                    :key="`${issue.tone}-${issue.message}`"
+                    :class="`field-issue field-issue--${issue.tone}`"
+                  >
+                    {{ issue.message }}
+                  </li>
+                </ul>
               </label>
             </div>
           </section>
@@ -509,32 +959,36 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
         <aside class="rail">
           <section class="panel">
             <header class="panel__header">
-              <h3>Setup State</h3>
+              <h3>初始化状态</h3>
             </header>
             <dl v-if="setupState" class="summary">
               <div class="summary__row">
-                <dt>initialized</dt>
-                <dd>{{ String(setupState.initialized) }}</dd>
+                <dt>是否已初始化</dt>
+                <dd>{{ formatBoolean(setupState.initialized) }}</dd>
               </div>
               <div class="summary__row">
-                <dt>setup_status</dt>
-                <dd>{{ setupState.setup_status }}</dd>
+                <dt>初始化状态</dt>
+                <dd>{{ formatSetupStatus(setupState.setup_status) }}</dd>
               </div>
               <div class="summary__row">
-                <dt>active_config_version</dt>
+                <dt>当前配置版本</dt>
                 <dd>{{ setupState.active_config_version ?? "-" }}</dd>
               </div>
               <div class="summary__row">
-                <dt>setup_required</dt>
-                <dd>{{ String(setupState.setup_required) }}</dd>
+                <dt>需要初始化</dt>
+                <dd>{{ formatBoolean(setupState.setup_required) }}</dd>
               </div>
               <div class="summary__row">
-                <dt>active_config_present</dt>
-                <dd>{{ String(setupState.active_config_present) }}</dd>
+                <dt>配置是否存在</dt>
+                <dd>{{ formatBoolean(setupState.active_config_present) }}</dd>
               </div>
               <div class="summary__row">
-                <dt>recovery_setup_allowed</dt>
-                <dd>{{ String(setupState.recovery_setup_allowed) }}</dd>
+                <dt>允许恢复初始化</dt>
+                <dd>{{ formatBoolean(setupState.recovery_setup_allowed) }}</dd>
+              </div>
+              <div class="summary__row">
+                <dt>恢复原因</dt>
+                <dd>{{ setupState.recovery_reason ?? "-" }}</dd>
               </div>
             </dl>
             <p v-else class="empty-state">尚未获取状态。</p>
@@ -542,11 +996,27 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
 
           <section class="panel">
             <header class="panel__header">
-              <h3>校验结果</h3>
+              <h3>本地核查与后端校验</h3>
             </header>
+            <div class="result-block">
+              <p :class="toneClass(localChecksPassed ? 'success' : 'error')">
+                {{ localChecksPassed ? "本地核查通过" : "本地核查未通过" }}
+              </p>
+              <ul v-if="localValidationIssues.length" class="issue-list">
+                <li
+                  v-for="issue in localValidationIssues"
+                  :key="`${issue.section}-${issue.tone}-${issue.message}`"
+                  :class="issue.tone === 'warning' ? 'issue-list__warning' : undefined"
+                >
+                  <strong>{{ issue.section }}</strong>
+                  <span>{{ issueToneText(issue.tone) }}</span>
+                  <p>{{ issue.message }}</p>
+                </li>
+              </ul>
+            </div>
             <div v-if="validationResult" class="result-block">
               <p :class="toneClass(validationResult.valid ? 'success' : 'error')">
-                {{ validationResult.valid ? "valid" : "invalid" }}
+                {{ validationResult.valid ? "后端校验通过" : "后端校验未通过" }}
               </p>
               <ul v-if="validationResult.errors.length" class="issue-list">
                 <li v-for="issue in validationResult.errors" :key="`${normalizeIssueCode(issue)}-${issue.path}`">
@@ -572,19 +1042,19 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
             </header>
             <dl v-if="initializationResult" class="summary">
               <div class="summary__row">
-                <dt>initialized</dt>
-                <dd>{{ String(initializationResult.initialized) }}</dd>
+                <dt>是否已初始化</dt>
+                <dd>{{ formatBoolean(initializationResult.initialized) }}</dd>
               </div>
               <div class="summary__row">
-                <dt>active_config_version</dt>
+                <dt>当前配置版本</dt>
                 <dd>{{ initializationResult.active_config_version }}</dd>
               </div>
               <div class="summary__row">
-                <dt>enterprise_id</dt>
+                <dt>企业 ID</dt>
                 <dd class="summary__value--break">{{ initializationResult.enterprise_id }}</dd>
               </div>
               <div class="summary__row">
-                <dt>admin_user_id</dt>
+                <dt>管理员用户 ID</dt>
                 <dd class="summary__value--break">{{ initializationResult.admin_user_id }}</dd>
               </div>
             </dl>
@@ -596,14 +1066,15 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
       <footer class="action-bar">
         <label class="confirm">
           <input v-model="submitConfirmed" type="checkbox" />
-          <span>确认写入首个管理员、默认组织和 active_config v1</span>
+          <span>{{ submitConfirmationText }}</span>
         </label>
+        <p class="gate-message">{{ validationGateMessage }}</p>
         <div class="action-bar__buttons">
           <button class="button button--secondary" type="button" @click="runValidation" :disabled="!canValidate">
             {{ busy.validating ? "校验中..." : "校验配置" }}
           </button>
           <button class="button" type="button" @click="runInitialization" :disabled="!canSubmit">
-            {{ busy.submitting ? "提交中..." : "执行初始化" }}
+            {{ submitButtonText }}
           </button>
         </div>
       </footer>
@@ -654,6 +1125,29 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   color: #d6dce5;
 }
 
+.check-counter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.section-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.section-checks li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #d6dce5;
+  font-size: 13px;
+}
+
 .stack {
   display: grid;
   gap: 10px;
@@ -684,6 +1178,27 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   margin: 0;
 }
 
+.flow-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.flow-step {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  background: #ffffff;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+}
+
+.flow-step span {
+  color: #667182;
+  font-size: 12px;
+}
+
 .content-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
@@ -710,6 +1225,10 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   padding: 16px 18px;
   border-bottom: 1px solid #e7ebf0;
   background: #fbfcfd;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
 }
 
 .form-grid {
@@ -732,6 +1251,18 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
 .field__label {
   font-size: 13px;
   color: #516072;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.required-mark {
+  color: #7a4b14;
+  background: #fff6e9;
+  border: 1px solid #ead9bd;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 11px;
 }
 
 .field--checkbox {
@@ -739,9 +1270,14 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   border: 1px solid #d8dee6;
   border-radius: 8px;
   background: #fafbfd;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 10px;
+}
+
+.field--checkbox .field-issues {
+  grid-column: 1 / -1;
 }
 
 .control,
@@ -760,6 +1296,35 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   outline: 2px solid #8ec5b1;
   outline-offset: 1px;
   border-color: #8ec5b1;
+}
+
+.field--error .control {
+  border-color: #d08383;
+}
+
+.field--warning .control {
+  border-color: #d9bd75;
+}
+
+.field-issues {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.field-issue {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.field-issue--error {
+  color: #9a2f2f;
+}
+
+.field-issue--warning {
+  color: #7a4b14;
 }
 
 .checkbox {
@@ -839,6 +1404,11 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   background: #fffaf0;
 }
 
+.issue-list li.issue-list__warning {
+  border-color: #e8dcba;
+  background: #fffaf0;
+}
+
 .result-block {
   padding: 16px 18px 18px;
   display: grid;
@@ -879,8 +1449,8 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
 .action-bar {
   position: sticky;
   bottom: 0;
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto;
   align-items: center;
   gap: 16px;
   padding: 16px 18px;
@@ -895,6 +1465,12 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   align-items: center;
   gap: 10px;
   color: #445163;
+}
+
+.gate-message {
+  margin: 0;
+  color: #667182;
+  font-size: 13px;
 }
 
 .action-bar__buttons {
@@ -966,6 +1542,10 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   .content-grid {
     grid-template-columns: 1fr;
   }
+
+  .flow-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 768px) {
@@ -975,8 +1555,12 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
 
   .toolbar,
   .action-bar {
-    flex-direction: column;
-    align-items: stretch;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .flow-strip {
+    grid-template-columns: 1fr;
   }
 
   .form-grid {

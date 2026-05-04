@@ -22,8 +22,10 @@ export interface SetupFormModel {
   vectorDistance: "cosine" | "dot" | "euclid";
   keywordLanguage: string;
   keywordAnalyzer: string;
-  modelGatewayMode: "mock";
-  modelGatewayBaseUrl: string;
+  modelGatewayMode: "external";
+  embeddingProviderBaseUrl: string;
+  rerankProviderBaseUrl: string;
+  llmProviderBaseUrl: string;
   embeddingDimension: number;
   embeddingModel: string;
   rerankModel: string;
@@ -50,7 +52,7 @@ export interface SetupFormModel {
   crossUserFinalAnswerAllowed: boolean;
   queryQpsPerUser: number;
   auditRetentionDays: number;
-  auditQueryTextMode: "hash" | "masked" | "plain";
+  auditQueryTextMode: "none" | "hash" | "plain";
 }
 
 export type SetupRequestPayload = {
@@ -71,13 +73,13 @@ export function createDefaultSetupForm(): SetupFormModel {
   return {
     setupToken: "",
     adminUsername: "admin",
-    adminDisplayName: "System Admin",
+    adminDisplayName: "系统管理员",
     adminPassword: "ChangeMe_123456",
     adminEmail: "admin@example.com",
     adminPhone: "",
-    enterpriseName: "Default Enterprise",
+    enterpriseName: "默认企业",
     enterpriseCode: "default",
-    departmentName: "Default Department",
+    departmentName: "默认部门",
     departmentCode: "default",
     secretProviderEndpoint: "postgres://local-secrets",
     redisUrl: "redis://redis:6379/0",
@@ -92,13 +94,15 @@ export function createDefaultSetupForm(): SetupFormModel {
     vectorDistance: "cosine",
     keywordLanguage: "zh",
     keywordAnalyzer: "zhparser",
-    modelGatewayMode: "mock",
-    modelGatewayBaseUrl: "http://model-gateway:8080",
+    modelGatewayMode: "external",
+    embeddingProviderBaseUrl: "http://tei-embedding:80",
+    rerankProviderBaseUrl: "http://tei-rerank:80",
+    llmProviderBaseUrl: "http://vllm-llm:8000",
     embeddingDimension: 1024,
-    embeddingModel: "mock-embedding-v1",
-    rerankModel: "mock-rerank-v1",
-    llmModel: "mock-llm-v1",
-    llmFallbackModel: "mock-llm-v1",
+    embeddingModel: "qwen3-embedding-0.6b",
+    rerankModel: "bge-reranker-base",
+    llmModel: "qwen-enterprise-14b",
+    llmFallbackModel: "qwen-enterprise-14b",
     passwordMinLength: 12,
     accessTokenTtlMinutes: 30,
     refreshTokenTtlMinutes: 10080,
@@ -220,8 +224,27 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
       },
       model_gateway: {
         mode: form.modelGatewayMode,
-        base_url: form.modelGatewayBaseUrl,
         auth_token_ref: null,
+        providers: {
+          embedding: {
+            type: "tei",
+            base_url: form.embeddingProviderBaseUrl,
+            healthcheck_path: "/health",
+            embeddings_path: "/v1/embeddings",
+          },
+          rerank: {
+            type: "tei",
+            base_url: form.rerankProviderBaseUrl,
+            healthcheck_path: "/health",
+            rerank_path: "/rerank",
+          },
+          llm: {
+            type: "openai_compatible",
+            base_url: form.llmProviderBaseUrl,
+            healthcheck_path: "/health",
+            chat_completions_path: "/v1/chat/completions",
+          },
+        },
         routes: {
           embedding: {
             online_default: form.embeddingModel,
@@ -235,16 +258,9 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
             fallback: form.llmFallbackModel,
           },
         },
-        mock: {
-          embedding_dimension: form.embeddingDimension,
-          embedding_seed: 42,
-          rerank_strategy: "stable_score",
-          llm_answer_mode: "citation_required",
-          failure_injection_enabled: true,
-        },
         healthcheck: {
-          path: "/internal/v1/model-health",
-          timeout_ms: 500,
+          path: "/health",
+          timeout_ms: 2000,
           failure_threshold: 3,
         },
       },
@@ -253,7 +269,7 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
         embedding_version: "2026-04-30",
         embedding_dimension: form.embeddingDimension,
         embedding_normalize: true,
-        embedding_tokenizer_version: "mock-tokenizer-v1",
+        embedding_tokenizer_version: "qwen3-embedding-0.6b-tokenizer",
         rerank_model: form.rerankModel,
         llm_model: form.llmModel,
         llm_fallback_model: form.llmFallbackModel,

@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     api_host: str = Field(default="0.0.0.0", alias="API_HOST")
     api_port: int = Field(default=8000, alias="API_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    admin_setup_url: str = Field(
+        default="http://localhost:5174/admin/setup-initialization",
+        alias="ADMIN_SETUP_URL",
+    )
+    setup_token_log_enabled: bool = Field(default=True, alias="SETUP_TOKEN_LOG_ENABLED")
+    setup_token_signing_secret: str | None = Field(default=None, alias="SETUP_TOKEN_SIGNING_SECRET")
 
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
     database_connect_timeout_seconds: int = Field(

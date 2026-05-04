@@ -127,7 +127,7 @@ async function requestJson<T>(
     throw new ApiRequestError(
       response.status,
       isApiErrorPayload(payload) ? payload : null,
-      `request failed with status ${response.status}`,
+      `请求失败，状态码 ${response.status}`,
     );
   }
   return payload as T;

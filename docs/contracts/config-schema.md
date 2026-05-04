@@ -10,8 +10,8 @@ P0 目标：
 
 - 系统启动配置只包含数据库连接和进程参数。
 - 初始化接口一次性提交首个可运行配置。
-- `active_config v1` 足以驱动 ServiceBootstrap 初始化 Redis、Secret Store、对象存储、向量库、关键词检索、模型网关 mock、审计和限流。
-- 本地开发和自动化测试不依赖真实大模型。
+- `active_config v1` 足以驱动 ServiceBootstrap 初始化 Redis、Secret Store、对象存储、向量库、关键词检索、外部模型服务、审计和限流。
+- 本地开发和自动化测试使用外部 embedding、rerank、LLM 服务，不再内置模型模拟服务。
 - Secret value 不进入 active config、API 响应、普通日志或审计摘要。
 
 P0 不实现：
@@ -301,36 +301,48 @@ P0 默认使用 PostgreSQL Full Text + `zhparser` 作为中文分词方案。企
 
 ### 6.6 model_gateway
 
-P0 使用 mock 或单一 adapter。默认配置：
+P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embedding` 和 `tei-rerank` 是 `docker-compose.yml` 提供的本地演示 provider，不是强制部署项；实际使用可以删除对应 compose service，并替换为企业模型代理、远程 TEI 或云厂商 provider URL。默认配置：
 
 ```json
 {
-  "mode": "mock",
-  "base_url": "http://model-gateway:8080",
+  "mode": "external",
   "auth_token_ref": null,
-  "routes": {
+  "providers": {
     "embedding": {
-      "online_default": "mock-embedding-v1",
-      "batch_default": "mock-embedding-v1"
+      "type": "tei",
+      "base_url": "http://tei-embedding:80",
+      "healthcheck_path": "/health",
+      "embeddings_path": "/v1/embeddings"
     },
     "rerank": {
-      "default": "mock-rerank-v1"
+      "type": "tei",
+      "base_url": "http://tei-rerank:80",
+      "healthcheck_path": "/health",
+      "rerank_path": "/rerank"
     },
     "llm": {
-      "default": "mock-llm-v1",
-      "fallback": "mock-llm-v1"
+      "type": "openai_compatible",
+      "base_url": "http://vllm-llm:8000",
+      "healthcheck_path": "/health",
+      "chat_completions_path": "/v1/chat/completions"
     }
   },
-  "mock": {
-    "embedding_dimension": 1024,
-    "embedding_seed": 42,
-    "rerank_strategy": "stable_score",
-    "llm_answer_mode": "citation_required",
-    "failure_injection_enabled": true
+  "routes": {
+    "embedding": {
+      "online_default": "qwen3-embedding-0.6b",
+      "batch_default": "qwen3-embedding-0.6b"
+    },
+    "rerank": {
+      "default": "bge-reranker-base"
+    },
+    "llm": {
+      "default": "qwen-enterprise-14b",
+      "fallback": "qwen-enterprise-14b"
+    }
   },
   "healthcheck": {
-    "path": "/internal/v1/model-health",
-    "timeout_ms": 500,
+    "path": "/health",
+    "timeout_ms": 2000,
     "failure_threshold": 3
   }
 }
@@ -338,8 +350,9 @@ P0 使用 mock 或单一 adapter。默认配置：
 
 约束：
 
-- `mode` 可选值：`mock`、`single_adapter`。
-- P0 不要求 vLLM、TEI 或多供应商动态路由。
+- `mode` 固定为 `external`。
+- `providers.embedding` 和 `providers.rerank` 默认使用 TEI HTTP 服务。
+- `providers.llm` 使用 OpenAI-compatible Chat Completions 接口，可以指向 vLLM、商业模型代理或企业内模型服务。
 - 每次模型调用必须生成 `model_route_hash`。
 - 普通日志不得记录完整 prompt。
 
@@ -347,14 +360,14 @@ P0 使用 mock 或单一 adapter。默认配置：
 
 ```json
 {
-  "embedding_model": "mock-embedding-v1",
+  "embedding_model": "qwen3-embedding-0.6b",
   "embedding_version": "2026-04-30",
   "embedding_dimension": 1024,
   "embedding_normalize": true,
-  "embedding_tokenizer_version": "mock-tokenizer-v1",
-  "rerank_model": "mock-rerank-v1",
-  "llm_model": "mock-llm-v1",
-  "llm_fallback_model": "mock-llm-v1"
+  "embedding_tokenizer_version": "qwen3-embedding-0.6b-tokenizer",
+  "rerank_model": "bge-reranker-base",
+  "llm_model": "qwen-enterprise-14b",
+  "llm_fallback_model": "qwen-enterprise-14b"
 }
 ```
 
@@ -418,7 +431,7 @@ P0 使用 mock 或单一 adapter。默认配置：
 }
 ```
 
-P0 rewrite 和 expansion 默认关闭；可以由规则或模型 mock 开启。
+P0 rewrite 和 expansion 默认关闭；可以由规则或外部 LLM provider 开启。
 
 ### 6.11 chunk
 
@@ -614,7 +627,7 @@ ServiceBootstrap 输入只能是数据库中的 `active_config v1`。
 5. 初始化 ObjectStorage。
 6. 初始化 VectorStore。
 7. 初始化 KeywordSearch。
-8. 初始化 Model Gateway mock 或单一 adapter。
+8. 初始化外部 embedding、rerank 和 LLM 服务 adapter。
 9. 初始化 Audit Sink。
 10. 初始化 Rate Limiter。
 11. 标记 service ready。
@@ -628,7 +641,7 @@ Ready 判定：
 | ObjectStorage | bucket 存在或可创建，测试对象可写入和删除 |
 | VectorStore | Qdrant 可连接，collection 维度与 `model.embedding_dimension` 一致 |
 | KeywordSearch | PostgreSQL Full Text 最小查询可执行 |
-| Model Gateway | mock 或单一 adapter health 成功 |
+| Model Provider Adapter | 外部 embedding、rerank 和 LLM provider health 成功 |
 | Audit Sink | `audit_logs` 可写入 |
 | Rate Limiter | Redis 或降级计数器可用 |
 
@@ -650,7 +663,7 @@ Ready 判定：
 5. 管理员密码策略校验。
 6. 依赖连通性校验。
 7. 权限和缓存安全策略校验。
-8. 模型 mock 或单一 adapter 健康校验。
+8. 外部模型 provider 健康校验。
 9. 返回结构化校验结果。
 
 校验响应建议：
@@ -677,8 +690,8 @@ Ready 判定：
 | `CONFIG_SCHEMA_INVALID` | JSON schema 校验失败 | false |
 | `CONFIG_SECRET_REF_INVALID` | Secret ref 格式非法 | false |
 | `CONFIG_SECRET_UNREADABLE` | Secret Provider 无法读取 Secret | true |
-| `CONFIG_DEPENDENCY_FAILED` | Redis、MinIO、Qdrant、KeywordSearch 或 Model Gateway 校验失败 | true |
-| `CONFIG_MODEL_MOCK_INVALID` | 模型 mock 配置缺失或不兼容 | false |
+| `CONFIG_DEPENDENCY_FAILED` | Redis、MinIO、Qdrant、KeywordSearch 或外部模型 provider 校验失败 | true |
+| `CONFIG_MODEL_PROVIDER_INVALID` | 外部模型 provider 配置缺失或不兼容 | false |
 | `CONFIG_EMBEDDING_DIMENSION_INVALID` | embedding 维度与向量库配置不一致 | false |
 | `CONFIG_CACHE_UNSAFE` | 缓存策略可能跨用户或跨权限复用最终答案 | false |
 | `CONFIG_PROMPT_LOGGING_UNSAFE` | P0 尝试记录完整 prompt | false |
@@ -720,5 +733,5 @@ P0 必测：
 - `cache.cross_user_final_answer_allowed=true` 时校验失败。
 - `permission.tightening_block_policy.fail_closed=false` 时校验失败。
 - embedding 维度和 VectorStore collection 不一致时校验失败。
-- Model Gateway mock 不可用时 ServiceBootstrap not ready。
-- 使用 mock 配置可以完成初始化、导入、索引、查询和降级测试。
+- 外部模型 provider 不可用时 ServiceBootstrap not ready。
+- 使用外部模型配置可以完成初始化、导入、索引、查询和降级测试。

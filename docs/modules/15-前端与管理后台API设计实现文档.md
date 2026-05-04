@@ -34,7 +34,7 @@
 | 普通前端 API | 企业员工、内部门户、IM Bot | 登录、查询、文档查看、个人可访问知识库 |
 | 管理后台 API | system_admin、department_admin、knowledge_base_admin、security_admin、audit_admin | 用户、组织、知识库、文档、权限、配置、审计、任务管理 |
 | 初始化 API | 初始化页面、受控部署流程 | 仅未初始化或恢复初始化时开放 |
-| 内部服务 API | 后端模块、Worker、Model Gateway | 不允许浏览器前端直接访问 |
+| 内部服务 API | 后端模块、Worker、模型 Provider Adapter | 不允许浏览器前端直接访问 |
 | 运维 API/CLI | 运维人员、部署平台 | healthcheck、setup token 签发、索引检查、任务重试 |
 
 当前 P0 后端规范路径统一使用 `/internal/v1`。OpenAPI、后端路由、前端 SDK 和测试均以该路径为准。
@@ -107,7 +107,7 @@
 
 以下接口或能力不暴露给浏览器前端：
 
-- Model Gateway 原始 embedding、rerank、chat API。
+- 模型 Provider Adapter 原始 embedding、rerank、chat API。
 - Worker 内部任务领取 API。
 - Qdrant、MinIO、Redis、PostgreSQL。
 - `rag-admin setup-token issue`、`rag-admin setup-token rotate`。
@@ -541,7 +541,7 @@ rag-admin health check
 
 ## 18. 内部服务 API
 
-Model Gateway 内部 API：
+模型 Provider Adapter 内部 API：
 
 ```http
 POST /internal/v1/model-embeddings

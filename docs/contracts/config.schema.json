@@ -563,18 +563,30 @@
     "ModelGatewayConfig": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "base_url", "auth_token_ref", "routes", "mock", "healthcheck"],
+      "required": ["mode", "auth_token_ref", "providers", "routes", "healthcheck"],
       "properties": {
         "mode": {
           "type": "string",
-          "enum": ["mock", "single_adapter"]
-        },
-        "base_url": {
-          "type": "string",
-          "pattern": "^https?://"
+          "enum": ["external"]
         },
         "auth_token_ref": {
           "$ref": "#/$defs/NullableSecretRef"
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["embedding", "rerank", "llm"],
+          "properties": {
+            "embedding": {
+              "$ref": "#/$defs/ModelProviderConfig"
+            },
+            "rerank": {
+              "$ref": "#/$defs/ModelProviderConfig"
+            },
+            "llm": {
+              "$ref": "#/$defs/ModelProviderConfig"
+            }
+          }
         },
         "routes": {
           "type": "object",
@@ -619,37 +631,6 @@
             }
           }
         },
-        "mock": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "embedding_dimension",
-            "embedding_seed",
-            "rerank_strategy",
-            "llm_answer_mode",
-            "failure_injection_enabled"
-          ],
-          "properties": {
-            "embedding_dimension": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "embedding_seed": {
-              "type": "integer"
-            },
-            "rerank_strategy": {
-              "type": "string",
-              "enum": ["stable_score", "identity", "score_by_length"]
-            },
-            "llm_answer_mode": {
-              "type": "string",
-              "enum": ["citation_required", "retrieval_summary", "empty_answer"]
-            },
-            "failure_injection_enabled": {
-              "type": "boolean"
-            }
-          }
-        },
         "healthcheck": {
           "type": "object",
           "additionalProperties": false,
@@ -668,6 +649,37 @@
               "minimum": 1
             }
           }
+        }
+      }
+    },
+    "ModelProviderConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "base_url", "healthcheck_path"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["tei", "openai_compatible", "http"]
+        },
+        "base_url": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "healthcheck_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "embeddings_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rerank_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "chat_completions_path": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },

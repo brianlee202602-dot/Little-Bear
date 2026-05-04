@@ -99,44 +99,56 @@
       }
     },
     "model_gateway": {
-      "mode": "mock",
-      "base_url": "http://model-gateway:8080",
+      "mode": "external",
       "auth_token_ref": null,
-      "routes": {
+      "providers": {
         "embedding": {
-          "online_default": "mock-embedding-v1",
-          "batch_default": "mock-embedding-v1"
+          "type": "tei",
+          "base_url": "http://tei-embedding:80",
+          "healthcheck_path": "/health",
+          "embeddings_path": "/v1/embeddings"
         },
         "rerank": {
-          "default": "mock-rerank-v1"
+          "type": "tei",
+          "base_url": "http://tei-rerank:80",
+          "healthcheck_path": "/health",
+          "rerank_path": "/rerank"
         },
         "llm": {
-          "default": "mock-llm-v1",
-          "fallback": "mock-llm-v1"
+          "type": "openai_compatible",
+          "base_url": "http://vllm-llm:8000",
+          "healthcheck_path": "/health",
+          "chat_completions_path": "/v1/chat/completions"
         }
       },
-      "mock": {
-        "embedding_dimension": 1024,
-        "embedding_seed": 42,
-        "rerank_strategy": "stable_score",
-        "llm_answer_mode": "citation_required",
-        "failure_injection_enabled": true
+      "routes": {
+        "embedding": {
+          "online_default": "qwen3-embedding-0.6b",
+          "batch_default": "qwen3-embedding-0.6b"
+        },
+        "rerank": {
+          "default": "bge-reranker-base"
+        },
+        "llm": {
+          "default": "qwen-enterprise-14b",
+          "fallback": "qwen-enterprise-14b"
+        }
       },
       "healthcheck": {
-        "path": "/internal/v1/model-health",
-        "timeout_ms": 500,
+        "path": "/health",
+        "timeout_ms": 2000,
         "failure_threshold": 3
       }
     },
     "model": {
-      "embedding_model": "mock-embedding-v1",
+      "embedding_model": "qwen3-embedding-0.6b",
       "embedding_version": "2026-04-30",
       "embedding_dimension": 1024,
       "embedding_normalize": true,
-      "embedding_tokenizer_version": "mock-tokenizer-v1",
-      "rerank_model": "mock-rerank-v1",
-      "llm_model": "mock-llm-v1",
-      "llm_fallback_model": "mock-llm-v1"
+      "embedding_tokenizer_version": "qwen3-embedding-0.6b-tokenizer",
+      "rerank_model": "bge-reranker-base",
+      "llm_model": "qwen-enterprise-14b",
+      "llm_fallback_model": "qwen-enterprise-14b"
     },
     "llm": {
       "temperature": 0.1,

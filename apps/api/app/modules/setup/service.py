@@ -4,10 +4,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from app.db.session import session_scope
 from sqlalchemy import text
 from sqlalchemy.exc import NoSuchTableError, OperationalError, ProgrammingError, SQLAlchemyError
-
-from app.db.session import session_scope
 
 SETUP_STATE_KEYS = ("initialized", "setup_status", "active_config_version")
 
@@ -37,6 +36,8 @@ class SetupState:
     initialized: bool
     setup_status: SetupStatus
     active_config_version: int | None
+    active_config_available: bool | None = None
+    service_bootstrap_ready: bool = False
     recovery_setup_allowed: bool = False
     recovery_reason: str | None = None
     system_token_expires_at: str | None = None
@@ -51,12 +52,14 @@ class SetupState:
             SetupStatus.VALIDATION_FAILED,
             SetupStatus.DEPENDENCY_TEST_FAILED,
             SetupStatus.INITIALIZATION_FAILED,
-            SetupStatus.MIGRATION_REQUIRED,
+            SetupStatus.RECOVERY_REQUIRED,
+            SetupStatus.RECOVERY_VALIDATING_CONFIG,
+            SetupStatus.RECOVERY_PUBLISHING_CONFIG,
         }
 
     @property
     def active_config_present(self) -> bool:
-        return self.active_config_version is not None
+        return self.active_config_version is not None and self.active_config_available is not False
 
     def to_response_data(self) -> dict[str, object]:
         data: dict[str, object] = {
@@ -107,12 +110,14 @@ class SetupService:
                             'initialized',
                             'setup_status',
                             'active_config_version',
+                            'service_bootstrap',
                             'recovery_setup_allowed',
                             'recovery_reason'
                         )
                         """
                     )
                 ).all()
+                active_config_available = _active_config_available(session, rows)
         except ProgrammingError as exc:
             return SetupState(
                 initialized=False,
@@ -178,11 +183,16 @@ class SetupService:
             values.get("recovery_setup_allowed"), "value", default=False
         )
         recovery_reason = _json_str(values.get("recovery_reason"), "reason", default=None)
+        service_bootstrap_ready = _json_bool(
+            values.get("service_bootstrap"), "ready", default=False
+        )
 
         return SetupState(
             initialized=initialized,
             setup_status=setup_status,
             active_config_version=active_config_version,
+            active_config_available=active_config_available,
+            service_bootstrap_ready=service_bootstrap_ready,
             recovery_setup_allowed=recovery_setup_allowed,
             recovery_reason=recovery_reason,
         )
@@ -218,3 +228,43 @@ def _normalize_status(raw_status: str | None, *, initialized: bool) -> SetupStat
         except ValueError:
             pass
     return SetupStatus.INITIALIZED if initialized else SetupStatus.SETUP_REQUIRED
+
+
+def _active_config_available(session: Any, rows: list[Any]) -> bool | None:
+    values = {row._mapping["key"]: row._mapping["value_json"] for row in rows}
+    active_config_version = _json_int(values.get("active_config_version"), "version")
+    if active_config_version is None:
+        return None
+    try:
+        table_status = session.execute(
+            text(
+                """
+                SELECT
+                    to_regclass('public.config_versions')::text AS config_versions_table,
+                    to_regclass('public.system_configs')::text AS system_configs_table
+                """
+            )
+        ).one()
+        table_data = table_status._mapping
+        if not table_data["config_versions_table"] or not table_data["system_configs_table"]:
+            return False
+        row = session.execute(
+            text(
+                """
+                SELECT 1
+                FROM system_configs sc
+                JOIN config_versions cv ON cv.id = sc.config_version_id
+                WHERE sc.key = 'active_config'
+                  AND sc.version = :version
+                  AND sc.status = 'active'
+                  AND cv.status = 'active'
+                LIMIT 1
+                """
+            ),
+            {"version": active_config_version},
+        ).one_or_none()
+    except SQLAlchemyError:
+        return False
+    except Exception:
+        return None
+    return row is not None

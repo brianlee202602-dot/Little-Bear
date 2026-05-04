@@ -1,6 +1,6 @@
 # Little Bear
 
-Little Bear 是一个面向企业内部知识检索与问答场景的 RAG 系统工作区。当前仓库已整理设计文档，并搭好了后端 API、Worker、Model Gateway、Vue3 普通前端和 Vue3 管理后台的最小骨架。
+Little Bear 是一个面向企业内部知识检索与问答场景的 RAG 系统工作区。当前仓库已整理设计文档，并搭好了后端 API、Worker、Vue3 普通前端和 Vue3 管理后台的最小骨架。
 
 ## 目录结构
 
@@ -8,7 +8,6 @@ Little Bear 是一个面向企业内部知识检索与问答场景的 RAG 系统
 apps/
   api/            FastAPI API
   worker/         导入与索引 Worker
-  model-gateway/  本地模型网关服务
   web/            Vue3 普通前端
   admin/          Vue3 管理后台
 
@@ -30,7 +29,7 @@ docs/
 - Redis
 - MinIO
 - Qdrant
-- mock Model Gateway
+- 本地演示用 TEI embedding / TEI rerank；实际可接入外部 provider 后删除对应 compose service
 
 基础设施当前通过 `Makefile` 封装 Docker Compose 启动：
 
@@ -66,7 +65,7 @@ make admin
 PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --reload
 ```
 
-数据库迁移、Worker、模型网关服务等命令当前不收敛到 `Makefile`，需要时直接使用原生命令，例如：
+数据库迁移和 Worker 等命令当前不收敛到 `Makefile`，需要时直接使用原生命令，例如：
 
 ```bash
 PYTHONPATH=apps/api python3 -m alembic upgrade head

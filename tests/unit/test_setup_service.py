@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy.exc import OperationalError, ProgrammingError
-
 from app.modules.setup.service import SetupService, SetupStatus
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 
 def test_setup_service_reports_database_unavailable(monkeypatch) -> None:
@@ -45,7 +44,7 @@ def test_setup_service_reports_migration_required_when_state_table_missing(monke
     assert state.initialized is False
     assert state.setup_status == SetupStatus.MIGRATION_REQUIRED
     assert state.active_config_version is None
-    assert state.setup_required is True
+    assert state.setup_required is False
     assert state.error_code == "SETUP_MIGRATION_REQUIRED"
 
 
@@ -53,7 +52,7 @@ def test_setup_service_returns_setup_required_when_state_rows_are_incomplete(
     monkeypatch,
 ) -> None:
     class _FakeSession:
-        def __enter__(self) -> "_FakeSession":
+        def __enter__(self) -> _FakeSession:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:
@@ -74,7 +73,7 @@ def test_setup_service_returns_setup_required_when_state_rows_are_incomplete(
 
 def test_setup_service_normalizes_not_initialized_to_setup_required(monkeypatch) -> None:
     class _FakeSession:
-        def __enter__(self) -> "_FakeSession":
+        def __enter__(self) -> _FakeSession:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:
@@ -111,6 +110,16 @@ def test_setup_service_normalizes_not_initialized_to_setup_required(monkeypatch)
                                 }
                             },
                         )(),
+                        type(
+                            "Row",
+                            (),
+                            {
+                                "_mapping": {
+                                    "key": "service_bootstrap",
+                                    "value_json": {"ready": False},
+                                }
+                            },
+                        )(),
                     ]
                 },
             )()
@@ -126,7 +135,7 @@ def test_setup_service_normalizes_not_initialized_to_setup_required(monkeypatch)
 
 def test_setup_service_reads_system_state(monkeypatch) -> None:
     class _FakeSession:
-        def __enter__(self) -> "_FakeSession":
+        def __enter__(self) -> _FakeSession:
             return self
 
         def __exit__(self, exc_type, exc, tb) -> None:
@@ -163,6 +172,16 @@ def test_setup_service_reads_system_state(monkeypatch) -> None:
                                 }
                             },
                         )(),
+                        type(
+                            "Row",
+                            (),
+                            {
+                                "_mapping": {
+                                    "key": "service_bootstrap",
+                                    "value_json": {"ready": True},
+                                }
+                            },
+                        )(),
                     ]
                 },
             )()
@@ -175,4 +194,5 @@ def test_setup_service_reads_system_state(monkeypatch) -> None:
     assert state.setup_status == SetupStatus.INITIALIZED
     assert state.active_config_version == 1
     assert state.active_config_present is True
+    assert state.service_bootstrap_ready is True
     assert state.setup_required is False

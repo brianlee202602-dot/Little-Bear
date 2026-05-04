@@ -19,7 +19,7 @@ async def ready() -> dict[str, object]:
     setup_state = SetupService().load_state() if database.reachable else None
     initialized = bool(setup_state and setup_state.initialized)
     active_config = bool(setup_state and setup_state.active_config_version is not None)
-    service_bootstrap = False
+    service_bootstrap = bool(setup_state and setup_state.service_bootstrap_ready)
 
     return {
         "status": "ready" if initialized and active_config and service_bootstrap else "not_ready",
