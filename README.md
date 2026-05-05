@@ -42,12 +42,12 @@ make ps
 PostgreSQL 容器健康后，需要先执行 Alembic 迁移初始化数据库结构。迁移必须在安装了项目 Python 依赖的环境中执行，并且从仓库根目录运行：
 
 ```bash
-python3 -m alembic --version
-PYTHONPATH=apps/api python3 -m alembic upgrade head
-PYTHONPATH=apps/api python3 -m alembic current
+python3 -m alembic.config --version
+make PYTHON=python3 db-upgrade
+make PYTHON=python3 db-current
 ```
 
-如果 `python3 -m alembic --version` 提示找不到 `alembic`，说明当前解释器不是项目开发环境，需要先激活 venv/conda 环境或显式使用对应环境里的 Python。
+如果 `python3 -m alembic.config --version` 提示找不到 `alembic`，说明当前解释器不是项目开发环境，需要先激活 venv/conda 环境或显式使用对应环境里的 Python。
 
 ## 本地开发入口
 
@@ -65,10 +65,10 @@ make admin
 PYTHONPATH=apps/api python3 -m uvicorn app.main:app --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000} --reload
 ```
 
-数据库迁移和 Worker 等命令当前不收敛到 `Makefile`，需要时直接使用原生命令，例如：
+数据库迁移已收敛到 `Makefile`；Worker 等命令需要时仍可直接使用原生命令，例如：
 
 ```bash
-PYTHONPATH=apps/api python3 -m alembic upgrade head
+make PYTHON=python3 db-upgrade
 python3 apps/worker/app/main.py
 ```
 

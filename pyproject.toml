@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "little-bear"
 version = "0.1.0"
@@ -28,6 +32,10 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.setuptools.packages.find]
+where = ["apps/api"]
+include = ["app*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

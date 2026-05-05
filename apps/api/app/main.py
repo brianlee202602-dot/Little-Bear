@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from app.api.routes import health, setup
 from app.modules.setup.startup_service import SetupStartupService
 from app.shared.logging import configure_logging
-from app.shared.middleware import RequestContextMiddleware
+from app.shared.middleware import RequestContextMiddleware, SetupGuardMiddleware
 from app.shared.settings import get_settings
 
 
@@ -32,6 +32,7 @@ def create_app(*, run_startup_checks: bool = True) -> FastAPI:
     )
     app.state.run_startup_checks = run_startup_checks
     app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(SetupGuardMiddleware)
     app.include_router(health.router)
     app.include_router(setup.router)
     return app

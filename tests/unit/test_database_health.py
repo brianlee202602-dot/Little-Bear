@@ -5,7 +5,7 @@ from app.shared.settings import get_settings
 
 
 def test_database_health_reports_missing_database_url(monkeypatch) -> None:
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "")
     get_settings.cache_clear()
 
     health = check_database()

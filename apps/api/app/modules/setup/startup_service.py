@@ -6,6 +6,7 @@ from typing import Literal
 
 from app.db.health import check_database
 from app.db.session import session_scope
+from app.modules.setup.bootstrap_service import ServiceBootstrapService
 from app.modules.setup.service import SetupService, SetupStatus
 from app.modules.setup.token_service import IssuedSetupToken, SetupTokenService
 from app.shared.settings import get_settings
@@ -19,6 +20,7 @@ StartupMode = Literal[
     "setup_required",
     "recovery_required",
     "migration_required",
+    "bootstrap_failed",
 ]
 
 
@@ -115,6 +117,28 @@ class SetupStartupService:
                     mode="migration_required",
                     setup_url=setup_url,
                     reason=active_config_issue.reason,
+                )
+
+            bootstrap_result = ServiceBootstrapService().bootstrap(
+                session,
+                active_config_version=state.active_config_version,
+            )
+            ServiceBootstrapService().persist_result(session, bootstrap_result)
+            if not bootstrap_result.ready:
+                failed_checks = [
+                    check.name
+                    for check in bootstrap_result.checks
+                    if check.required and not check.passed
+                ]
+                logger.error(
+                    "service bootstrap checks failed: active_config_version=%s failed_checks=%s",
+                    state.active_config_version,
+                    ",".join(failed_checks),
+                )
+                return StartupSetupResult(
+                    mode="bootstrap_failed",
+                    setup_url=setup_url,
+                    reason="service_bootstrap_failed",
                 )
 
         logger.info(

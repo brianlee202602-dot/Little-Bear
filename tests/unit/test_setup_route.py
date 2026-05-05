@@ -88,6 +88,25 @@ def test_setup_config_validations_route_returns_validation_result(monkeypatch) -
     assert payload["data"]["warnings"] == []
 
 
+def test_setup_guard_blocks_business_routes_before_initialization(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.shared.middleware.SetupService.load_state",
+        lambda _self: SetupState(
+            initialized=False,
+            setup_status=SetupStatus.SETUP_REQUIRED,
+            active_config_version=None,
+        ),
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get("/internal/v1/business-placeholder")
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["error_code"] == "SETUP_REQUIRED"
+    assert payload["stage"] == "setup_guard"
+
+
 def test_setup_config_validations_route_requires_setup_token(monkeypatch) -> None:
     class _RejectingTokenService:
         def validate(self, *_args, **_kwargs):

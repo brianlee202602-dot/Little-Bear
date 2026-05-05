@@ -20,7 +20,7 @@ export interface SetupFormModel {
   objectKeyPrefix: string;
   qdrantBaseUrl: string;
   collectionPrefix: string;
-  vectorDistance: "cosine" | "dot" | "euclid";
+  vectorDistance: "cosine" | "dot" | "euclidean";
   keywordLanguage: string;
   keywordAnalyzer: string;
   modelGatewayMode: "external";

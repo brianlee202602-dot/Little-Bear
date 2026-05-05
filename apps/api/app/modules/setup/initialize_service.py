@@ -4,12 +4,13 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
+from app.modules.setup.bootstrap_service import ServiceBootstrapService
 from app.modules.setup.service import SetupStatus
 from app.modules.setup.token_service import SetupTokenContext, SetupTokenService
 from app.shared.context import get_request_context
+from app.shared.paths import CONFIG_SCHEMA_PATH
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -24,7 +25,6 @@ except ModuleNotFoundError:  # pragma: no cover - 运行环境缺依赖时由业
     Draft202012Validator = None  # type: ignore[assignment]
 
 
-CONFIG_SCHEMA_PATH = Path("docs/contracts/config.schema.json")
 BUILTIN_ROLE_NAMES = {
     "system_admin",
     "security_admin",
@@ -125,6 +125,14 @@ class SetupInitializationService:
         config_version_id = uuid.uuid4()
         config_version = int(config["config_version"])
         config_hash = _stable_hash(config)
+        bootstrap_result = ServiceBootstrapService().bootstrap(session, config=config)
+        if not bootstrap_result.ready:
+            raise SetupInitializationError(
+                "SETUP_BOOTSTRAP_FAILED",
+                "service bootstrap checks failed",
+                status_code=503,
+                details={"checks": [check.to_dict() for check in bootstrap_result.checks]},
+            )
 
         self._insert_audit_log(
             session,
@@ -176,7 +184,7 @@ class SetupInitializationService:
             config_hash,
         )
         self._mark_initialized(session, config_version)
-        self._mark_service_bootstrap_ready(session, config_version)
+        ServiceBootstrapService().persist_result(session, bootstrap_result)
         if setup_token is not None:
             SetupTokenService().consume(session, setup_token)
             self._insert_audit_log(
@@ -481,6 +489,14 @@ class SetupInitializationService:
         config["config_version"] = config_version
         config_hash = _stable_hash(config)
         enterprise_id, admin_user_id = self._load_recovery_subjects(session)
+        bootstrap_result = ServiceBootstrapService().bootstrap(session, config=config)
+        if not bootstrap_result.ready:
+            raise SetupInitializationError(
+                "SETUP_BOOTSTRAP_FAILED",
+                "service bootstrap checks failed",
+                status_code=503,
+                details={"checks": [check.to_dict() for check in bootstrap_result.checks]},
+            )
 
         self._insert_audit_log(
             session,
@@ -512,7 +528,7 @@ class SetupInitializationService:
         )
         self._mark_initialized(session, config_version)
         self._clear_recovery_setup(session)
-        self._mark_service_bootstrap_ready(session, config_version)
+        ServiceBootstrapService().persist_result(session, bootstrap_result)
         if setup_token is not None:
             SetupTokenService().consume(session, setup_token)
             self._insert_audit_log(
@@ -879,23 +895,26 @@ class SetupInitializationService:
                 {"key": key, "value_json": json.dumps(value_json, ensure_ascii=False)},
             )
 
-    def _mark_service_bootstrap_ready(self, session: Session, config_version: int) -> None:
-        value_json = {
-            "ready": True,
-            "mode": "p0_minimal",
-            "targets": ["database", "active_config"],
-            "config_version": config_version,
-        }
-        session.execute(
-            text(
-                """
-                INSERT INTO system_state(key, value_json)
-                VALUES ('service_bootstrap', CAST(:value_json AS jsonb))
-                ON CONFLICT (key) DO UPDATE
-                SET value_json = EXCLUDED.value_json, updated_at = now()
-                """
-            ),
-            {"value_json": json.dumps(value_json, ensure_ascii=False)},
+    def record_initialization_failure(
+        self,
+        session: Session,
+        *,
+        error_code: str,
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        self._mark_status(session, SetupStatus.INITIALIZATION_FAILED)
+        self._insert_audit_log(
+            session,
+            event_name="setup.initialization_failed",
+            action="initialize",
+            result="failure",
+            error_code=error_code,
+            summary={
+                "error_code": error_code,
+                "message": message[:300],
+                "detail_keys": sorted((details or {}).keys()),
+            },
         )
 
     def _insert_audit_log(

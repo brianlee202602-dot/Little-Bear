@@ -191,7 +191,7 @@ const infraSection: FieldSection = {
       options: [
         { label: "cosine", value: "cosine" },
         { label: "dot", value: "dot" },
-        { label: "euclid", value: "euclid" },
+        { label: "euclidean", value: "euclidean" },
       ],
     },
   ],

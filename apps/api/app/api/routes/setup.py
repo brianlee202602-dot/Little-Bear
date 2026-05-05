@@ -103,7 +103,9 @@ async def setup_initialization(
                 required_scope="setup:initialize",
             )
             result = service.initialize(session, payload, setup_token=setup_token)
-    except (SetupInitializationError, SetupTokenError) as exc:
+    except SetupInitializationError as exc:
+        if exc.error_code not in {"SETUP_CLOSED", "SETUP_MIGRATION_REQUIRED"}:
+            _record_initialization_failure(exc.error_code, exc.message, exc.details)
         return _error_response(
             request_id,
             exc.error_code,
@@ -111,6 +113,29 @@ async def setup_initialization(
             stage="setup_initialization",
             status_code=exc.status_code,
             details=exc.details,
+        )
+    except SetupTokenError as exc:
+        return _error_response(
+            request_id,
+            exc.error_code,
+            exc.message,
+            stage="setup_initialization",
+            status_code=exc.status_code,
+            details=exc.details,
+        )
+    except Exception as exc:
+        _record_initialization_failure(
+            "SETUP_INITIALIZATION_FAILED",
+            "setup initialization failed",
+            {"exception": exc.__class__.__name__},
+        )
+        return _error_response(
+            request_id,
+            "SETUP_INITIALIZATION_FAILED",
+            "setup initialization failed",
+            stage="setup_initialization",
+            status_code=500,
+            details={"exception": exc.__class__.__name__},
         )
 
     return SetupInitializationResponse(
@@ -162,3 +187,20 @@ def _error_response(
             "details": details or {},
         },
     )
+
+
+def _record_initialization_failure(
+    error_code: str,
+    message: str,
+    details: dict[str, object] | None,
+) -> None:
+    try:
+        with session_scope() as session:
+            SetupInitializationService().record_initialization_failure(
+                session,
+                error_code=error_code,
+                message=message,
+                details=details,
+            )
+    except Exception:
+        return

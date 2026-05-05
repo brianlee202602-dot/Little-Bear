@@ -5,6 +5,7 @@ import getpass
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from app.db.session import session_scope
 from app.modules.secrets.service import SecretListItem, SecretStoreError, SecretStoreService
@@ -98,15 +99,51 @@ def _read_secret_value(args: argparse.Namespace) -> str:
         value = sys.stdin.read()
         value = value[:-1] if value.endswith("\n") else value
     elif args.value_env:
-        value = os.environ.get(args.value_env)
-        if value is None:
-            raise SecretStoreError(f"environment variable is not set: {args.value_env}")
+        value = _read_env_value(args.value_env)
     else:
         value = getpass.getpass("Secret value: ")
 
     if value == "":
         raise SecretStoreError("secret value cannot be empty")
     return value
+
+
+def _read_env_value(name: str) -> str:
+    value = os.environ.get(name)
+    if value is not None:
+        return value
+
+    dotenv_value = _read_dotenv_value(name)
+    if dotenv_value is not None:
+        return dotenv_value
+
+    raise SecretStoreError(f"environment variable is not set: {name}")
+
+
+def _read_dotenv_value(name: str, env_file: Path = Path(".env")) -> str | None:
+    if not env_file.exists():
+        return None
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        parsed = _parse_dotenv_line(raw_line)
+        if parsed and parsed[0] == name:
+            return parsed[1]
+    return None
+
+
+def _parse_dotenv_line(raw_line: str) -> tuple[str, str] | None:
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    if line.startswith("export "):
+        line = line.removeprefix("export ").strip()
+    key, value = line.split("=", maxsplit=1)
+    key = key.strip()
+    value = value.strip()
+    if not key:
+        return None
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return key, value
 
 
 def _print_secret_list(items: list[SecretListItem]) -> None:

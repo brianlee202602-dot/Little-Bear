@@ -9,7 +9,7 @@ define env_shell
 set -a; [ ! -f "./.env" ] || . "./.env"; set +a;
 endef
 
-.PHONY: env up down restart ps logs clean reset api web admin
+.PHONY: env up down restart ps logs clean reset db-upgrade db-current api web admin test
 
 env:
 	@if [ ! -f "$(ENV_FILE)" ]; then cp .env.example "$(ENV_FILE)"; fi
@@ -33,6 +33,12 @@ clean:
 
 reset:
 	$(COMPOSE) --env-file "$(ENV_FILE)" down --volumes --remove-orphans
+
+db-upgrade:
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m alembic.config upgrade head
+
+db-current:
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m alembic.config current
 
 api:
 	$(env_shell) PYTHONPATH=apps/api LOG_LEVEL="$(LOG_LEVEL)" $(PYTHON) -m uvicorn app.main:app --host "$(API_HOST)" --port "$(API_PORT)" --reload
