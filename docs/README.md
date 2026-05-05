@@ -40,6 +40,7 @@
 | [testing/测试计划.md](testing/测试计划.md) | P0 自动化测试、CI 门禁和验收边界 |
 | [development/本地开发环境.md](development/本地开发环境.md) | 本地依赖启动、初始化和 P0 验收路径 |
 | [admin/管理后台交互契约.md](admin/管理后台交互契约.md) | 管理后台路由、菜单、表单、确认和审计展示 |
+| [operations/安装部署操作手册.md](operations/安装部署操作手册.md) | 安装依赖、启动基础设施、执行迁移、写入 Secret 和首次初始化操作步骤 |
 | [operations/配置变更与热更新策略.md](operations/配置变更与热更新策略.md) | 配置 diff、风险、热更新、失败和阶段 2 回滚边界 |
 | [operations/部署与发布检查清单.md](operations/部署与发布检查清单.md) | migration、备份恢复、发布演练和 Go / No-Go 条件 |
 | [observability/审计查询与展示扩展.md](observability/审计查询与展示扩展.md) | 审计查询、展示、导出、retention 和脱敏扩展 |
