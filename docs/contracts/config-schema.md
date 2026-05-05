@@ -301,7 +301,7 @@ P0 默认使用 PostgreSQL Full Text + `zhparser` 作为中文分词方案。企
 
 ### 6.6 model_gateway
 
-P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embedding` 和 `tei-rerank` 是 `docker-compose.yml` 提供的本地演示 provider，不是强制部署项；实际使用可以删除对应 compose service，并替换为企业模型代理、远程 TEI 或云厂商 provider URL。默认配置：
+P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embedding` 和 `tei-rerank` 是 `docker-compose.yml` 提供的本地演示 provider，不是强制部署项；实际使用可以删除对应 compose service，并替换为企业模型代理、远程 TEI 或云厂商 provider URL。当前 compose 不创建 LLM 容器，`providers.llm.base_url` 必须替换为真实 OpenAI-compatible 服务地址。默认配置：
 
 ```json
 {
@@ -322,22 +322,22 @@ P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embeddi
     },
     "llm": {
       "type": "openai_compatible",
-      "base_url": "http://vllm-llm:8000",
+      "base_url": "http://llm-provider:8000",
       "healthcheck_path": "/health",
       "chat_completions_path": "/v1/chat/completions"
     }
   },
   "routes": {
     "embedding": {
-      "online_default": "qwen3-embedding-0.6b",
-      "batch_default": "qwen3-embedding-0.6b"
+      "online_default": "jina‑embeddings‑v2‑base‑zh",
+      "batch_default": "jina‑embeddings‑v2‑base‑zh"
     },
     "rerank": {
       "default": "bge-reranker-base"
     },
     "llm": {
-      "default": "qwen-enterprise-14b",
-      "fallback": "qwen-enterprise-14b"
+      "default": "qwen3-4b",
+      "fallback": "qwen3-4b"
     }
   },
   "healthcheck": {
@@ -360,14 +360,14 @@ P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embeddi
 
 ```json
 {
-  "embedding_model": "qwen3-embedding-0.6b",
+  "embedding_model": "jina‑embeddings‑v2‑base‑zh",
   "embedding_version": "2026-04-30",
-  "embedding_dimension": 1024,
+  "embedding_dimension": 768,
   "embedding_normalize": true,
-  "embedding_tokenizer_version": "qwen3-embedding-0.6b-tokenizer",
+  "embedding_tokenizer_version": "jina‑embeddings‑v2‑base‑zh-tokenizer",
   "rerank_model": "bge-reranker-base",
-  "llm_model": "qwen-enterprise-14b",
-  "llm_fallback_model": "qwen-enterprise-14b"
+  "llm_model": "qwen3-4b",
+  "llm_fallback_model": "qwen3-4b"
 }
 ```
 

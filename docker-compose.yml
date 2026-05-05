@@ -96,9 +96,9 @@ services:
     restart: unless-stopped
     command:
       - --model-id
-      - sentence-transformers/all-MiniLM-L12-v2
+      - jinaai/jina‑embeddings‑v2‑base‑zh
       - --served-model-name
-      - all-MiniLM-L12-v2
+      - jina‑embeddings‑v2‑base‑zh
     ports:
       - "8081:80"
     volumes:

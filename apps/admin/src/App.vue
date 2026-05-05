@@ -49,6 +49,7 @@ type FieldDefinition = {
   label: string;
   input: FieldInput;
   placeholder?: string;
+  hint?: string;
   min?: number;
   step?: number;
   span?: "full" | "half";
@@ -67,7 +68,6 @@ const busy = reactive({
   refreshing: false,
   validating: false,
   submitting: false,
-  copying: false,
 });
 
 const setupState = ref<SetupStateData | null>(null);
@@ -101,6 +101,7 @@ const accessSection: FieldSection = {
       label: "初始化令牌",
       input: "password",
       placeholder: "从后端启动日志复制初始化令牌（JWT）",
+      hint: "用于调用初始化校验与初始化提交接口；请使用后端启动日志输出的 setup JWT。",
       span: "full",
       required: true,
     },
@@ -110,9 +111,10 @@ const accessSection: FieldSection = {
 const adminSection: FieldSection = {
   title: "首个管理员",
   fields: [
-    { key: "adminUsername", label: "登录名", input: "text", required: true },
-    { key: "adminDisplayName", label: "显示名", input: "text", required: true },
-    { key: "adminPassword", label: "初始密码", input: "password", required: true },
+    { key: "adminUsername", label: "登录名", input: "text", hint: "首个系统管理员的唯一登录标识。", required: true },
+    { key: "adminDisplayName", label: "显示名", input: "text", hint: "用于管理后台展示、操作记录归属和审计事件摘要。", required: true },
+    { key: "adminPassword", label: "初始密码", input: "password", placeholder: "************", hint: "用于创建首个管理员登录凭据；必须满足当前密码策略。", required: true },
+    { key: "adminPasswordConfirm", label: "确认密码", input: "password", placeholder: "************", hint: "用于确认初始密码输入无误；两次输入必须完全一致。", required: true },
     { key: "adminEmail", label: "邮箱", input: "email" },
     { key: "adminPhone", label: "手机号", input: "text" },
   ],
@@ -121,10 +123,10 @@ const adminSection: FieldSection = {
 const organizationSection: FieldSection = {
   title: "组织初始化",
   fields: [
-    { key: "enterpriseName", label: "企业名称", input: "text", required: true },
-    { key: "enterpriseCode", label: "企业编码", input: "text", required: true },
-    { key: "departmentName", label: "默认部门名称", input: "text", required: true },
-    { key: "departmentCode", label: "默认部门编码", input: "text", required: true },
+    { key: "enterpriseName", label: "企业名称", input: "text", hint: "初始化流程将创建该企业作为系统的全局业务主体。", required: true },
+    { key: "enterpriseCode", label: "企业编码", input: "text", hint: "企业的稳定内部标识；建议使用字母、数字、下划线或连字符。", required: true },
+    { key: "departmentName", label: "默认部门名称", input: "text", hint: "初始化流程将创建该部门，并将首个管理员归属到此部门。", required: true },
+    { key: "departmentCode", label: "默认部门编码", input: "text", hint: "部门的稳定内部标识；后续组织结构扩展将基于该编码体系。", required: true },
   ],
 };
 
@@ -135,18 +137,33 @@ const infraSection: FieldSection = {
       key: "secretProviderEndpoint",
       label: "密钥服务地址",
       input: "text",
+      hint: "Secret Store 的 provider 标识或服务地址；使用 PostgreSQL secrets 表时填写 postgres://local-secrets。",
       span: "full",
       required: true,
     },
-    { key: "redisUrl", label: "Redis 地址", input: "text", span: "full", required: true },
-    { key: "minioEndpoint", label: "MinIO 地址", input: "text", required: true },
-    { key: "minioBucket", label: "存储桶名称", input: "text", required: true },
-    { key: "minioRegion", label: "存储区域", input: "text", required: true },
-    { key: "objectKeyPrefix", label: "对象路径前缀", input: "text", required: true },
+    {
+      key: "redisUrl",
+      label: "Redis 地址",
+      input: "text",
+      hint: "后端服务访问 Redis 的连接地址；同一 Docker 网络可使用 redis://redis:6379/0，跨主机访问请使用实际内网地址。",
+      span: "full",
+      required: true,
+    },
+    {
+      key: "minioEndpoint",
+      label: "MinIO 地址",
+      input: "text",
+      hint: "后端服务访问对象存储的 S3-compatible endpoint；同一 Docker 网络可使用 http://minio:9000。",
+      required: true,
+    },
+    { key: "minioBucket", label: "存储桶名称", input: "text", hint: "用于保存导入文件、解析产物和索引相关对象；该 bucket 必须已存在且可读写。", required: true },
+    { key: "minioRegion", label: "存储区域", input: "text", hint: "对象存储区域标识；本地环境可使用 local，生产环境应与存储服务配置一致。", required: true },
+    { key: "objectKeyPrefix", label: "对象路径前缀", input: "text", hint: "用于隔离系统写入的对象路径；建议以斜杠结尾，例如 p0/。", required: true },
     {
       key: "minioAccessKeyRef",
       label: "MinIO 访问密钥引用",
       input: "text",
+      hint: "填写 Secret Store 中的 access key 引用；不得填写 access key 明文。",
       span: "full",
       required: true,
     },
@@ -154,20 +171,27 @@ const infraSection: FieldSection = {
       key: "minioSecretKeyRef",
       label: "MinIO 私有密钥引用",
       input: "text",
+      hint: "填写 Secret Store 中的 secret key 引用；不得填写 secret key 明文。",
       span: "full",
       required: true,
     },
-    { key: "qdrantBaseUrl", label: "Qdrant 地址", input: "text", required: true },
-    { key: "collectionPrefix", label: "向量集合前缀", input: "text", required: true },
+    {
+      key: "qdrantBaseUrl",
+      label: "Qdrant 地址",
+      input: "text",
+      hint: "后端服务访问向量数据库的 HTTP 地址；同一 Docker 网络可使用 http://qdrant:6333。",
+      required: true,
+    },
+    { key: "collectionPrefix", label: "向量集合前缀", input: "text", hint: "用于生成和识别 Qdrant collection；变更前需评估既有索引兼容性。", required: true },
     {
       key: "vectorDistance",
       label: "向量距离",
       input: "select",
       required: true,
       options: [
-        { label: "余弦距离", value: "cosine" },
-        { label: "点积距离", value: "dot" },
-        { label: "欧氏距离", value: "euclid" },
+        { label: "cosine", value: "cosine" },
+        { label: "dot", value: "dot" },
+        { label: "euclid", value: "euclid" },
       ],
     },
   ],
@@ -180,13 +204,15 @@ const modelSection: FieldSection = {
       key: "modelGatewayMode",
       label: "模型服务模式",
       input: "select",
+      hint: "模型调用采用外部 provider 模式；系统通过下方 provider 地址访问 embedding、rerank 和 LLM 服务。",
       required: true,
-      options: [{ label: "外部服务", value: "external" }],
+      options: [{ label: "external", value: "external" }],
     },
     {
       key: "embeddingProviderBaseUrl",
       label: "向量模型服务地址",
       input: "text",
+      hint: "Embedding provider 的基础 URL；同一 Docker 网络可使用 http://tei-embedding:80，生产环境应指向正式模型服务。",
       span: "full",
       required: true,
     },
@@ -194,6 +220,7 @@ const modelSection: FieldSection = {
       key: "rerankProviderBaseUrl",
       label: "重排模型服务地址",
       input: "text",
+      hint: "Rerank provider 的基础 URL；同一 Docker 网络可使用 http://tei-rerank:80，生产环境应指向正式模型服务。",
       span: "full",
       required: true,
     },
@@ -201,32 +228,88 @@ const modelSection: FieldSection = {
       key: "llmProviderBaseUrl",
       label: "大模型服务地址",
       input: "text",
+      hint: "OpenAI-compatible LLM provider 的基础 URL；当前部署未内置 LLM 服务，必须填写可访问的正式地址。",
       span: "full",
       required: true,
     },
-    { key: "embeddingDimension", label: "向量维度", input: "number", min: 1, step: 1, required: true },
-    { key: "embeddingModel", label: "向量模型", input: "text", required: true },
-    { key: "rerankModel", label: "重排模型", input: "text", required: true },
-    { key: "llmModel", label: "主大模型", input: "text", required: true },
-    { key: "llmFallbackModel", label: "回退大模型", input: "text", required: true },
-    { key: "keywordLanguage", label: "关键词语言", input: "text", required: true },
-    { key: "keywordAnalyzer", label: "分词器", input: "text", required: true },
-    { key: "vectorTopK", label: "向量召回数量", input: "number", min: 1, step: 1 },
-    { key: "keywordTopK", label: "关键词召回数量", input: "number", min: 1, step: 1 },
-    { key: "rerankInputTopK", label: "重排输入数量", input: "number", min: 1, step: 1 },
-    { key: "finalContextTopK", label: "最终上下文数量", input: "number", min: 1, step: 1 },
+    { key: "embeddingDimension", label: "向量维度", input: "number", hint: "必须与 embedding 模型输出维度及 Qdrant collection 维度保持一致。", min: 1, step: 1, required: true },
+    { key: "embeddingModel", label: "向量模型", input: "text", hint: "填写 embedding provider 暴露的模型名称；导入与查询应使用兼容模型。", required: true },
+    { key: "rerankModel", label: "重排模型", input: "text", hint: "填写 rerank provider 暴露的模型名称，用于对召回候选进行二次排序。", required: true },
+    { key: "llmModel", label: "主大模型", input: "text", hint: "填写 LLM provider 暴露的主模型名称，用于答案生成。", required: true },
+    { key: "llmFallbackModel", label: "回退大模型", input: "text", hint: "主模型不可用时使用的备用模型；应与业务质量和成本策略一致。", required: true },
+    { key: "keywordLanguage", label: "关键词语言", input: "text", hint: "关键词检索语言配置；中文全文检索默认使用 zh。", required: true },
+    { key: "keywordAnalyzer", label: "分词器", input: "text", hint: "PostgreSQL 全文检索使用的分词器名称；中文环境默认使用 zhparser。", required: true },
+    { key: "vectorTopK", label: "向量召回数量", input: "number", hint: "向量检索阶段返回的候选片段数量。", min: 1, step: 1 },
+    { key: "keywordTopK", label: "关键词召回数量", input: "number", hint: "关键词检索阶段返回的候选片段数量。", min: 1, step: 1 },
+    { key: "rerankInputTopK", label: "重排输入数量", input: "number", hint: "进入 rerank 阶段的候选片段数量，应结合模型延迟和召回质量设定。", min: 1, step: 1 },
+    { key: "finalContextTopK", label: "最终上下文数量", input: "number", hint: "进入答案生成上下文的最终片段数量。", min: 1, step: 1 },
     { key: "maxContextTokens", label: "最大上下文 Token 数", input: "number", min: 1, step: 1 },
+  ],
+};
+
+const chunkSection: FieldSection = {
+  title: "文档切片策略",
+  fields: [
+    {
+      key: "chunkDefaultSizeTokens",
+      label: "切片大小 Token 数",
+      input: "number",
+      hint: "单个 chunk 的目标 token 数；该配置影响后续导入、重建索引和召回粒度。",
+      min: 1,
+      step: 1,
+      required: true,
+    },
+    {
+      key: "chunkOverlapTokens",
+      label: "切片重叠 Token 数",
+      input: "number",
+      hint: "相邻 chunk 之间保留的重叠 token 数；用于降低语义边界截断带来的召回损失。",
+      min: 0,
+      step: 1,
+      required: true,
+    },
+    {
+      key: "chunkStrategyMode",
+      label: "切片策略",
+      input: "select",
+      hint: "heading_paragraph 优先按标题和段落边界切分；fixed_tokens 按固定 token 窗口切分。",
+      required: true,
+      options: [
+        { label: "heading_paragraph", value: "heading_paragraph" },
+        { label: "fixed_tokens", value: "fixed_tokens" },
+      ],
+    },
+    {
+      key: "chunkPreserveTables",
+      label: "保留表格结构",
+      input: "checkbox",
+      hint: "启用后切片器应尽量避免拆散同一张表格，提升表格问答的引用完整性。",
+    },
+    {
+      key: "chunkPreserveCodeBlocks",
+      label: "保留代码块结构",
+      input: "checkbox",
+      hint: "启用后切片器应尽量避免拆散同一个代码块，减少技术文档上下文破碎。",
+    },
+    {
+      key: "chunkPreserveContractClauses",
+      label: "保留合同条款结构",
+      input: "checkbox",
+      hint: "启用后切片器应尽量保留条款编号和条款正文的完整性。",
+      span: "full",
+    },
   ],
 };
 
 const policySection: FieldSection = {
   title: "认证与运行策略",
   fields: [
-    { key: "passwordMinLength", label: "密码最小长度", input: "number", min: 8, step: 1, required: true },
+    { key: "passwordMinLength", label: "密码最小长度", input: "number", hint: "用于约束本地账号密码强度；生产环境建议不低于 12 位。", min: 8, step: 1, required: true },
     {
       key: "accessTokenTtlMinutes",
       label: "访问令牌有效期（分钟）",
       input: "number",
+      hint: "Access token 的有效期；较短有效期可降低令牌泄露后的暴露窗口。",
       min: 1,
       step: 1,
       required: true,
@@ -235,27 +318,29 @@ const policySection: FieldSection = {
       key: "refreshTokenTtlMinutes",
       label: "刷新令牌有效期（分钟）",
       input: "number",
+      hint: "Refresh token 的有效期；应结合组织安全策略和会话体验设定。",
       min: 1,
       step: 1,
       required: true,
     },
-    { key: "jwtIssuer", label: "JWT 签发方", input: "text", required: true },
-    { key: "jwtAudience", label: "JWT 受众", input: "text", required: true },
-    { key: "jwtSigningKeyRef", label: "JWT 签名密钥引用", input: "text", span: "full", required: true },
-    { key: "maxFileMb", label: "文件大小上限 MB", input: "number", min: 1, step: 1 },
-    { key: "maxConcurrentJobs", label: "最大并发任务数", input: "number", min: 1, step: 1 },
-    { key: "embeddingBatchSize", label: "向量化批大小", input: "number", min: 1, step: 1 },
-    { key: "indexBatchSize", label: "索引写入批大小", input: "number", min: 1, step: 1 },
-    { key: "queryQpsPerUser", label: "单用户查询 QPS", input: "number", min: 1, step: 1 },
-    { key: "auditRetentionDays", label: "审计保留天数", input: "number", min: 1, step: 1 },
+    { key: "jwtIssuer", label: "JWT 签发方", input: "text", hint: "用于声明访问令牌签发主体，并参与令牌校验。", required: true },
+    { key: "jwtAudience", label: "JWT 受众", input: "text", hint: "用于声明访问令牌适用范围，并参与令牌校验。", required: true },
+    { key: "jwtSigningKeyRef", label: "JWT 签名密钥引用", input: "text", hint: "填写 Secret Store 中的签名密钥引用；真实密钥不得写入 active config。", span: "full", required: true },
+    { key: "maxFileMb", label: "文件大小上限 MB", input: "number", hint: "单个导入文件允许的最大体积。", min: 1, step: 1 },
+    { key: "maxConcurrentJobs", label: "最大并发任务数", input: "number", hint: "系统级导入任务并发上限，用于保护模型服务和索引服务容量。", min: 1, step: 1 },
+    { key: "embeddingBatchSize", label: "向量化批大小", input: "number", hint: "单次 embedding 请求处理的片段数量；应结合 provider 吞吐与延迟设定。", min: 1, step: 1 },
+    { key: "indexBatchSize", label: "索引写入批大小", input: "number", hint: "单批写入向量索引和关键词索引的片段数量。", min: 1, step: 1 },
+    { key: "queryQpsPerUser", label: "单用户查询 QPS", input: "number", hint: "单用户查询限流阈值，用于保护检索链路和模型服务。", min: 1, step: 1 },
+    { key: "auditRetentionDays", label: "审计保留天数", input: "number", hint: "审计数据保留周期；应符合组织合规和数据治理要求。", min: 1, step: 1 },
     {
       key: "auditQueryTextMode",
       label: "查询文本记录方式",
       input: "select",
+      hint: "控制审计记录中对查询文本的保存方式；生产环境应优先选择 hash 或 none。",
       options: [
-        { label: "不记录", value: "none" },
-        { label: "仅记录哈希", value: "hash" },
-        { label: "记录明文", value: "plain" },
+        { label: "none", value: "none" },
+        { label: "hash", value: "hash" },
+        { label: "plain", value: "plain" },
       ],
     },
   ],
@@ -264,10 +349,10 @@ const policySection: FieldSection = {
 const cacheSection: FieldSection = {
   title: "缓存开关",
   fields: [
-    { key: "queryEmbeddingEnabled", label: "查询向量缓存", input: "checkbox" },
-    { key: "retrievalResultEnabled", label: "召回结果缓存", input: "checkbox" },
-    { key: "finalAnswerEnabled", label: "最终答案缓存", input: "checkbox" },
-    { key: "crossUserFinalAnswerAllowed", label: "允许跨用户最终答案缓存", input: "checkbox", span: "full" },
+    { key: "queryEmbeddingEnabled", label: "查询向量缓存", input: "checkbox", hint: "启用后可复用相同查询的 embedding 结果，降低重复模型调用成本。" },
+    { key: "retrievalResultEnabled", label: "召回结果缓存", input: "checkbox", hint: "启用后缓存检索召回结果；缓存键必须包含权限、配置和索引版本信息。" },
+    { key: "finalAnswerEnabled", label: "最终答案缓存", input: "checkbox", hint: "启用后缓存最终答案；涉及权限变更和引用时效时需严格评估风险。" },
+    { key: "crossUserFinalAnswerAllowed", label: "允许跨用户最终答案缓存", input: "checkbox", hint: "高风险配置，可能导致不同用户之间复用答案；P0 阶段禁止开启。", span: "full" },
   ],
 };
 
@@ -277,13 +362,13 @@ const sections = [
   organizationSection,
   infraSection,
   modelSection,
+  chunkSection,
   policySection,
   cacheSection,
 ];
 
 const payload = computed(() => buildSetupPayload(form));
-const payloadPreview = computed(() => JSON.stringify(payload.value, null, 2));
-const payloadSignature = computed(() => payloadPreview.value);
+const payloadSignature = computed(() => JSON.stringify(payload.value));
 const localValidationIssues = computed(() => validateLocalForm(form, setupState.value));
 const localBlockingIssues = computed(() =>
   localValidationIssues.value.filter((issue) => issue.tone === "error"),
@@ -409,6 +494,8 @@ const summaryItems = computed(() => [
   { label: "向量模型服务", value: form.embeddingProviderBaseUrl },
   { label: "重排模型服务", value: form.rerankProviderBaseUrl },
   { label: "大模型服务", value: form.llmProviderBaseUrl },
+  { label: "切片策略", value: form.chunkStrategyMode },
+  { label: "切片大小", value: `${form.chunkDefaultSizeTokens} tokens` },
   { label: "向量库", value: form.qdrantBaseUrl },
 ]);
 
@@ -504,24 +591,6 @@ function resetForm(): void {
     message: "已恢复本地默认初始化配置",
   };
   submitConfirmed.value = false;
-}
-
-async function copyPayload(): Promise<void> {
-  busy.copying = true;
-  try {
-    await navigator.clipboard.writeText(payloadPreview.value);
-    feedback.value = {
-      tone: "success",
-      message: "请求体已复制到剪贴板",
-    };
-  } catch {
-    feedback.value = {
-      tone: "error",
-      message: "复制请求体失败",
-    };
-  } finally {
-    busy.copying = false;
-  }
 }
 
 function updateStringField(key: StringFieldKey, value: string): void {
@@ -645,6 +714,11 @@ function validateLocalForm(
   if (!/[A-Z]/.test(current.adminPassword) || !/[a-z]/.test(current.adminPassword) || !/\d/.test(current.adminPassword)) {
     add("error", "首个管理员", "初始密码必须同时包含大写字母、小写字母和数字。", "adminPassword");
   }
+  if (!current.adminPasswordConfirm) {
+    add("error", "首个管理员", "请再次输入初始密码。", "adminPasswordConfirm");
+  } else if (current.adminPasswordConfirm !== current.adminPassword) {
+    add("error", "首个管理员", "两次输入的管理员密码不一致。", "adminPasswordConfirm");
+  }
   if (current.adminPassword === "ChangeMe_123456") {
     add("warning", "首个管理员", "当前仍是本地默认密码。", "adminPassword");
   }
@@ -693,7 +767,11 @@ function validateLocalForm(
   }
   validateHttpUrl(current.embeddingProviderBaseUrl, "向量模型服务地址", "embeddingProviderBaseUrl", "模型与检索", add);
   validateHttpUrl(current.rerankProviderBaseUrl, "重排模型服务地址", "rerankProviderBaseUrl", "模型与检索", add);
-  validateHttpUrl(current.llmProviderBaseUrl, "大模型服务地址", "llmProviderBaseUrl", "模型与检索", add);
+  if (!current.llmProviderBaseUrl.trim()) {
+    add("error", "模型与检索", "当前 compose 未创建大模型服务，必须填写真实大模型服务地址。", "llmProviderBaseUrl");
+  } else {
+    validateHttpUrl(current.llmProviderBaseUrl, "大模型服务地址", "llmProviderBaseUrl", "模型与检索", add);
+  }
   if (isComposeDemoProvider(current.embeddingProviderBaseUrl) || isComposeDemoProvider(current.rerankProviderBaseUrl)) {
     add("warning", "模型与检索", "当前 TEI 容器服务仅适合本地演示，生产应替换为真实模型服务。");
   }
@@ -709,6 +787,22 @@ function validateLocalForm(
   }
   if (current.rerankInputTopK > current.vectorTopK + current.keywordTopK) {
     add("warning", "模型与检索", "重排输入数量大于向量和关键词召回总量。", "rerankInputTopK");
+  }
+
+  if (!Number.isInteger(current.chunkDefaultSizeTokens) || current.chunkDefaultSizeTokens <= 0) {
+    add("error", "文档切片策略", "切片大小 Token 数必须是正整数。", "chunkDefaultSizeTokens");
+  }
+  if (!Number.isInteger(current.chunkOverlapTokens) || current.chunkOverlapTokens < 0) {
+    add("error", "文档切片策略", "切片重叠 Token 数必须是非负整数。", "chunkOverlapTokens");
+  }
+  if (current.chunkOverlapTokens >= current.chunkDefaultSizeTokens) {
+    add("error", "文档切片策略", "切片重叠 Token 数必须小于切片大小 Token 数。", "chunkOverlapTokens");
+  }
+  if (!["heading_paragraph", "fixed_tokens"].includes(current.chunkStrategyMode)) {
+    add("error", "文档切片策略", "切片策略必须是 heading_paragraph 或 fixed_tokens。", "chunkStrategyMode");
+  }
+  if (current.chunkDefaultSizeTokens > 1200) {
+    add("warning", "文档切片策略", "切片过大会降低细粒度召回效果，并增加上下文裁剪压力。", "chunkDefaultSizeTokens");
   }
 
   if (current.passwordMinLength < 12) {
@@ -848,9 +942,6 @@ function isComposeDemoProvider(value: string): boolean {
           <button class="button button--secondary" type="button" @click="refreshState" :disabled="busy.refreshing">
             {{ busy.refreshing ? "刷新中..." : "刷新状态" }}
           </button>
-          <button class="button button--secondary" type="button" @click="copyPayload" :disabled="busy.copying">
-            {{ busy.copying ? "复制中..." : "复制请求体" }}
-          </button>
           <button class="button button--secondary" type="button" @click="resetForm">
             恢复默认值
           </button>
@@ -935,6 +1026,7 @@ function isComposeDemoProvider(value: string): boolean {
                     "
                   />
                 </template>
+                <p v-if="field.hint" class="field__hint">{{ field.hint }}</p>
                 <ul v-if="fieldIssues(field.key).length" class="field-issues">
                   <li
                     v-for="issue in fieldIssues(field.key)"
@@ -948,12 +1040,6 @@ function isComposeDemoProvider(value: string): boolean {
             </div>
           </section>
 
-          <section class="panel">
-            <header class="panel__header">
-              <h3>请求预览</h3>
-            </header>
-            <textarea class="preview" readonly :value="payloadPreview" />
-          </section>
         </section>
 
         <aside class="rail">
@@ -1256,6 +1342,13 @@ function isComposeDemoProvider(value: string): boolean {
   gap: 8px;
 }
 
+.field__hint {
+  margin: 0;
+  color: #6c7788;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .required-mark {
   color: #7a4b14;
   background: #fff6e9;
@@ -1271,17 +1364,28 @@ function isComposeDemoProvider(value: string): boolean {
   border-radius: 8px;
   background: #fafbfd;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
   gap: 10px;
 }
 
-.field--checkbox .field-issues {
-  grid-column: 1 / -1;
+.field--checkbox > span {
+  min-width: 0;
+  color: #1d2935;
+  line-height: 1.4;
+  overflow-wrap: break-word;
+  white-space: normal;
 }
 
-.control,
-.preview {
+.field--checkbox .field__hint {
+  grid-column: 2 / -1;
+}
+
+.field--checkbox .field-issues {
+  grid-column: 2 / -1;
+}
+
+.control {
   width: 100%;
   border: 1px solid #cdd5df;
   border-radius: 8px;
@@ -1291,8 +1395,7 @@ function isComposeDemoProvider(value: string): boolean {
   font: inherit;
 }
 
-.control:focus,
-.preview:focus {
+.control:focus {
   outline: 2px solid #8ec5b1;
   outline-offset: 1px;
   border-color: #8ec5b1;
@@ -1334,17 +1437,6 @@ function isComposeDemoProvider(value: string): boolean {
   accent-color: #2f7d66;
 }
 
-.preview {
-  min-height: 520px;
-  resize: vertical;
-  border: 0;
-  border-top: 1px solid #e7ebf0;
-  border-radius: 0;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 .summary {
   display: grid;
   gap: 12px;
@@ -1353,6 +1445,7 @@ function isComposeDemoProvider(value: string): boolean {
 }
 
 .summary__row {
+  min-width: 0;
   display: grid;
   grid-template-columns: 120px minmax(0, 1fr);
   gap: 12px;
@@ -1360,13 +1453,34 @@ function isComposeDemoProvider(value: string): boolean {
 }
 
 .summary dt {
+  min-width: 0;
   color: #667182;
 }
 
 .summary dd {
+  min-width: 0;
   margin: 0;
   text-align: right;
   color: #1d2935;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.sidebar .summary {
+  padding: 0;
+}
+
+.sidebar .summary__row {
+  grid-template-columns: minmax(82px, auto) minmax(0, 1fr);
+}
+
+.sidebar .summary dt {
+  color: #98a4b5;
+}
+
+.sidebar .summary dd {
+  color: #f4f6f8;
 }
 
 .summary__value--break {

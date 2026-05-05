@@ -1279,7 +1279,7 @@ GET  /internal/v1/model-health
   "llm": {
     "default": "qwen-enterprise-72b",
     "high_security": "private-qwen-72b",
-    "fallback": "qwen-enterprise-14b"
+    "fallback": "qwen3-4b"
   }
 }
 ```
@@ -2497,7 +2497,7 @@ knowledge_base 配置 > department 配置 > global 配置 > 代码默认值
 | `rerank.max_candidates` | `80` | Rerank 最大候选数 |
 | `llm.default_model` | `qwen-enterprise-72b` | 默认生成模型 |
 | `llm.high_security_model` | `private-qwen-72b` | 高密级模型 |
-| `llm.fallback_model` | `qwen-enterprise-14b` | 降级模型 |
+| `llm.fallback_model` | `qwen3-4b` | 降级模型 |
 | `llm.timeout_ms` | `30000` | LLM 总超时 |
 | `llm.first_token_timeout_ms` | `3000` | 首 token 超时 |
 | `llm.max_tokens` | `800` | 最大生成 token |

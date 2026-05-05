@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     )
     setup_token_log_enabled: bool = Field(default=True, alias="SETUP_TOKEN_LOG_ENABLED")
     setup_token_signing_secret: str | None = Field(default=None, alias="SETUP_TOKEN_SIGNING_SECRET")
+    secret_store_master_key: str | None = Field(default=None, alias="SECRET_STORE_MASTER_KEY")
 
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
     database_connect_timeout_seconds: int = Field(

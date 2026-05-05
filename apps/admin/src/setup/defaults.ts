@@ -3,6 +3,7 @@ export interface SetupFormModel {
   adminUsername: string;
   adminDisplayName: string;
   adminPassword: string;
+  adminPasswordConfirm: string;
   adminEmail: string;
   adminPhone: string;
   enterpriseName: string;
@@ -42,6 +43,12 @@ export interface SetupFormModel {
   rerankInputTopK: number;
   finalContextTopK: number;
   maxContextTokens: number;
+  chunkDefaultSizeTokens: number;
+  chunkOverlapTokens: number;
+  chunkStrategyMode: "heading_paragraph" | "fixed_tokens";
+  chunkPreserveTables: boolean;
+  chunkPreserveCodeBlocks: boolean;
+  chunkPreserveContractClauses: boolean;
   maxFileMb: number;
   maxConcurrentJobs: number;
   embeddingBatchSize: number;
@@ -74,7 +81,8 @@ export function createDefaultSetupForm(): SetupFormModel {
     setupToken: "",
     adminUsername: "admin",
     adminDisplayName: "系统管理员",
-    adminPassword: "ChangeMe_123456",
+    adminPassword: "",
+    adminPasswordConfirm: "",
     adminEmail: "admin@example.com",
     adminPhone: "",
     enterpriseName: "默认企业",
@@ -97,12 +105,12 @@ export function createDefaultSetupForm(): SetupFormModel {
     modelGatewayMode: "external",
     embeddingProviderBaseUrl: "http://tei-embedding:80",
     rerankProviderBaseUrl: "http://tei-rerank:80",
-    llmProviderBaseUrl: "http://vllm-llm:8000",
-    embeddingDimension: 1024,
-    embeddingModel: "qwen3-embedding-0.6b",
+    llmProviderBaseUrl: "",
+    embeddingDimension: 768,
+    embeddingModel: "jina‑embeddings‑v2‑base‑zh",
     rerankModel: "bge-reranker-base",
-    llmModel: "qwen-enterprise-14b",
-    llmFallbackModel: "qwen-enterprise-14b",
+    llmModel: "qwen3-4b",
+    llmFallbackModel: "qwen3-4b",
     passwordMinLength: 12,
     accessTokenTtlMinutes: 30,
     refreshTokenTtlMinutes: 10080,
@@ -114,6 +122,12 @@ export function createDefaultSetupForm(): SetupFormModel {
     rerankInputTopK: 20,
     finalContextTopK: 8,
     maxContextTokens: 6000,
+    chunkDefaultSizeTokens: 800,
+    chunkOverlapTokens: 120,
+    chunkStrategyMode: "heading_paragraph",
+    chunkPreserveTables: true,
+    chunkPreserveCodeBlocks: true,
+    chunkPreserveContractClauses: true,
     maxFileMb: 50,
     maxConcurrentJobs: 4,
     embeddingBatchSize: 32,
@@ -269,7 +283,7 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
         embedding_version: "2026-04-30",
         embedding_dimension: form.embeddingDimension,
         embedding_normalize: true,
-        embedding_tokenizer_version: "qwen3-embedding-0.6b-tokenizer",
+        embedding_tokenizer_version: "jina‑embeddings‑v2‑base‑zh-tokenizer",
         rerank_model: form.rerankModel,
         llm_model: form.llmModel,
         llm_fallback_model: form.llmFallbackModel,
@@ -315,13 +329,13 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
         expansion_enabled: false,
       },
       chunk: {
-        default_size_tokens: 800,
-        overlap_tokens: 120,
+        default_size_tokens: form.chunkDefaultSizeTokens,
+        overlap_tokens: form.chunkOverlapTokens,
         strategy: {
-          mode: "heading_paragraph",
-          preserve_tables: true,
-          preserve_code_blocks: true,
-          preserve_contract_clauses: true,
+          mode: form.chunkStrategyMode,
+          preserve_tables: form.chunkPreserveTables,
+          preserve_code_blocks: form.chunkPreserveCodeBlocks,
+          preserve_contract_clauses: form.chunkPreserveContractClauses,
         },
       },
       import: {

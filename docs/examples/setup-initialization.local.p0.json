@@ -116,22 +116,22 @@
         },
         "llm": {
           "type": "openai_compatible",
-          "base_url": "http://vllm-llm:8000",
+          "base_url": "http://llm-provider:8000",
           "healthcheck_path": "/health",
           "chat_completions_path": "/v1/chat/completions"
         }
       },
       "routes": {
         "embedding": {
-          "online_default": "qwen3-embedding-0.6b",
-          "batch_default": "qwen3-embedding-0.6b"
+          "online_default": "jina‑embeddings‑v2‑base‑zh",
+          "batch_default": "jina‑embeddings‑v2‑base‑zh"
         },
         "rerank": {
           "default": "bge-reranker-base"
         },
         "llm": {
-          "default": "qwen-enterprise-14b",
-          "fallback": "qwen-enterprise-14b"
+          "default": "qwen3-4b",
+          "fallback": "qwen3-4b"
         }
       },
       "healthcheck": {
@@ -141,14 +141,14 @@
       }
     },
     "model": {
-      "embedding_model": "qwen3-embedding-0.6b",
+      "embedding_model": "jina‑embeddings‑v2‑base‑zh",
       "embedding_version": "2026-04-30",
-      "embedding_dimension": 1024,
+      "embedding_dimension": 768,
       "embedding_normalize": true,
-      "embedding_tokenizer_version": "qwen3-embedding-0.6b-tokenizer",
+      "embedding_tokenizer_version": "jina‑embeddings‑v2‑base‑zh-tokenizer",
       "rerank_model": "bge-reranker-base",
-      "llm_model": "qwen-enterprise-14b",
-      "llm_fallback_model": "qwen-enterprise-14b"
+      "llm_model": "qwen3-4b",
+      "llm_fallback_model": "qwen3-4b"
     },
     "llm": {
       "temperature": 0.1,
