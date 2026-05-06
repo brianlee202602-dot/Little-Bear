@@ -2537,6 +2537,9 @@ components:
       type: object
       required: [username, password]
       properties:
+        enterprise_code:
+          type: string
+          description: 多企业存在同名账号时必填；单企业部署可省略。
         username:
           type: string
         password:

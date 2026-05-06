@@ -1,3 +1,10 @@
+"""PostgreSQL 加密 Secret Store。
+
+active_config 只能保存 secret_ref，真实密钥存入 secrets 表。这里使用
+SECRET_STORE_MASTER_KEY 派生 AES-GCM 加密密钥，并把 secret_ref 作为关联数据，
+防止密文被复制到另一个 secret_ref 后仍可解密。
+"""
+
 from __future__ import annotations
 
 import base64
@@ -31,7 +38,7 @@ HASH_CONTEXT = b"little-bear-secret-store-value-hash-v1"
 
 
 class SecretStoreError(Exception):
-    """Secret Store operation failed."""
+    """Secret Store 操作失败。"""
 
 
 @dataclass(frozen=True)
@@ -70,7 +77,7 @@ class SecretVerifyResult:
 
 
 class SecretStoreService:
-    """PostgreSQL-backed encrypted Secret Store."""
+    """基于 PostgreSQL 的加密 Secret Store。"""
 
     def put_secret(
         self,
@@ -87,6 +94,7 @@ class SecretStoreService:
 
         master_key = get_required_master_key()
         encrypted = encrypt_secret_value(secret_ref, secret_value, master_key)
+        # FOR UPDATE 避免并发 rotate 同一个 secret_ref 时互相覆盖状态。
         existing_id = session.execute(
             text("SELECT id::text AS id FROM secrets WHERE secret_ref = :secret_ref FOR UPDATE"),
             {"secret_ref": secret_ref},
@@ -238,6 +246,7 @@ class SecretStoreService:
 
 
 def validate_secret_ref(secret_ref: str) -> None:
+    # P0 只允许 rag 命名空间，避免初始化阶段把任意外部 Secret ref 混入配置。
     if not SECRET_REF_PATTERN.match(secret_ref):
         raise SecretStoreError(
             "secret_ref must match secret://<namespace>/<service>/<name>"
@@ -266,6 +275,7 @@ def encrypt_secret_value(secret_ref: str, secret_value: str, master_key: str) ->
     ciphertext = AESGCM(key).encrypt(
         nonce,
         secret_value.encode("utf-8"),
+        # associated_data 绑定 secret_ref，防止密文换名后仍可被解开。
         secret_ref.encode("utf-8"),
     )
     encryption_meta = {
@@ -321,6 +331,7 @@ def _derive_encryption_key(master_key: str, salt: bytes) -> bytes:
 
 
 def _hash_secret_value(master_key: str, secret_value: str) -> str:
+    # value_hash 用 HMAC 而不是明文 hash，避免对低熵密钥做离线字典比对。
     return hmac.new(
         key=master_key.encode("utf-8"),
         msg=HASH_CONTEXT + secret_value.encode("utf-8"),

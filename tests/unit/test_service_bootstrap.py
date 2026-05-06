@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.modules.setup.bootstrap_service import (
     EXPECTED_SCHEMA_REVISION,
+    BootstrapCheck,
+    ServiceBootstrapResult,
     ServiceBootstrapService,
+    ServiceBootstrapStateService,
 )
 
 
@@ -31,6 +35,44 @@ class _FakeSession:
         if "alembic_version" in sql:
             return _Result(_Row({"version_num": EXPECTED_SCHEMA_REVISION}))
         return _Result(_Row({}))
+
+
+class _StateSession:
+    def execute(self, statement, *_args, **_kwargs):
+        sql = str(statement)
+        if "FROM system_state" in sql:
+            return _Result(
+                _Row(
+                    {
+                        "value_json": {
+                            "ready": True,
+                            "config_version": 1,
+                            "schema_migration_version": EXPECTED_SCHEMA_REVISION,
+                            "checks": [
+                                {
+                                    "name": "redis",
+                                    "status": "passed",
+                                    "message": "cached",
+                                    "required": True,
+                                }
+                            ],
+                        },
+                        "updated_at": datetime.now(UTC),
+                    }
+                )
+            )
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _ExplodingBootstrapService(ServiceBootstrapService):
+    def load_schema_revision(self, _session):
+        return EXPECTED_SCHEMA_REVISION
+
+    def bootstrap(self, *_args, **_kwargs) -> ServiceBootstrapResult:
+        raise AssertionError("cached bootstrap state should be reused")
+
+    def persist_result(self, *_args, **_kwargs) -> None:
+        raise AssertionError("cached bootstrap state should not be persisted")
 
 
 def _example_config() -> dict:
@@ -74,6 +116,19 @@ def test_service_bootstrap_passes_when_required_dependencies_are_available(monke
         "model_provider_rerank",
         "model_provider_llm",
     }
+
+
+def test_service_bootstrap_state_reuses_fresh_cached_result() -> None:
+    result = ServiceBootstrapStateService(
+        bootstrap_service=_ExplodingBootstrapService(),
+        ttl_seconds=60,
+    ).ensure_ready(_StateSession(), active_config_version=1)
+
+    assert result.ready is True
+    assert result.config_version == 1
+    assert result.checks == (
+        BootstrapCheck(name="redis", status="passed", message="cached", required=True),
+    )
 
 
 def test_service_bootstrap_fails_when_required_secret_is_missing(monkeypatch) -> None:

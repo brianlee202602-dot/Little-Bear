@@ -1,18 +1,26 @@
+"""首次初始化和恢复初始化的事务服务。
+
+该服务把 setup payload 拆成两部分处理：setup 写入首个管理员、组织和内置角色；
+config 写入 config_versions/system_configs 并发布为 active_config。整个过程必须在同一
+数据库事务中完成，失败时整体回滚。
+"""
+
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from app.modules.config.errors import ConfigServiceError
+from app.modules.config.validator import ConfigSchemaValidator
 from app.modules.secrets.service import SecretStoreError, SecretStoreService
 from app.modules.setup.bootstrap_service import ServiceBootstrapService
 from app.modules.setup.service import SetupStatus
 from app.modules.setup.token_service import SetupTokenContext, SetupTokenService
 from app.shared.context import get_request_context
-from app.shared.paths import CONFIG_SCHEMA_PATH
+from app.shared.json_utils import as_dict, stable_json_hash
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -20,12 +28,6 @@ try:
     from argon2 import PasswordHasher
 except ModuleNotFoundError:  # pragma: no cover - 运行环境缺依赖时由业务错误返回。
     PasswordHasher = None  # type: ignore[assignment]
-
-try:
-    from jsonschema import Draft202012Validator
-except ModuleNotFoundError:  # pragma: no cover - 运行环境缺依赖时由业务错误返回。
-    Draft202012Validator = None  # type: ignore[assignment]
-
 
 BUILTIN_ROLE_NAMES = {
     "system_admin",
@@ -80,12 +82,14 @@ class SetupInitializationService:
     """执行首次初始化实体和 active_config v1 发布。"""
 
     def validate_payload(self, payload: dict[str, Any]) -> SetupValidationResult:
+        """执行不会落库的配置校验，供页面“校验配置”按钮调用。"""
+
         errors: list[dict[str, object]] = []
         warnings: list[dict[str, object]] = []
 
         self._validate_schema(payload, errors)
-        setup = _as_dict(payload.get("setup"))
-        config = _as_dict(payload.get("config"))
+        setup = as_dict(payload.get("setup"))
+        config = as_dict(payload.get("config"))
 
         self._validate_setup_rules(setup, config, errors)
         self._validate_secret_refs(config, errors)
@@ -110,6 +114,7 @@ class SetupInitializationService:
                 "setup payload is invalid",
                 details={"errors": validation.errors, "warnings": validation.warnings},
             )
+        # provider 明文 token 只允许在初始化请求里短暂停留，随后立即写入 Secret Store。
         prepared_payload = self._prepare_model_provider_secrets(session, payload)
         if recovery_mode:
             return self._recover_active_config(session, prepared_payload, setup_token=setup_token)
@@ -133,7 +138,8 @@ class SetupInitializationService:
         default_department_id = uuid.uuid4()
         config_version_id = uuid.uuid4()
         config_version = int(config["config_version"])
-        config_hash = _stable_hash(config)
+        config_hash = stable_json_hash(config)
+        # 初始化提交前先做依赖检查；失败则不创建管理员和 active_config。
         bootstrap_result = ServiceBootstrapService().bootstrap(session, config=config)
         if not bootstrap_result.ready:
             raise SetupInitializationError(
@@ -157,6 +163,7 @@ class SetupInitializationService:
             config_version=config_version,
         )
         self._mark_status(session, SetupStatus.CREATING_ADMIN)
+        # 以下写入共享同一事务，任一失败都会由 session_scope 回滚。
         self._insert_enterprise(session, enterprise_id, enterprise_payload)
         self._insert_admin_user(session, admin_user_id, enterprise_id, admin_payload)
         self._insert_admin_credentials(session, admin_user_id, admin_payload["initial_password"])
@@ -246,7 +253,7 @@ class SetupInitializationService:
         *,
         setup_token: SetupTokenContext | None = None,
     ) -> None:
-        config = _as_dict(payload.get("config"))
+        config = as_dict(payload.get("config"))
         config_version = config.get("config_version")
         self._insert_audit_log(
             session,
@@ -262,35 +269,30 @@ class SetupInitializationService:
                 "valid": validation.valid,
                 "error_count": len(validation.errors),
                 "warning_count": len(validation.warnings),
-                "config_hash": _stable_hash(config) if config else None,
+                "config_hash": stable_json_hash(config) if config else None,
                 "setup_token_id": setup_token.setup_token_id if setup_token else None,
             },
             config_version=config_version if isinstance(config_version, int) else None,
         )
 
     def _validate_schema(self, payload: dict[str, Any], errors: list[dict[str, object]]) -> None:
-        if Draft202012Validator is None:
-            errors.append(
-                _issue("SETUP_DEPENDENCY_MISSING", "$", "jsonschema is required", retryable=False)
-            )
-            return
         try:
-            schema = json.loads(CONFIG_SCHEMA_PATH.read_text(encoding="utf-8"))
-        except OSError as exc:
+            issues = ConfigSchemaValidator().validate_setup_payload(payload)
+        except ConfigServiceError as exc:
             errors.append(
                 _issue(
-                    "SETUP_SCHEMA_UNAVAILABLE",
+                    _setup_schema_error_code(exc.error_code),
                     "$",
-                    f"config schema is unavailable: {exc.__class__.__name__}",
-                    retryable=True,
+                    exc.message,
+                    retryable=exc.retryable,
                 )
             )
             return
 
-        validator = Draft202012Validator(schema)
-        for error in sorted(validator.iter_errors(payload), key=lambda item: list(item.path)):
-            path = "$" + "".join(f".{part}" for part in error.path)
-            errors.append(_issue("SETUP_CONFIG_INVALID", path, error.message, retryable=False))
+        for issue in issues:
+            errors.append(
+                _issue("SETUP_CONFIG_INVALID", issue.path, issue.message, retryable=False)
+            )
 
     def _prepare_model_provider_secrets(
         self,
@@ -298,18 +300,18 @@ class SetupInitializationService:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         prepared_payload = deepcopy(payload)
-        setup = _as_dict(prepared_payload.get("setup"))
-        config = _as_dict(prepared_payload.get("config"))
-        model_provider_secrets = _as_dict(setup.pop("model_provider_secrets", None))
-        model_gateway = _as_dict(config.get("model_gateway"))
-        providers = _as_dict(model_gateway.get("providers"))
+        setup = as_dict(prepared_payload.get("setup"))
+        config = as_dict(prepared_payload.get("config"))
+        model_provider_secrets = as_dict(setup.pop("model_provider_secrets", None))
+        model_gateway = as_dict(config.get("model_gateway"))
+        providers = as_dict(model_gateway.get("providers"))
 
         for provider_name, (secret_field, secret_ref) in MODEL_PROVIDER_SECRET_FIELDS.items():
             secret_value = model_provider_secrets.get(secret_field)
             if not isinstance(secret_value, str) or not secret_value.strip():
                 continue
 
-            provider = _as_dict(providers.get(provider_name))
+            provider = as_dict(providers.get(provider_name))
             try:
                 SecretStoreService().put_secret(
                     session,
@@ -342,9 +344,9 @@ class SetupInitializationService:
         config: dict[str, Any],
         errors: list[dict[str, object]],
     ) -> None:
-        admin = _as_dict(setup.get("admin"))
-        organization = _as_dict(setup.get("organization"))
-        roles = _as_dict(setup.get("roles"))
+        admin = as_dict(setup.get("admin"))
+        organization = as_dict(setup.get("organization"))
+        roles = as_dict(setup.get("roles"))
         departments = organization.get("departments")
 
         if not isinstance(departments, list) or not departments:
@@ -397,7 +399,7 @@ class SetupInitializationService:
             )
 
         password = admin.get("initial_password")
-        auth_config = _as_dict(config.get("auth"))
+        auth_config = as_dict(config.get("auth"))
         min_length = auth_config.get("password_min_length", 12)
         if not isinstance(min_length, int):
             min_length = 12
@@ -443,10 +445,10 @@ class SetupInitializationService:
     def _validate_secret_refs(
         self, config: dict[str, Any], errors: list[dict[str, object]]
     ) -> None:
-        storage = _as_dict(config.get("storage"))
-        auth = _as_dict(config.get("auth"))
-        model_gateway = _as_dict(config.get("model_gateway"))
-        model_providers = _as_dict(model_gateway.get("providers"))
+        storage = as_dict(config.get("storage"))
+        auth = as_dict(config.get("auth"))
+        model_gateway = as_dict(config.get("model_gateway"))
+        model_providers = as_dict(model_gateway.get("providers"))
         secret_refs = [
             ("$.config.storage.access_key_ref", storage.get("access_key_ref"), True),
             ("$.config.storage.secret_key_ref", storage.get("secret_key_ref"), True),
@@ -454,7 +456,7 @@ class SetupInitializationService:
             ("$.config.model_gateway.auth_token_ref", model_gateway.get("auth_token_ref"), False),
         ]
         for provider_name in ("embedding", "rerank", "llm"):
-            provider = _as_dict(model_providers.get(provider_name))
+            provider = as_dict(model_providers.get(provider_name))
             secret_refs.append(
                 (
                     f"$.config.model_gateway.providers.{provider_name}.auth_token_ref",
@@ -474,7 +476,7 @@ class SetupInitializationService:
     def _validate_cache_policy(
         self, config: dict[str, Any], errors: list[dict[str, object]]
     ) -> None:
-        cache = _as_dict(config.get("cache"))
+        cache = as_dict(config.get("cache"))
         if cache.get("cross_user_final_answer_allowed") is True:
             errors.append(
                 _issue(
@@ -487,7 +489,7 @@ class SetupInitializationService:
     def _validate_keyword_search(
         self, config: dict[str, Any], warnings: list[dict[str, object]]
     ) -> None:
-        keyword_search = _as_dict(config.get("keyword_search"))
+        keyword_search = as_dict(config.get("keyword_search"))
         if keyword_search.get("keyword_analyzer") != "zhparser":
             warnings.append(
                 _issue(
@@ -551,11 +553,13 @@ class SetupInitializationService:
         *,
         setup_token: SetupTokenContext | None,
     ) -> SetupInitializationResult:
+        """恢复初始化只重发 active_config，不重建首个管理员、组织或角色。"""
+
         config = dict(payload["config"])
         config_version_id = uuid.uuid4()
         config_version = self._next_config_version(session)
         config["config_version"] = config_version
-        config_hash = _stable_hash(config)
+        config_hash = stable_json_hash(config)
         enterprise_id, admin_user_id = self._load_recovery_subjects(session)
         bootstrap_result = ServiceBootstrapService().bootstrap(session, config=config)
         if not bootstrap_result.ready:
@@ -675,6 +679,7 @@ class SetupInitializationService:
         return enterprise._mapping["id"], admin_user._mapping["id"]
 
     def _archive_active_config(self, session: Session) -> None:
+        # 恢复初始化先归档旧 active，再写入新 active，避免两个 active 版本并存。
         session.execute(
             text("UPDATE system_configs SET status = 'archived' WHERE status = 'active'")
         )
@@ -730,6 +735,7 @@ class SetupInitializationService:
     def _insert_admin_credentials(
         self, session: Session, admin_user_id: uuid.UUID, initial_password: str
     ) -> None:
+        # 密码明文只在请求生命周期内存在，数据库保存 argon2id hash。
         password_hash = PasswordHasher().hash(initial_password)  # type: ignore[operator]
         session.execute(
             text(
@@ -875,6 +881,7 @@ class SetupInitializationService:
         config_hash: str,
         schema_version: int,
     ) -> None:
+        # config_versions 保存版本元数据；真正配置 bundle 存在 system_configs。
         session.execute(
             text(
                 """
@@ -905,6 +912,7 @@ class SetupInitializationService:
         config: dict[str, Any],
         config_hash: str,
     ) -> None:
+        # P0 以单条 active_config bundle 存储，后续可拆成多 scope/多 key 配置。
         session.execute(
             text(
                 """
@@ -1036,15 +1044,6 @@ class SetupInitializationService:
         )
 
 
-def _stable_hash(value: dict[str, Any]) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
 def _issue(
     error_code: str,
     path: str,
@@ -1058,6 +1057,16 @@ def _issue(
         "message": message,
         "retryable": retryable,
     }
+
+
+def _setup_schema_error_code(config_error_code: str) -> str:
+    if config_error_code == "CONFIG_SCHEMA_VALIDATOR_UNAVAILABLE":
+        return "SETUP_DEPENDENCY_MISSING"
+    if config_error_code == "CONFIG_SCHEMA_UNAVAILABLE":
+        return "SETUP_SCHEMA_UNAVAILABLE"
+    if config_error_code == "CONFIG_SCHEMA_MALFORMED":
+        return "SETUP_SCHEMA_MALFORMED"
+    return "SETUP_CONFIG_INVALID"
 
 
 def _role_scope_type(role_code: str) -> str:

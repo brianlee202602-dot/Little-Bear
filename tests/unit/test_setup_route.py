@@ -210,7 +210,9 @@ def test_setup_initialization_route_returns_database_error_details(monkeypatch) 
         pass
 
     def fake_initialize(_self, _session, _payload, *, setup_token=None):
-        raise SQLAlchemyError("db failed").with_traceback(None) from _FakeDriverError("duplicate key")
+        raise SQLAlchemyError("db failed").with_traceback(None) from _FakeDriverError(
+            "duplicate key"
+        )
 
     monkeypatch.setattr(
         "app.api.routes.setup.SetupInitializationService.initialize",

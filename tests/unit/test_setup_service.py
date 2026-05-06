@@ -134,6 +134,10 @@ def test_setup_service_normalizes_not_initialized_to_setup_required(monkeypatch)
 
 
 def test_setup_service_reads_system_state(monkeypatch) -> None:
+    class _ProbeResult:
+        def to_setup_state_available(self) -> bool:
+            return True
+
     class _FakeSession:
         def __enter__(self) -> _FakeSession:
             return self
@@ -187,6 +191,10 @@ def test_setup_service_reads_system_state(monkeypatch) -> None:
             )()
 
     monkeypatch.setattr("app.modules.setup.service.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.modules.setup.service.ActiveConfigProbe.probe",
+        lambda _self, _session, _version: _ProbeResult(),
+    )
 
     state = SetupService().load_state()
 

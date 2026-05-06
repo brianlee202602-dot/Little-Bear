@@ -71,6 +71,7 @@ export type SetupRequestPayload = {
   config: Record<string, unknown>;
 };
 
+// 内置角色在初始化时一次性创建，后续权限扩展应通过管理端配置或迁移脚本演进。
 const BUILTIN_ROLES = [
   "system_admin",
   "security_admin",
@@ -81,6 +82,7 @@ const BUILTIN_ROLES = [
 ];
 
 export function createDefaultSetupForm(): SetupFormModel {
+  // 默认值面向本地 docker-compose 演示环境；生产部署应在页面中替换为真实服务地址和模型名称。
   return {
     setupToken: "",
     adminUsername: "admin",
@@ -151,6 +153,7 @@ export function createDefaultSetupForm(): SetupFormModel {
 }
 
 export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
+  // 表单模型偏 UI 友好，请求体必须映射为后端配置契约中的 setup/config 两段结构。
   return {
     setup: {
       admin: {
@@ -468,6 +471,7 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
 }
 
 function normalizeOptionalSecretValue(value: string): string | null {
+  // 空字符串在请求体中统一转为 null，避免后端误判为已配置的密钥值。
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
 }

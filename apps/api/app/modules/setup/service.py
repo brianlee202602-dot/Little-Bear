@@ -1,10 +1,17 @@
+"""setup-state 读取服务。
+
+该模块只负责把 system_state 解释成 SetupState，不执行初始化写入。API、启动检查
+和 SetupGuard 都依赖它判断当前系统是否允许普通业务请求。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
 
 from app.db.session import session_scope
+from app.modules.config.probe import ActiveConfigProbe
+from app.shared.json_utils import json_bool, json_int, json_str
 from sqlalchemy import text
 from sqlalchemy.exc import NoSuchTableError, OperationalError, ProgrammingError, SQLAlchemyError
 
@@ -46,6 +53,7 @@ class SetupState:
 
     @property
     def setup_required(self) -> bool:
+        # 数据库不可用或 migration 缺失不是 setup mode，必须先修复基础设施。
         return self.setup_status in {
             SetupStatus.NOT_INITIALIZED,
             SetupStatus.SETUP_REQUIRED,
@@ -117,7 +125,18 @@ class SetupService:
                         """
                     )
                 ).all()
-                active_config_available = _active_config_available(session, rows)
+                values = {row._mapping["key"]: row._mapping["value_json"] for row in rows}
+                active_config_available: bool | None = None
+                if all(key in values for key in SETUP_STATE_KEYS):
+                    active_config_version = json_int(values.get("active_config_version"), "version")
+                    initialized_for_probe = json_bool(
+                        values.get("initialized"), "value", default=False
+                    )
+                    if initialized_for_probe:
+                        active_config_available = ActiveConfigProbe().probe(
+                            session,
+                            active_config_version,
+                        ).to_setup_state_available()
         except ProgrammingError as exc:
             return SetupState(
                 initialized=False,
@@ -167,7 +186,6 @@ class SetupService:
                 error_message=exc.__class__.__name__,
             )
 
-        values = {row._mapping["key"]: row._mapping["value_json"] for row in rows}
         if not all(key in values for key in SETUP_STATE_KEYS):
             return SetupState(
                 initialized=False,
@@ -175,15 +193,14 @@ class SetupService:
                 active_config_version=None,
             )
 
-        initialized = _json_bool(values.get("initialized"), "value", default=False)
-        raw_status = _json_str(values.get("setup_status"), "status", default=None)
+        initialized = json_bool(values.get("initialized"), "value", default=False)
+        raw_status = json_str(values.get("setup_status"), "status", default=None)
         setup_status = _normalize_status(raw_status, initialized=initialized)
-        active_config_version = _json_int(values.get("active_config_version"), "version")
-        recovery_setup_allowed = _json_bool(
+        recovery_setup_allowed = json_bool(
             values.get("recovery_setup_allowed"), "value", default=False
         )
-        recovery_reason = _json_str(values.get("recovery_reason"), "reason", default=None)
-        service_bootstrap_ready = _json_bool(
+        recovery_reason = json_str(values.get("recovery_reason"), "reason", default=None)
+        service_bootstrap_ready = json_bool(
             values.get("service_bootstrap"), "ready", default=False
         )
 
@@ -198,26 +215,6 @@ class SetupService:
         )
 
 
-def _json_bool(value_json: Any, key: str, *, default: bool) -> bool:
-    if isinstance(value_json, dict) and isinstance(value_json.get(key), bool):
-        return value_json[key]
-    return default
-
-
-def _json_int(value_json: Any, key: str) -> int | None:
-    if isinstance(value_json, dict) and isinstance(value_json.get(key), int):
-        return value_json[key]
-    return None
-
-
-def _json_str(value_json: Any, key: str, *, default: str | None) -> str | None:
-    if isinstance(value_json, dict):
-        raw_value = value_json.get(key)
-        if isinstance(raw_value, str) and raw_value:
-            return raw_value
-    return default
-
-
 def _normalize_status(raw_status: str | None, *, initialized: bool) -> SetupStatus:
     if raw_status:
         try:
@@ -228,43 +225,3 @@ def _normalize_status(raw_status: str | None, *, initialized: bool) -> SetupStat
         except ValueError:
             pass
     return SetupStatus.INITIALIZED if initialized else SetupStatus.SETUP_REQUIRED
-
-
-def _active_config_available(session: Any, rows: list[Any]) -> bool | None:
-    values = {row._mapping["key"]: row._mapping["value_json"] for row in rows}
-    active_config_version = _json_int(values.get("active_config_version"), "version")
-    if active_config_version is None:
-        return None
-    try:
-        table_status = session.execute(
-            text(
-                """
-                SELECT
-                    to_regclass('public.config_versions')::text AS config_versions_table,
-                    to_regclass('public.system_configs')::text AS system_configs_table
-                """
-            )
-        ).one()
-        table_data = table_status._mapping
-        if not table_data["config_versions_table"] or not table_data["system_configs_table"]:
-            return False
-        row = session.execute(
-            text(
-                """
-                SELECT 1
-                FROM system_configs sc
-                JOIN config_versions cv ON cv.id = sc.config_version_id
-                WHERE sc.key = 'active_config'
-                  AND sc.version = :version
-                  AND sc.status = 'active'
-                  AND cv.status = 'active'
-                LIMIT 1
-                """
-            ),
-            {"version": active_config_version},
-        ).one_or_none()
-    except SQLAlchemyError:
-        return False
-    except Exception:
-        return None
-    return row is not None

@@ -82,6 +82,7 @@ type FieldSection = {
   fields: FieldDefinition[];
 };
 
+// 页面状态只保存在前端内存中；初始化成功后的可信状态以后端 active_config 为准。
 const form = reactive<SetupFormModel>(createDefaultSetupForm());
 
 const busy = reactive({
@@ -115,6 +116,7 @@ const statusLabels: Record<string, string> = {
   recovery_publishing_config: "恢复发布中",
 };
 
+// 以下 FieldSection 是“表单元数据”：模板按定义渲染字段，减少重复 DOM 和字段遗漏。
 const accessSection: FieldSection = {
   title: "访问凭证",
   fields: [
@@ -420,8 +422,10 @@ const sections = [
   cacheSection,
 ];
 
+// payload 是真正提交给 setup-config-validations / setup-initialization 的请求体。
 const payload = computed(() => buildSetupPayload(form));
 const payloadSignature = computed(() => JSON.stringify(payload.value));
+// 本地校验用于拦截明显输入错误；后端校验仍是最终准入标准。
 const localValidationIssues = computed(() => validateLocalForm(form, setupState.value));
 const localBlockingIssues = computed(() =>
   localValidationIssues.value.filter((issue) => issue.tone === "error"),
@@ -433,6 +437,7 @@ const localChecksPassed = computed(() => localBlockingIssues.value.length === 0)
 const backendValidationFresh = computed(
   () => validationResult.value?.valid === true && lastValidatedPayload.value === payloadSignature.value,
 );
+// 正常初始化完成后写接口应关闭；只有后端显式允许 recovery 时才重新开放。
 const setupWritable = computed(
   () => !(setupState.value?.initialized ?? false) || setupState.value?.recovery_setup_allowed === true,
 );
@@ -588,6 +593,7 @@ onMounted(async () => {
 async function refreshState(): Promise<void> {
   busy.refreshing = true;
   try {
+    // setup-state 不依赖初始化令牌；传入 token 只是为了复用统一的请求客户端。
     const response = await getSetupState(form.setupToken || undefined);
     setupState.value = response.data;
     feedback.value = null;
@@ -614,6 +620,7 @@ async function runValidation(): Promise<void> {
     const response = await validateSetupConfig(payload.value, form.setupToken || undefined);
     validationResult.value = response.data;
     validationErrorPayload.value = null;
+    // 只记录“已通过”的请求签名，防止表单变更后误放行初始化提交。
     lastValidatedPayload.value = response.data.valid ? payloadSignature.value : null;
     feedback.value = {
       tone: response.data.valid ? "success" : "error",
@@ -643,6 +650,7 @@ async function runInitialization(): Promise<void> {
   }
   busy.submitting = true;
   try {
+    // initializeSetup 会自动带 x-setup-confirm；后端仍会二次校验确认头和请求体。
     const response = await initializeSetup(payload.value, form.setupToken || undefined);
     initializationResult.value = response.data;
     initializationErrorPayload.value = null;
@@ -665,6 +673,7 @@ async function runInitialization(): Promise<void> {
 }
 
 function resetForm(): void {
+  // 恢复默认值时同步清空校验和提交结果，避免旧反馈误导当前表单。
   Object.assign(form, createDefaultSetupForm());
   validationResult.value = null;
   lastValidatedPayload.value = null;
@@ -765,12 +774,14 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
 }
 
 function extractStructuredIssues(payload: ApiErrorPayload | null): SetupIssue[] {
+  // 后端校验错误放在 details.errors 中，页面只消费结构化数组，避免解析自由文本。
   const details = asRecord(payload?.details);
   const errors = details?.errors;
   return Array.isArray(errors) ? errors.filter((item): item is SetupIssue => isRecord(item)) : [];
 }
 
 function extractBootstrapChecks(payload: ApiErrorPayload | null): BootstrapCheckIssue[] {
+  // 初始化失败时后端会返回依赖检查详情，用于定位 Redis/MinIO/Qdrant/模型服务问题。
   const details = asRecord(payload?.details);
   const checks = details?.checks;
   if (!Array.isArray(checks)) {
@@ -788,6 +799,7 @@ function extractBootstrapChecks(payload: ApiErrorPayload | null): BootstrapCheck
 }
 
 function extractDatabaseError(payload: ApiErrorPayload | null): DatabaseErrorIssue | null {
+  // 数据库异常单独抽取，方便页面展示表、列、约束等诊断信息。
   const details = asRecord(payload?.details);
   const databaseError = details?.database_error;
   if (!isRecord(databaseError)) {
@@ -820,6 +832,7 @@ function validateLocalForm(
   current: SetupFormModel,
   currentSetupState: SetupStateData | null,
 ): LocalValidationIssue[] {
+  // 本地校验只处理确定性规则；服务连通性、配置契约和权限状态由后端再次校验。
   const issues: LocalValidationIssue[] = [];
   const add = (
     tone: LocalIssueTone,
@@ -1153,6 +1166,9 @@ function isComposeDemoProvider(value: string): boolean {
                     {{ field.label }}
                     <span v-if="field.required" class="required-mark">必填</span>
                   </span>
+                  <p class="field__hint" :class="{ 'field__hint--empty': !field.hint }" :aria-hidden="!field.hint">
+                    {{ field.hint }}
+                  </p>
                   <select
                     v-if="field.input === 'select'"
                     class="control"
@@ -1176,7 +1192,6 @@ function isComposeDemoProvider(value: string): boolean {
                     "
                   />
                 </template>
-                <p v-if="field.hint" class="field__hint">{{ field.hint }}</p>
                 <ul v-if="fieldIssues(field.key).length" class="field-issues">
                   <li
                     v-for="issue in fieldIssues(field.key)"
@@ -1208,7 +1223,9 @@ function isComposeDemoProvider(value: string): boolean {
 	                  @change="updateFieldFromCheckbox(field, ($event.target as HTMLInputElement).checked)"
 	                />
 	                <span>{{ field.label }}</span>
-	                <p v-if="field.hint" class="field__hint">{{ field.hint }}</p>
+	                <p class="field__hint" :class="{ 'field__hint--empty': !field.hint }" :aria-hidden="!field.hint">
+	                  {{ field.hint }}
+	                </p>
 	                <ul v-if="fieldIssues(field.key).length" class="field-issues">
 	                  <li
 	                    v-for="issue in fieldIssues(field.key)"
@@ -1561,6 +1578,7 @@ function isComposeDemoProvider(value: string): boolean {
 .form-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: start;
   gap: 14px 16px;
   padding: 18px;
 }
@@ -1568,6 +1586,7 @@ function isComposeDemoProvider(value: string): boolean {
 .checkbox-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: 14px 16px;
   padding: 0 18px 18px;
 }
@@ -1580,6 +1599,8 @@ function isComposeDemoProvider(value: string): boolean {
   min-width: 0;
   grid-column: span 3;
   display: grid;
+  grid-template-rows: auto minmax(35px, auto) auto auto;
+  align-content: start;
   gap: 8px;
 }
 
@@ -1600,6 +1621,12 @@ function isComposeDemoProvider(value: string): boolean {
   color: #6c7788;
   font-size: 12px;
   line-height: 1.45;
+  min-height: 35px;
+  overflow-wrap: anywhere;
+}
+
+.field__hint--empty {
+  visibility: hidden;
 }
 
 .required-mark {

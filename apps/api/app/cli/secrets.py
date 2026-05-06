@@ -1,3 +1,9 @@
+"""Secret Store 本地维护 CLI。
+
+该 CLI 用于初始化前把 MinIO、JWT、模型 provider 等密钥写入 PostgreSQL secrets 表。
+命令只打印 secret_ref、状态和 hash 前缀，避免把明文泄漏到终端历史或日志中。
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -109,6 +115,7 @@ def _read_secret_value(args: argparse.Namespace) -> str:
 
 
 def _read_env_value(name: str) -> str:
+    # 优先读进程环境变量；读不到再解析 .env，便于本地不 source .env 也能初始化。
     value = os.environ.get(name)
     if value is not None:
         return value

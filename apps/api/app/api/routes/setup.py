@@ -1,10 +1,16 @@
+"""Setup 初始化 API。
+
+这些接口是系统未初始化时唯一可写的后端入口。普通业务 API 由 SetupGuardMiddleware
+拦截，setup JWT 也只能用于配置校验和初始化提交。
+"""
+
 from __future__ import annotations
 
 from typing import Any
 
 from fastapi import APIRouter, Header, Request
-from starlette.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.responses import JSONResponse
 
 from app.api.schemas.setup import (
     SetupConfigValidationData,
@@ -42,6 +48,7 @@ async def setup_config_validations(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> SetupConfigValidationResponse | JSONResponse:
+    # validation 接口只做校验和审计，不写入 active_config。
     payload = await request.json()
     request_id = _request_id()
     payload_object = _ensure_payload_object(payload)
@@ -84,6 +91,7 @@ async def setup_initialization(
     authorization: str | None = Header(default=None),
 ) -> SetupInitializationResponse | JSONResponse:
     request_id = _request_id()
+    # 初始化是高风险一次性写操作，要求显式确认头，避免误触发。
     if x_setup_confirm != "initialize":
         return _error_response(
             request_id,
@@ -98,6 +106,7 @@ async def setup_initialization(
     token_service = SetupTokenService()
     try:
         with session_scope() as session:
+            # setup token 在 initialize 成功后会被 consume，防止重复提交。
             setup_token = token_service.validate(
                 session,
                 _extract_bearer_token(authorization),
@@ -211,6 +220,7 @@ def _record_initialization_failure(
     message: str,
     details: dict[str, object] | None,
 ) -> None:
+    # 失败审计本身不能影响主错误响应，因此这里吞掉二次失败。
     try:
         with session_scope() as session:
             SetupInitializationService().record_initialization_failure(

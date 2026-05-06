@@ -1,25 +1,29 @@
+"""ServiceBootstrap 依赖检查。
+
+初始化提交和已初始化进程启动都会走这里，确认 active_config 指向的 Redis、Secret、
+MinIO、Qdrant、关键词检索和外部模型 provider 至少可连通。它不替代各业务模块的
+运行期重试/降级，只提供 ready 门禁。
+"""
+
 from __future__ import annotations
 
-import json
 import socket
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from app.modules.config.errors import ConfigServiceError
+from app.modules.config.service import ConfigService
+from app.modules.config.validator import ConfigSchemaValidator
 from app.modules.secrets.service import SecretStoreError, SecretStoreService
-from app.shared.paths import CONFIG_SCHEMA_PATH
+from app.shared.json_utils import as_dict, json_bool, json_dumps, json_int, json_str
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-
-try:
-    from jsonschema import Draft202012Validator
-except ModuleNotFoundError:  # pragma: no cover - 运行环境缺依赖时由检查结果承载。
-    Draft202012Validator = None  # type: ignore[assignment]
-
 
 EXPECTED_SCHEMA_REVISION = "0005_jobs_audit_cache"
 CheckStatus = Literal["passed", "failed", "skipped"]
@@ -67,6 +71,30 @@ class ServiceBootstrapResult:
         }
 
 
+@dataclass(frozen=True)
+class ServiceBootstrapState:
+    ready: bool
+    config_version: int | None
+    schema_revision: str | None
+    checks: tuple[BootstrapCheck, ...]
+    updated_at: datetime | None
+
+    def fresh_for(self, active_config_version: int | None, *, ttl_seconds: float) -> bool:
+        if not self.ready or self.config_version != active_config_version:
+            return False
+        if self.updated_at is None:
+            return False
+        return datetime.now(UTC) - self.updated_at <= timedelta(seconds=max(ttl_seconds, 0.0))
+
+    def to_result(self) -> ServiceBootstrapResult:
+        return ServiceBootstrapResult(
+            ready=self.ready,
+            config_version=self.config_version,
+            schema_revision=self.schema_revision,
+            checks=self.checks,
+        )
+
+
 class ServiceBootstrapService:
     """校验 active_config 驱动的关键服务是否可用。"""
 
@@ -78,6 +106,7 @@ class ServiceBootstrapService:
         config: dict[str, Any] | None = None,
     ) -> ServiceBootstrapResult:
         checks: list[BootstrapCheck] = []
+        # migration 是所有业务表和扩展的底座，优先检查，便于排障。
         schema_revision = self.load_schema_revision(session)
         checks.append(_check_bool(
             "migration",
@@ -92,20 +121,36 @@ class ServiceBootstrapService:
         config_version: int | None = None
         active_config = config
         if active_config is None:
-            loaded = self.load_active_config(session, active_config_version)
-            active_config = loaded[0]
-            config_version = loaded[1]
-            checks.append(_check_bool(
-                "active_config",
-                active_config is not None,
-                (
-                    f"active config v{config_version} loaded"
-                    if active_config is not None
-                    else "active config is missing or inactive"
-                ),
-            ))
+            started = time.monotonic()
+            try:
+                snapshot = ConfigService().load_active_config(
+                    session,
+                    active_config_version=active_config_version,
+                    validate_schema=False,
+                )
+            except ConfigServiceError as exc:
+                config_version = active_config_version
+                checks.append(
+                    BootstrapCheck(
+                        "active_config",
+                        "failed",
+                        f"{exc.error_code}: {exc.message}",
+                        latency_ms=_elapsed_ms(started),
+                    )
+                )
+            else:
+                active_config = snapshot.config
+                config_version = snapshot.version
+                checks.append(
+                    BootstrapCheck(
+                        "active_config",
+                        "passed",
+                        f"active config v{config_version} loaded",
+                        latency_ms=_elapsed_ms(started),
+                    )
+                )
         else:
-            config_version = _json_int(active_config.get("config_version"))
+            config_version = json_int(active_config.get("config_version"))
             checks.append(_check_bool(
                 "active_config",
                 True,
@@ -116,6 +161,7 @@ class ServiceBootstrapService:
             return _result(config_version, schema_revision, checks)
 
         checks.extend(self._check_active_config_schema(active_config))
+        # Secret 只验证 ref 可读，不把明文放进检查结果。
         checks.extend(self._check_secret_refs(session, active_config))
         checks.append(self._check_redis(active_config))
         checks.append(self._check_minio(active_config))
@@ -141,34 +187,15 @@ class ServiceBootstrapService:
     ) -> tuple[dict[str, Any] | None, int | None]:
         if active_config_version is None:
             return None, None
-        row = session.execute(
-            text(
-                """
-                SELECT sc.value_json, sc.version
-                FROM system_configs sc
-                JOIN config_versions cv ON cv.id = sc.config_version_id
-                WHERE sc.key = 'active_config'
-                  AND sc.version = :version
-                  AND sc.status = 'active'
-                  AND cv.status = 'active'
-                LIMIT 1
-                """
-            ),
-            {"version": active_config_version},
-        ).one_or_none()
-        if row is None:
+        try:
+            snapshot = ConfigService().load_active_config(
+                session,
+                active_config_version=active_config_version,
+                validate_schema=False,
+            )
+        except ConfigServiceError:
             return None, active_config_version
-        value_json = row._mapping["value_json"]
-        if isinstance(value_json, dict):
-            return value_json, int(row._mapping["version"])
-        if isinstance(value_json, str):
-            try:
-                parsed = json.loads(value_json)
-            except json.JSONDecodeError:
-                return None, int(row._mapping["version"])
-            if isinstance(parsed, dict):
-                return parsed, int(row._mapping["version"])
-        return None, int(row._mapping["version"])
+        return snapshot.config, snapshot.version
 
     def persist_result(self, session: Session, result: ServiceBootstrapResult) -> None:
         session.execute(
@@ -180,40 +207,29 @@ class ServiceBootstrapService:
                 SET value_json = EXCLUDED.value_json, updated_at = now()
                 """
             ),
-            {"value_json": json.dumps(result.to_state_value(), ensure_ascii=False)},
+            {"value_json": json_dumps(result.to_state_value())},
         )
 
     def _check_active_config_schema(self, config: dict[str, Any]) -> list[BootstrapCheck]:
-        if Draft202012Validator is None:
-            return [BootstrapCheck("active_config_schema", "failed", "jsonschema is not installed")]
         started = time.monotonic()
         try:
-            schema = json.loads(CONFIG_SCHEMA_PATH.read_text(encoding="utf-8"))
-        except OSError as exc:
+            issues = ConfigSchemaValidator().validate_active_config(config)
+        except ConfigServiceError as exc:
             return [
                 BootstrapCheck(
                     "active_config_schema",
                     "failed",
-                    f"config schema cannot be loaded: {exc.__class__.__name__}",
+                    f"{exc.error_code}: {exc.message}",
+                    latency_ms=_elapsed_ms(started),
                 )
             ]
-        active_schema = {
-            "$schema": schema.get("$schema"),
-            "$defs": schema.get("$defs", {}),
-            "$ref": "#/$defs/ActiveConfigV1",
-        }
-        errors = sorted(
-            Draft202012Validator(active_schema).iter_errors(config),
-            key=lambda item: list(item.path),
-        )
-        if errors:
-            first = errors[0]
-            path = "$" + "".join(f".{part}" for part in first.path)
+        if issues:
+            first = issues[0]
             return [
                 BootstrapCheck(
                     "active_config_schema",
                     "failed",
-                    f"{len(errors)} schema error(s), first at {path}: {first.message}",
+                    f"{len(issues)} schema error(s), first at {first.path}: {first.message}",
                     latency_ms=_elapsed_ms(started),
                 )
             ]
@@ -269,9 +285,9 @@ class ServiceBootstrapService:
         return checks
 
     def _check_redis(self, config: dict[str, Any]) -> BootstrapCheck:
-        redis_config = _as_dict(config.get("redis"))
+        redis_config = as_dict(config.get("redis"))
         redis_url = str(redis_config.get("url") or "")
-        pool = _as_dict(redis_config.get("pool"))
+        pool = as_dict(redis_config.get("pool"))
         timeout = _timeout_seconds(pool.get("connect_timeout_ms"), default_ms=1000)
         started = time.monotonic()
         try:
@@ -286,7 +302,7 @@ class ServiceBootstrapService:
         )
 
     def _check_minio(self, config: dict[str, Any]) -> BootstrapCheck:
-        storage = _as_dict(config.get("storage"))
+        storage = as_dict(config.get("storage"))
         endpoint = str(storage.get("minio_endpoint") or "")
         started = time.monotonic()
         try:
@@ -301,7 +317,7 @@ class ServiceBootstrapService:
         )
 
     def _check_qdrant(self, session: Session, config: dict[str, Any]) -> BootstrapCheck:
-        vector_store = _as_dict(config.get("vector_store"))
+        vector_store = as_dict(config.get("vector_store"))
         base_url = str(vector_store.get("qdrant_base_url") or "")
         headers: dict[str, str] = {}
         api_key_ref = vector_store.get("api_key_ref")
@@ -329,7 +345,7 @@ class ServiceBootstrapService:
         )
 
     def _check_keyword_search(self, session: Session, config: dict[str, Any]) -> BootstrapCheck:
-        keyword_search = _as_dict(config.get("keyword_search"))
+        keyword_search = as_dict(config.get("keyword_search"))
         analyzer = str(keyword_search.get("keyword_analyzer") or "little_bear_zh")
         regconfig = "little_bear_zh" if analyzer == "zhparser" else analyzer
         started = time.monotonic()
@@ -357,20 +373,21 @@ class ServiceBootstrapService:
         session: Session,
         config: dict[str, Any],
     ) -> list[BootstrapCheck]:
-        gateway = _as_dict(config.get("model_gateway"))
-        providers = _as_dict(gateway.get("providers"))
-        timeout_ms = _json_int(_as_dict(gateway.get("healthcheck")).get("timeout_ms")) or 2000
-        gateway_auth_token_ref = _str_or_none(gateway.get("auth_token_ref"))
+        gateway = as_dict(config.get("model_gateway"))
+        providers = as_dict(gateway.get("providers"))
+        timeout_ms = json_int(as_dict(gateway.get("healthcheck")).get("timeout_ms")) or 2000
+        gateway_auth_token_ref = json_str(gateway.get("auth_token_ref"))
 
         checks: list[BootstrapCheck] = []
         for provider_name in ("embedding", "rerank", "llm"):
-            provider = _as_dict(providers.get(provider_name))
+            # provider 允许单独配置 auth_token_ref；没有时回退 model_gateway.auth_token_ref。
+            provider = as_dict(providers.get(provider_name))
             base_url = str(provider.get("base_url") or "")
             path = str(provider.get("healthcheck_path") or "/health")
             auth_headers_result = _model_provider_auth_headers(
                 session,
                 provider_name,
-                _str_or_none(provider.get("auth_token_ref")) or gateway_auth_token_ref,
+                json_str(provider.get("auth_token_ref")) or gateway_auth_token_ref,
             )
             if isinstance(auth_headers_result, BootstrapCheck):
                 checks.append(auth_headers_result)
@@ -403,33 +420,127 @@ class ServiceBootstrapService:
         return checks
 
 
+class ServiceBootstrapStateService:
+    """读取和刷新 service_bootstrap 状态，避免每个入口重复执行外部依赖探测。"""
+
+    def __init__(
+        self,
+        *,
+        bootstrap_service: ServiceBootstrapService | None = None,
+        ttl_seconds: float = 30.0,
+    ) -> None:
+        self.bootstrap_service = bootstrap_service or ServiceBootstrapService()
+        self.ttl_seconds = ttl_seconds
+
+    def load_state(self, session: Session) -> ServiceBootstrapState | None:
+        try:
+            row = session.execute(
+                text(
+                    """
+                    SELECT value_json, updated_at
+                    FROM system_state
+                    WHERE key = 'service_bootstrap'
+                    LIMIT 1
+                    """
+                )
+            ).one_or_none()
+        except SQLAlchemyError:
+            return None
+        if row is None:
+            return None
+        value_json = as_dict(row._mapping["value_json"])
+        return ServiceBootstrapState(
+            ready=json_bool(value_json, "ready", default=False),
+            config_version=json_int(value_json, "config_version"),
+            schema_revision=json_str(value_json, "schema_migration_version"),
+            checks=_checks_from_state(value_json.get("checks")),
+            updated_at=_datetime_or_none(row._mapping.get("updated_at")),
+        )
+
+    def ensure_ready(
+        self,
+        session: Session,
+        *,
+        active_config_version: int | None,
+        force_refresh: bool = False,
+    ) -> ServiceBootstrapResult:
+        if active_config_version is None:
+            return ServiceBootstrapResult(
+                ready=False,
+                config_version=None,
+                schema_revision=self.bootstrap_service.load_schema_revision(session),
+                checks=(
+                    BootstrapCheck(
+                        "active_config",
+                        "failed",
+                        "system_state.active_config_version is missing",
+                    ),
+                ),
+            )
+
+        state = None if force_refresh else self.load_state(session)
+        if state and state.fresh_for(active_config_version, ttl_seconds=self.ttl_seconds):
+            return state.to_result()
+
+        result = self.bootstrap_service.bootstrap(
+            session,
+            active_config_version=active_config_version,
+        )
+        self.bootstrap_service.persist_result(session, result)
+        return result
+
+
 class BootstrapProbeError(Exception):
     """外部依赖探测失败。"""
 
 
 def _collect_secret_refs(config: dict[str, Any]) -> list[tuple[str, str | None, bool]]:
-    storage = _as_dict(config.get("storage"))
-    auth = _as_dict(config.get("auth"))
-    vector_store = _as_dict(config.get("vector_store"))
-    gateway = _as_dict(config.get("model_gateway"))
-    providers = _as_dict(gateway.get("providers"))
+    storage = as_dict(config.get("storage"))
+    auth = as_dict(config.get("auth"))
+    vector_store = as_dict(config.get("vector_store"))
+    gateway = as_dict(config.get("model_gateway"))
+    providers = as_dict(gateway.get("providers"))
     refs = [
-        ("secret_minio_access_key", _str_or_none(storage.get("access_key_ref")), True),
-        ("secret_minio_secret_key", _str_or_none(storage.get("secret_key_ref")), True),
-        ("secret_jwt_signing_key", _str_or_none(auth.get("jwt_signing_key_ref")), True),
-        ("secret_qdrant_api_key", _str_or_none(vector_store.get("api_key_ref")), False),
-        ("secret_model_gateway_auth", _str_or_none(gateway.get("auth_token_ref")), False),
+        ("secret_minio_access_key", json_str(storage.get("access_key_ref")), True),
+        ("secret_minio_secret_key", json_str(storage.get("secret_key_ref")), True),
+        ("secret_jwt_signing_key", json_str(auth.get("jwt_signing_key_ref")), True),
+        ("secret_qdrant_api_key", json_str(vector_store.get("api_key_ref")), False),
+        ("secret_model_gateway_auth", json_str(gateway.get("auth_token_ref")), False),
     ]
     for provider_name in ("embedding", "rerank", "llm"):
-        provider = _as_dict(providers.get(provider_name))
+        provider = as_dict(providers.get(provider_name))
         refs.append(
             (
                 f"secret_model_provider_{provider_name}_auth",
-                _str_or_none(provider.get("auth_token_ref")),
+                json_str(provider.get("auth_token_ref")),
                 False,
             )
         )
     return refs
+
+
+def _checks_from_state(value: object) -> tuple[BootstrapCheck, ...]:
+    if not isinstance(value, list):
+        return ()
+    checks: list[BootstrapCheck] = []
+    for item in value:
+        data = as_dict(item)
+        raw_status = data.get("status")
+        status: CheckStatus = "failed"
+        if raw_status == "passed":
+            status = "passed"
+        elif raw_status == "skipped":
+            status = "skipped"
+        checks.append(
+            BootstrapCheck(
+                name=json_str(data.get("name"), default="unknown") or "unknown",
+                status=status,
+                message=json_str(data.get("message"), default="") or "",
+                required=data.get("required") is not False,
+                latency_ms=json_int(data.get("latency_ms")),
+            )
+        )
+    return tuple(checks)
 
 
 def _model_provider_auth_headers(
@@ -447,6 +558,8 @@ def _model_provider_auth_headers(
 
 
 def _redis_ping(redis_url: str, timeout: float) -> None:
+    """不用引入 redis 客户端，仅按 RESP 协议发送 PING 做最小依赖检查。"""
+
     parsed = urlparse(redis_url)
     if parsed.scheme != "redis" or not parsed.hostname:
         raise BootstrapProbeError("redis url is invalid")
@@ -526,18 +639,10 @@ def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
+def _datetime_or_none(value: Any) -> datetime | None:
+    return value if isinstance(value, datetime) else None
+
+
 def _timeout_seconds(value: object, *, default_ms: int) -> float:
-    milliseconds = _json_int(value) or default_ms
+    milliseconds = json_int(value) or default_ms
     return max(milliseconds / 1000, 0.001)
-
-
-def _json_int(value: object) -> int | None:
-    return value if isinstance(value, int) else None
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _str_or_none(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None

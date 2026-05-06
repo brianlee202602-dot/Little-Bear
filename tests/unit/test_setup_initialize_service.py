@@ -64,7 +64,10 @@ def _valid_payload() -> dict:
 
 
 def test_setup_initialize_validation_rejects_missing_default_department(monkeypatch) -> None:
-    monkeypatch.setattr("app.modules.setup.initialize_service.Draft202012Validator", None)
+    monkeypatch.setattr(
+        "app.modules.setup.initialize_service.ConfigSchemaValidator.validate_setup_payload",
+        lambda _self, _payload: [],
+    )
     payload = _valid_payload()
     payload["setup"]["organization"]["departments"][0]["is_default"] = False
 
@@ -77,7 +80,10 @@ def test_setup_initialize_validation_rejects_missing_default_department(monkeypa
 def test_setup_initialize_validation_rejects_cross_user_final_answer_cache(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("app.modules.setup.initialize_service.Draft202012Validator", None)
+    monkeypatch.setattr(
+        "app.modules.setup.initialize_service.ConfigSchemaValidator.validate_setup_payload",
+        lambda _self, _payload: [],
+    )
     payload = deepcopy(_valid_payload())
     payload["config"]["cache"]["cross_user_final_answer_allowed"] = True
 
@@ -93,7 +99,10 @@ def test_setup_initialize_validation_rejects_cross_user_final_answer_cache(
 def test_setup_initialize_validation_handles_malformed_config_without_crashing(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("app.modules.setup.initialize_service.Draft202012Validator", None)
+    monkeypatch.setattr(
+        "app.modules.setup.initialize_service.ConfigSchemaValidator.validate_setup_payload",
+        lambda _self, _payload: [],
+    )
     payload = deepcopy(_valid_payload())
     payload["config"]["auth"]["password_min_length"] = "abc"
     payload["config"]["storage"] = "bad"

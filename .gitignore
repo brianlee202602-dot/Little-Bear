@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .vscode/
+*.egg-info/
 
 node_modules/
 dist/

@@ -1,14 +1,18 @@
+"""Setup JWT 的签发、校验和一次性消费。
+
+setup JWT 只在系统未初始化或恢复初始化时使用。它不能访问普通业务 API，且新的
+setup token 会吊销旧 token，初始化成功后会被标记为 used。
+"""
+
 from __future__ import annotations
 
 import hashlib
-import hmac
-import json
 import secrets
 import uuid
-from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from app.shared.jwt import JwtError, decode_hs256, encode_hs256
 from app.shared.settings import get_settings
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -81,6 +85,7 @@ class SetupTokenService:
         )
         token_hash = self.hash_token(token)
 
+        # 始终先失效旧 token，保证同一时间只有一个 active setup token。
         self.revoke_active(session, reason="replaced_by_new_setup_token")
         session.execute(
             text(
@@ -129,6 +134,7 @@ class SetupTokenService:
         if _looks_like_jwt(token) and not _verify_setup_jwt(token):
             raise SetupTokenError("SETUP_TOKEN_INVALID", "setup bearer token signature is invalid")
 
+        # 数据库只保存 token_hash；明文 JWT 只在签发时返回或打印一次。
         token_hash = self.hash_token(token)
         row = session.execute(
             text(
@@ -267,57 +273,30 @@ def _build_setup_jwt(
     expires_at: datetime,
 ) -> str:
     now = datetime.now(UTC)
-    header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "jti": jwt_jti,
         "sid": setup_token_id,
         "typ": "setup",
+        "token_type": "setup",
         "scope": " ".join(scopes),
         "iat": int(now.timestamp()),
         "exp": int(expires_at.timestamp()),
     }
-    signing_input = ".".join((_b64_json(header), _b64_json(payload)))
-    signature = _sign(signing_input)
-    return f"{signing_input}.{signature}"
+    return encode_hs256(payload, _setup_signing_secret())
 
 
 def _verify_setup_jwt(token: str) -> bool:
-    signing_input, _, signature = token.rpartition(".")
-    if not signing_input or not signature:
-        return False
-    expected_signature = _sign(signing_input)
-    if not hmac.compare_digest(signature, expected_signature):
-        return False
     try:
-        payload_segment = signing_input.split(".", maxsplit=1)[1]
-        payload = json.loads(_b64_decode(payload_segment))
-    except (IndexError, json.JSONDecodeError, ValueError):
+        payload = decode_hs256(token, _setup_signing_secret())
+    except JwtError:
         return False
-    return payload.get("typ") == "setup"
+    return payload.get("typ") == "setup" and payload.get("token_type", "setup") == "setup"
 
 
 def _looks_like_jwt(token: str) -> bool:
     return token.count(".") == 2
 
 
-def _b64_json(value: dict[str, object]) -> str:
-    return _b64_encode(json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8"))
-
-
-def _b64_encode(value: bytes) -> str:
-    return urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-
-def _b64_decode(value: str) -> str:
-    padding = "=" * (-len(value) % 4)
-    return urlsafe_b64decode(f"{value}{padding}").decode("utf-8")
-
-
-def _sign(signing_input: str) -> str:
-    secret = get_settings().setup_token_signing_secret or _EPHEMERAL_SETUP_TOKEN_SIGNING_SECRET
-    digest = hmac.new(
-        secret.encode("utf-8"),
-        signing_input.encode("ascii"),
-        hashlib.sha256,
-    ).digest()
-    return _b64_encode(digest)
+def _setup_signing_secret() -> str:
+    # 生产环境必须显式配置 SETUP_TOKEN_SIGNING_SECRET；本地未配置时才使用进程临时密钥。
+    return get_settings().setup_token_signing_secret or _EPHEMERAL_SETUP_TOKEN_SIGNING_SECRET

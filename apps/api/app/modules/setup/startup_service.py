@@ -1,3 +1,10 @@
+"""API 进程启动时的 setup 状态判定。
+
+这里是“只读取数据库连接配置启动”的落地点：数据库不可达直接失败；数据库可达但未
+初始化时签发 setup JWT；已初始化时执行 ServiceBootstrap，确认 active_config 能驱动
+关键依赖。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -6,9 +13,11 @@ from typing import Literal
 
 from app.db.health import check_database
 from app.db.session import session_scope
-from app.modules.setup.bootstrap_service import ServiceBootstrapService
+from app.modules.config.probe import ActiveConfigProbe
+from app.modules.setup.bootstrap_service import ServiceBootstrapStateService
 from app.modules.setup.service import SetupService, SetupStatus
 from app.modules.setup.token_service import IssuedSetupToken, SetupTokenService
+from app.shared.json_utils import json_dumps
 from app.shared.settings import get_settings
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -78,6 +87,7 @@ class SetupStartupService:
             )
 
         if not state.initialized:
+            # 未初始化时自动签发一次性 setup JWT，便于本地首次安装直接进入初始化页。
             with session_scope() as session:
                 issued = self.token_service.issue(session)
             self._log_setup_token(issued, setup_url, reason="setup_required")
@@ -89,6 +99,7 @@ class SetupStartupService:
             )
 
         with session_scope() as session:
+            # 已初始化但 active_config 指针损坏时，允许进入受控恢复初始化。
             active_config_issue = self._detect_active_config_issue(
                 session,
                 state.active_config_version,
@@ -119,11 +130,11 @@ class SetupStartupService:
                     reason=active_config_issue.reason,
                 )
 
-            bootstrap_result = ServiceBootstrapService().bootstrap(
+            bootstrap_result = ServiceBootstrapStateService().ensure_ready(
                 session,
                 active_config_version=state.active_config_version,
+                force_refresh=True,
             )
-            ServiceBootstrapService().persist_result(session, bootstrap_result)
             if not bootstrap_result.ready:
                 failed_checks = [
                     check.name
@@ -150,53 +161,18 @@ class SetupStartupService:
     def _detect_active_config_issue(
         self, session: Session, active_config_version: int | None
     ) -> ActiveConfigIssue | None:
-        table_status = session.execute(
-            text(
-                """
-                SELECT
-                    to_regclass('public.config_versions')::text AS config_versions_table,
-                    to_regclass('public.system_configs')::text AS system_configs_table
-                """
-            )
-        ).one()
-        table_data = table_status._mapping
-        if not table_data["config_versions_table"] or not table_data["system_configs_table"]:
+        result = ActiveConfigProbe().probe(session, active_config_version)
+        if not result.present:
             return ActiveConfigIssue(
-                reason="config_table_missing",
-                message="config_versions or system_configs table is missing",
-                recoverable=False,
-            )
-        if active_config_version is None:
-            return ActiveConfigIssue(
-                reason="active_config_version_missing",
-                message="system_state.active_config_version is empty",
-                recoverable=True,
-            )
-
-        row = session.execute(
-            text(
-                """
-                SELECT 1
-                FROM system_configs sc
-                JOIN config_versions cv ON cv.id = sc.config_version_id
-                WHERE sc.key = 'active_config'
-                  AND sc.version = :version
-                  AND sc.status = 'active'
-                  AND cv.status = 'active'
-                LIMIT 1
-                """
-            ),
-            {"version": active_config_version},
-        ).one_or_none()
-        if row is None:
-            return ActiveConfigIssue(
-                reason="active_config_missing",
-                message="active_config row is missing or inactive",
-                recoverable=True,
+                reason=result.reason or result.status,
+                message=result.message or "active_config is unavailable",
+                recoverable=result.recoverable,
             )
         return None
 
     def _mark_recovery_required(self, session: Session, reason: str) -> None:
+        """把系统切到恢复初始化模式，但不直接修改已有业务数据。"""
+
         values = {
             "setup_status": {"status": SetupStatus.RECOVERY_REQUIRED.value},
             "recovery_setup_allowed": {"value": True},
@@ -211,7 +187,7 @@ class SetupStartupService:
                     WHERE key = :key
                     """
                 ),
-                {"key": key, "value_json": _json_dumps(value_json)},
+                {"key": key, "value_json": json_dumps(value_json)},
             )
 
     def _log_setup_token(
@@ -232,9 +208,3 @@ class SetupStartupService:
         logger.warning("setup required: visit %s", setup_url)
         logger.warning("setup JWT token: %s", issued.token)
         logger.warning("setup token expires at: %s", issued.expires_at.isoformat())
-
-
-def _json_dumps(value: object) -> str:
-    import json
-
-    return json.dumps(value, ensure_ascii=False)
