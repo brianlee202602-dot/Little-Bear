@@ -9,6 +9,7 @@ from app.modules.setup.initialize_service import (
 from app.modules.setup.service import SetupState, SetupStatus
 from app.modules.setup.token_service import SetupTokenContext
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import SQLAlchemyError
 
 
 def _fake_setup_token() -> SetupTokenContext:
@@ -202,3 +203,37 @@ def test_setup_initialization_route_returns_structured_error(monkeypatch) -> Non
     payload = response.json()
     assert payload["error_code"] == "SETUP_CONFIG_INVALID"
     assert payload["details"]["errors"][0]["path"] == "$.config"
+
+
+def test_setup_initialization_route_returns_database_error_details(monkeypatch) -> None:
+    class _FakeDriverError(Exception):
+        pass
+
+    def fake_initialize(_self, _session, _payload, *, setup_token=None):
+        raise SQLAlchemyError("db failed").with_traceback(None) from _FakeDriverError("duplicate key")
+
+    monkeypatch.setattr(
+        "app.api.routes.setup.SetupInitializationService.initialize",
+        fake_initialize,
+    )
+    monkeypatch.setattr(
+        "app.api.routes.setup.SetupTokenService.validate",
+        lambda _self, _session, _token, *, required_scope: _fake_setup_token(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.setup._record_initialization_failure",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr("app.api.routes.setup.session_scope", lambda: _FakeSession())
+
+    client = TestClient(_create_test_app())
+    response = client.put(
+        "/internal/v1/setup-initialization",
+        headers={"x-setup-confirm": "initialize", "authorization": "Bearer setup_test"},
+        json={"setup": {}, "config": {}},
+    )
+
+    assert response.status_code == 500
+    payload = response.json()
+    assert payload["error_code"] == "SETUP_DATABASE_ERROR"
+    assert payload["details"]["database_error"]["type"] == "SQLAlchemyError"

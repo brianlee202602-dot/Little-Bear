@@ -46,6 +46,10 @@ def test_service_bootstrap_passes_when_required_dependencies_are_available(monke
         lambda _self, _session, *, secret_ref: None,
     )
     monkeypatch.setattr(
+        "app.modules.setup.bootstrap_service.SecretStoreService.get_secret_value",
+        lambda _self, _session, *, secret_ref: "provider-token",
+    )
+    monkeypatch.setattr(
         "app.modules.setup.bootstrap_service._redis_ping",
         lambda _redis_url, _timeout: None,
     )
@@ -84,6 +88,10 @@ def test_service_bootstrap_fails_when_required_secret_is_missing(monkeypatch) ->
         fake_verify,
     )
     monkeypatch.setattr(
+        "app.modules.setup.bootstrap_service.SecretStoreService.get_secret_value",
+        lambda _self, _session, *, secret_ref: "provider-token",
+    )
+    monkeypatch.setattr(
         "app.modules.setup.bootstrap_service._redis_ping",
         lambda _redis_url, _timeout: None,
     )
@@ -97,5 +105,36 @@ def test_service_bootstrap_fails_when_required_secret_is_missing(monkeypatch) ->
     assert result.ready is False
     assert any(
         check.name == "secret_jwt_signing_key" and check.status == "failed"
+        for check in result.checks
+    )
+
+
+def test_service_bootstrap_reports_redis_resolution_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.modules.setup.bootstrap_service.SecretStoreService.verify_secret",
+        lambda _self, _session, *, secret_ref: None,
+    )
+    monkeypatch.setattr(
+        "app.modules.setup.bootstrap_service.SecretStoreService.get_secret_value",
+        lambda _self, _session, *, secret_ref: "provider-token",
+    )
+    monkeypatch.setattr(
+        "app.modules.setup.bootstrap_service._redis_ping",
+        lambda _redis_url, _timeout: (_ for _ in ()).throw(
+            OSError("Name or service not known")
+        ),
+    )
+    monkeypatch.setattr(
+        "app.modules.setup.bootstrap_service._http_get",
+        lambda _url, *, timeout_seconds, headers=None: None,
+    )
+
+    result = ServiceBootstrapService().bootstrap(_FakeSession(), config=_example_config())
+
+    assert result.ready is False
+    assert any(
+        check.name == "redis"
+        and check.status == "failed"
+        and "Name or service not known" in check.message
         for check in result.checks
     )

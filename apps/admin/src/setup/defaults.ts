@@ -19,14 +19,18 @@ export interface SetupFormModel {
   minioSecretKeyRef: string;
   objectKeyPrefix: string;
   qdrantBaseUrl: string;
+  qdrantApiKeyRef: string;
   collectionPrefix: string;
   vectorDistance: "cosine" | "dot" | "euclidean";
   keywordLanguage: string;
   keywordAnalyzer: string;
   modelGatewayMode: "external";
   embeddingProviderBaseUrl: string;
+  embeddingProviderApiKey: string;
   rerankProviderBaseUrl: string;
+  rerankProviderApiKey: string;
   llmProviderBaseUrl: string;
+  llmProviderApiKey: string;
   embeddingDimension: number;
   embeddingModel: string;
   rerankModel: string;
@@ -98,14 +102,18 @@ export function createDefaultSetupForm(): SetupFormModel {
     minioSecretKeyRef: "secret://rag/minio/secret-key",
     objectKeyPrefix: "p0/",
     qdrantBaseUrl: "http://qdrant:6333",
+    qdrantApiKeyRef: "",
     collectionPrefix: "little_bear_p0",
     vectorDistance: "cosine",
     keywordLanguage: "zh",
     keywordAnalyzer: "zhparser",
     modelGatewayMode: "external",
     embeddingProviderBaseUrl: "http://tei-embedding:80",
+    embeddingProviderApiKey: "",
     rerankProviderBaseUrl: "http://tei-rerank:80",
+    rerankProviderApiKey: "",
     llmProviderBaseUrl: "",
+    llmProviderApiKey: "",
     embeddingDimension: 768,
     embeddingModel: "jina‑embeddings‑v2‑base‑zh",
     rerankModel: "bge-reranker-base",
@@ -170,6 +178,11 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
         admin_role: "system_admin",
         default_user_role: "employee",
       },
+      model_provider_secrets: {
+        embedding_auth_token: normalizeOptionalSecretValue(form.embeddingProviderApiKey),
+        rerank_auth_token: normalizeOptionalSecretValue(form.rerankProviderApiKey),
+        llm_auth_token: normalizeOptionalSecretValue(form.llmProviderApiKey),
+      },
     },
     config: {
       schema_version: 1,
@@ -216,7 +229,7 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
       vector_store: {
         provider: "qdrant",
         qdrant_base_url: form.qdrantBaseUrl,
-        api_key_ref: null,
+        api_key_ref: normalizeOptionalSecretValue(form.qdrantApiKeyRef),
         collection_prefix: form.collectionPrefix,
         distance: form.vectorDistance,
         write_check_enabled: true,
@@ -243,18 +256,21 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
           embedding: {
             type: "tei",
             base_url: form.embeddingProviderBaseUrl,
+            auth_token_ref: null,
             healthcheck_path: "/health",
             embeddings_path: "/v1/embeddings",
           },
           rerank: {
             type: "tei",
             base_url: form.rerankProviderBaseUrl,
+            auth_token_ref: null,
             healthcheck_path: "/health",
             rerank_path: "/rerank",
           },
           llm: {
             type: "openai_compatible",
             base_url: form.llmProviderBaseUrl,
+            auth_token_ref: null,
             healthcheck_path: "/health",
             chat_completions_path: "/v1/chat/completions",
           },
@@ -449,4 +465,9 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
       },
     },
   };
+}
+
+function normalizeOptionalSecretValue(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
 }

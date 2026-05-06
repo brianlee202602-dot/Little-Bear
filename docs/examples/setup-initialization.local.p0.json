@@ -31,6 +31,11 @@
       ],
       "admin_role": "system_admin",
       "default_user_role": "employee"
+    },
+    "model_provider_secrets": {
+      "embedding_auth_token": null,
+      "rerank_auth_token": null,
+      "llm_auth_token": null
     }
   },
   "config": {
@@ -105,18 +110,21 @@
         "embedding": {
           "type": "tei",
           "base_url": "http://tei-embedding:80",
+          "auth_token_ref": null,
           "healthcheck_path": "/health",
           "embeddings_path": "/v1/embeddings"
         },
         "rerank": {
           "type": "tei",
           "base_url": "http://tei-rerank:80",
+          "auth_token_ref": null,
           "healthcheck_path": "/health",
           "rerank_path": "/rerank"
         },
         "llm": {
           "type": "openai_compatible",
           "base_url": "http://llm-provider:8000",
+          "auth_token_ref": null,
           "healthcheck_path": "/health",
           "chat_completions_path": "/v1/chat/completions"
         }

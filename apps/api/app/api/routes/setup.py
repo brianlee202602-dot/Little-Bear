@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, Request
 from starlette.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.schemas.setup import (
     SetupConfigValidationData,
@@ -123,11 +124,27 @@ async def setup_initialization(
             status_code=exc.status_code,
             details=exc.details,
         )
+    except SQLAlchemyError as exc:
+        details = _database_error_details(exc)
+        _record_initialization_failure(
+            "SETUP_DATABASE_ERROR",
+            "setup initialization database operation failed",
+            details,
+        )
+        return _error_response(
+            request_id,
+            "SETUP_DATABASE_ERROR",
+            "setup initialization database operation failed",
+            stage="setup_initialization",
+            status_code=500,
+            details=details,
+        )
     except Exception as exc:
+        details = _unexpected_error_details(exc)
         _record_initialization_failure(
             "SETUP_INITIALIZATION_FAILED",
             "setup initialization failed",
-            {"exception": exc.__class__.__name__},
+            details,
         )
         return _error_response(
             request_id,
@@ -135,7 +152,7 @@ async def setup_initialization(
             "setup initialization failed",
             stage="setup_initialization",
             status_code=500,
-            details={"exception": exc.__class__.__name__},
+            details=details,
         )
 
     return SetupInitializationResponse(
@@ -204,3 +221,29 @@ def _record_initialization_failure(
             )
     except Exception:
         return
+
+
+def _database_error_details(exc: SQLAlchemyError) -> dict[str, object]:
+    """返回可排查但不暴露 SQL 参数的数据库错误信息。"""
+    original = getattr(exc, "orig", None) or exc.__cause__
+    diag = getattr(original, "diag", None)
+    return {
+        "exception": exc.__class__.__name__,
+        "database_error": {
+            "type": exc.__class__.__name__,
+            "driver_type": original.__class__.__name__ if original is not None else None,
+            "message": str(original or exc).splitlines()[0],
+            "sqlstate": getattr(original, "sqlstate", None),
+            "constraint": getattr(diag, "constraint_name", None),
+            "table": getattr(diag, "table_name", None),
+            "column": getattr(diag, "column_name", None),
+        },
+    }
+
+
+def _unexpected_error_details(exc: Exception) -> dict[str, object]:
+    """返回未知异常的最小诊断信息。"""
+    return {
+        "exception": exc.__class__.__name__,
+        "message": str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__,
+    }

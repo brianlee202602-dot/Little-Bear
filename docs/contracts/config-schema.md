@@ -31,13 +31,15 @@ P0 不实现：
   "setup": {
     "admin": {},
     "organization": {},
-    "roles": {}
+    "roles": {},
+    "model_provider_secrets": {}
   },
   "config": {}
 }
 ```
 
 - `setup`：初始化实体数据，写入用户、组织、角色和角色绑定等业务表，不写入 active config。
+- `setup.model_provider_secrets`：仅初始化写入时允许携带的模型访问密钥明文，后端接收后立即加密写入 Secret Store，并从请求中剥离，不进入 active config、普通日志或审计摘要。
 - `config`：初始化运行配置，写入 `system_configs` 和 `config_versions`，发布为 `active_config v1`。
 
 ## 3. setup Schema
@@ -119,6 +121,31 @@ P0 部门不建模上下级递归，不包含 `parent_id`、`path` 或 closure t
 | `builtin_roles` | string[] | 是 | 必须包含 P0 内置角色全集 |
 | `admin_role` | string | 是 | P0 固定为 `system_admin` |
 | `default_user_role` | string | 是 | P0 固定为 `employee` |
+
+### 3.4 setup.model_provider_secrets
+
+```json
+{
+  "embedding_auth_token": null,
+  "rerank_auth_token": null,
+  "llm_auth_token": null
+}
+```
+
+字段规则：
+
+| 字段 | 类型 | 必填 | 规则 |
+| --- | --- | --- | --- |
+| `embedding_auth_token` | string/null | 否 | 外部 embedding provider 需要鉴权时填写明文 token；仅用于初始化请求 |
+| `rerank_auth_token` | string/null | 否 | 外部 rerank provider 需要鉴权时填写明文 token；仅用于初始化请求 |
+| `llm_auth_token` | string/null | 否 | 外部 LLM provider 需要鉴权时填写明文 token；仅用于初始化请求 |
+
+后端处理规则：
+
+- 若字段有值，后端必须在初始化事务内加密写入 PostgreSQL `secrets` 表。
+- 默认写入 ref 分别为 `secret://rag/model/embedding-api-key`、`secret://rag/model/rerank-api-key`、`secret://rag/model/llm-api-key`。
+- 写入完成后，后端自动把 `config.model_gateway.providers.<name>.auth_token_ref` 改写为对应 ref。
+- 明文 token 不得写入 active config、接口响应、普通日志、审计摘要或页面回显。
 
 ## 4. active_config v1 Schema
 
@@ -277,6 +304,7 @@ secret://rag/<service>/<name>
 
 - `distance` 可选值：`cosine`、`dot`、`euclidean`。
 - `api_key_ref` 可为空，但必须显式声明为 `null`。
+- 如果 Qdrant 开启了 API Key 鉴权，必须填写可读的 Secret ref，例如 `secret://rag/qdrant/api-key`。
 
 ### 6.5 keyword_search
 
@@ -311,18 +339,21 @@ P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embeddi
     "embedding": {
       "type": "tei",
       "base_url": "http://tei-embedding:80",
+      "auth_token_ref": null,
       "healthcheck_path": "/health",
       "embeddings_path": "/v1/embeddings"
     },
     "rerank": {
       "type": "tei",
       "base_url": "http://tei-rerank:80",
+      "auth_token_ref": null,
       "healthcheck_path": "/health",
       "rerank_path": "/rerank"
     },
     "llm": {
       "type": "openai_compatible",
       "base_url": "http://llm-provider:8000",
+      "auth_token_ref": null,
       "healthcheck_path": "/health",
       "chat_completions_path": "/v1/chat/completions"
     }
@@ -353,6 +384,9 @@ P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embeddi
 - `mode` 固定为 `external`。
 - `providers.embedding` 和 `providers.rerank` 默认使用 TEI HTTP 服务。
 - `providers.llm` 使用 OpenAI-compatible Chat Completions 接口，可以指向 vLLM、商业模型代理或企业内模型服务。
+- `auth_token_ref` 支持两层配置：`model_gateway.auth_token_ref` 是三个 provider 共用的兜底 token；`providers.<name>.auth_token_ref` 是 provider 级 token，优先级更高。
+- 初始化页面允许通过 `setup.model_provider_secrets` 直接输入模型访问密钥明文；后端会加密写入 Secret Store，并在 active config 中只保存 `secret://rag/...` 引用。
+- active config 中不得保存明文 API Key。
 - 每次模型调用必须生成 `model_route_hash`。
 - 普通日志不得记录完整 prompt。
 

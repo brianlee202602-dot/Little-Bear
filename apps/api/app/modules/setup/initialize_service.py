@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from app.modules.secrets.service import SecretStoreError, SecretStoreService
 from app.modules.setup.bootstrap_service import ServiceBootstrapService
 from app.modules.setup.service import SetupStatus
 from app.modules.setup.token_service import SetupTokenContext, SetupTokenService
@@ -32,6 +34,12 @@ BUILTIN_ROLE_NAMES = {
     "department_admin",
     "knowledge_base_admin",
     "employee",
+}
+
+MODEL_PROVIDER_SECRET_FIELDS = {
+    "embedding": ("embedding_auth_token", "secret://rag/model/embedding-api-key"),
+    "rerank": ("rerank_auth_token", "secret://rag/model/rerank-api-key"),
+    "llm": ("llm_auth_token", "secret://rag/model/llm-api-key"),
 }
 
 
@@ -102,8 +110,9 @@ class SetupInitializationService:
                 "setup payload is invalid",
                 details={"errors": validation.errors, "warnings": validation.warnings},
             )
+        prepared_payload = self._prepare_model_provider_secrets(session, payload)
         if recovery_mode:
-            return self._recover_active_config(session, payload, setup_token=setup_token)
+            return self._recover_active_config(session, prepared_payload, setup_token=setup_token)
 
         if PasswordHasher is None:
             raise SetupInitializationError(
@@ -112,8 +121,8 @@ class SetupInitializationService:
                 status_code=500,
             )
 
-        setup = payload["setup"]
-        config = payload["config"]
+        setup = prepared_payload["setup"]
+        config = prepared_payload["config"]
         enterprise_payload = setup["organization"]["enterprise"]
         departments_payload = setup["organization"]["departments"]
         admin_payload = setup["admin"]
@@ -283,6 +292,50 @@ class SetupInitializationService:
             path = "$" + "".join(f".{part}" for part in error.path)
             errors.append(_issue("SETUP_CONFIG_INVALID", path, error.message, retryable=False))
 
+    def _prepare_model_provider_secrets(
+        self,
+        session: Session,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        prepared_payload = deepcopy(payload)
+        setup = _as_dict(prepared_payload.get("setup"))
+        config = _as_dict(prepared_payload.get("config"))
+        model_provider_secrets = _as_dict(setup.pop("model_provider_secrets", None))
+        model_gateway = _as_dict(config.get("model_gateway"))
+        providers = _as_dict(model_gateway.get("providers"))
+
+        for provider_name, (secret_field, secret_ref) in MODEL_PROVIDER_SECRET_FIELDS.items():
+            secret_value = model_provider_secrets.get(secret_field)
+            if not isinstance(secret_value, str) or not secret_value.strip():
+                continue
+
+            provider = _as_dict(providers.get(provider_name))
+            try:
+                SecretStoreService().put_secret(
+                    session,
+                    secret_ref=secret_ref,
+                    secret_value=secret_value.strip(),
+                )
+            except SecretStoreError as exc:
+                raise SetupInitializationError(
+                    "SETUP_SECRET_WRITE_FAILED",
+                    f"failed to store model provider secret for {provider_name}",
+                    status_code=500,
+                    details={
+                        "provider": provider_name,
+                        "secret_ref": secret_ref,
+                        "reason": str(exc),
+                    },
+                ) from exc
+            provider["auth_token_ref"] = secret_ref
+            providers[provider_name] = provider
+
+        model_gateway["providers"] = providers
+        config["model_gateway"] = model_gateway
+        prepared_payload["setup"] = setup
+        prepared_payload["config"] = config
+        return prepared_payload
+
     def _validate_setup_rules(
         self,
         setup: dict[str, Any],
@@ -392,12 +445,27 @@ class SetupInitializationService:
     ) -> None:
         storage = _as_dict(config.get("storage"))
         auth = _as_dict(config.get("auth"))
+        model_gateway = _as_dict(config.get("model_gateway"))
+        model_providers = _as_dict(model_gateway.get("providers"))
         secret_refs = [
-            ("$.config.storage.access_key_ref", storage.get("access_key_ref")),
-            ("$.config.storage.secret_key_ref", storage.get("secret_key_ref")),
-            ("$.config.auth.jwt_signing_key_ref", auth.get("jwt_signing_key_ref")),
+            ("$.config.storage.access_key_ref", storage.get("access_key_ref"), True),
+            ("$.config.storage.secret_key_ref", storage.get("secret_key_ref"), True),
+            ("$.config.auth.jwt_signing_key_ref", auth.get("jwt_signing_key_ref"), True),
+            ("$.config.model_gateway.auth_token_ref", model_gateway.get("auth_token_ref"), False),
         ]
-        for path, value in secret_refs:
+        for provider_name in ("embedding", "rerank", "llm"):
+            provider = _as_dict(model_providers.get(provider_name))
+            secret_refs.append(
+                (
+                    f"$.config.model_gateway.providers.{provider_name}.auth_token_ref",
+                    provider.get("auth_token_ref"),
+                    False,
+                )
+            )
+
+        for path, value, required in secret_refs:
+            if not value and not required:
+                continue
             if not isinstance(value, str) or not value.startswith("secret://rag/"):
                 errors.append(
                     _issue("SETUP_CONFIG_INVALID", path, "secret ref must start with secret://rag/")
@@ -435,11 +503,11 @@ class SetupInitializationService:
             text(
                 """
                 UPDATE system_state
-                SET value_json = jsonb_build_object('status', :status), updated_at = now()
+                SET value_json = CAST(:value_json AS jsonb), updated_at = now()
                 WHERE key = 'setup_status'
                 """
             ),
-            {"status": status.value},
+            {"value_json": json.dumps({"status": status.value}, ensure_ascii=False)},
         )
 
     def _is_initialized(self, session: Session) -> bool:
@@ -816,7 +884,7 @@ class SetupInitializationService:
                 )
                 VALUES (
                     :id, :version, 'global', 'global', 'active', :config_hash,
-                    :schema_version, '{"valid":true}'::jsonb, 'critical', now()
+                    :schema_version, CAST(:validation_result_json AS jsonb), 'critical', now()
                 )
                 """
             ),
@@ -825,6 +893,7 @@ class SetupInitializationService:
                 "version": config_version,
                 "config_hash": config_hash,
                 "schema_version": schema_version,
+                "validation_result_json": json.dumps({"valid": True}, ensure_ascii=False),
             },
         )
 

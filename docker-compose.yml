@@ -1,4 +1,3 @@
-version: "3"
 services:
   postgres:
     image: zhparser/zhparser
@@ -96,9 +95,9 @@ services:
     restart: unless-stopped
     command:
       - --model-id
-      - jinaai/jina‑embeddings‑v2‑base‑zh
+      - jinaai/jina-embeddings-v2-base-zh
       - --served-model-name
-      - jina‑embeddings‑v2‑base‑zh
+      - jina-embeddings-v2-base-zh
     ports:
       - "8081:80"
     volumes:

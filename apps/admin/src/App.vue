@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 
 import {
   ApiRequestError,
+  type ApiErrorPayload,
   getSetupState,
   initializeSetup,
   validateSetupConfig,
@@ -44,6 +45,24 @@ type LocalValidationIssue = {
   message: string;
 };
 
+type BootstrapCheckIssue = {
+  name: string;
+  status: string;
+  message: string;
+  required: boolean;
+  latency_ms?: number;
+};
+
+type DatabaseErrorIssue = {
+  type?: string;
+  driver_type?: string;
+  message?: string;
+  sqlstate?: string;
+  constraint?: string;
+  table?: string;
+  column?: string;
+};
+
 type FieldDefinition = {
   key: keyof SetupFormModel;
   label: string;
@@ -53,6 +72,7 @@ type FieldDefinition = {
   min?: number;
   step?: number;
   span?: "full" | "half";
+  group?: string;
   options?: FieldOption[];
   required?: boolean;
 };
@@ -74,6 +94,8 @@ const setupState = ref<SetupStateData | null>(null);
 const validationResult = ref<SetupValidationData | null>(null);
 const initializationResult = ref<SetupInitializationData | null>(null);
 const feedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
+const validationErrorPayload = ref<ApiErrorPayload | null>(null);
+const initializationErrorPayload = ref<ApiErrorPayload | null>(null);
 const submitConfirmed = ref(false);
 const lastValidatedPayload = ref<string | null>(null);
 
@@ -182,11 +204,19 @@ const infraSection: FieldSection = {
       hint: "后端服务访问向量数据库的 HTTP 地址；同一 Docker 网络可使用 http://qdrant:6333。",
       required: true,
     },
+    {
+      key: "qdrantApiKeyRef",
+      label: "Qdrant API Key 引用",
+      input: "text",
+      hint: "可选。Qdrant 开启 API Key 鉴权时填写 Secret Store 引用，例如 secret://rag/qdrant/api-key；未开启鉴权时留空。",
+      span: "full",
+    },
     { key: "collectionPrefix", label: "向量集合前缀", input: "text", hint: "用于生成和识别 Qdrant collection；变更前需评估既有索引兼容性。", required: true },
     {
       key: "vectorDistance",
       label: "向量距离",
       input: "select",
+      hint: "用于设置 Qdrant collection 的距离计算方式；应与 embedding 模型归一化策略保持一致。",
       required: true,
       options: [
         { label: "cosine", value: "cosine" },
@@ -217,6 +247,13 @@ const modelSection: FieldSection = {
       required: true,
     },
     {
+      key: "embeddingProviderApiKey",
+      label: "向量模型访问密钥",
+      input: "password",
+      hint: "可选。需要鉴权时填写明文 API Key；仅用于本次初始化提交，后端会加密写入 Secret Store，active config 不保存明文。",
+      span: "full",
+    },
+    {
       key: "rerankProviderBaseUrl",
       label: "重排模型服务地址",
       input: "text",
@@ -225,12 +262,26 @@ const modelSection: FieldSection = {
       required: true,
     },
     {
+      key: "rerankProviderApiKey",
+      label: "重排模型访问密钥",
+      input: "password",
+      hint: "可选。需要鉴权时填写明文 API Key；仅用于本次初始化提交，后端会加密写入 Secret Store，active config 不保存明文。",
+      span: "full",
+    },
+    {
       key: "llmProviderBaseUrl",
       label: "大模型服务地址",
       input: "text",
       hint: "OpenAI-compatible LLM provider 的基础 URL；当前部署未内置 LLM 服务，必须填写可访问的正式地址。",
       span: "full",
       required: true,
+    },
+    {
+      key: "llmProviderApiKey",
+      label: "大模型访问密钥",
+      input: "password",
+      hint: "可选。需要鉴权时填写明文 API Key；仅用于本次初始化提交，后端会加密写入 Secret Store，active config 不保存明文。",
+      span: "full",
     },
     { key: "embeddingDimension", label: "向量维度", input: "number", hint: "必须与 embedding 模型输出维度及 Qdrant collection 维度保持一致。", min: 1, step: 1, required: true },
     { key: "embeddingModel", label: "向量模型", input: "text", hint: "填写 embedding provider 暴露的模型名称；导入与查询应使用兼容模型。", required: true },
@@ -284,19 +335,21 @@ const chunkSection: FieldSection = {
       label: "保留表格结构",
       input: "checkbox",
       hint: "启用后切片器应尽量避免拆散同一张表格，提升表格问答的引用完整性。",
+      group: "chunk-preserve",
     },
     {
       key: "chunkPreserveCodeBlocks",
       label: "保留代码块结构",
       input: "checkbox",
       hint: "启用后切片器应尽量避免拆散同一个代码块，减少技术文档上下文破碎。",
+      group: "chunk-preserve",
     },
     {
       key: "chunkPreserveContractClauses",
       label: "保留合同条款结构",
       input: "checkbox",
       hint: "启用后切片器应尽量保留条款编号和条款正文的完整性。",
-      span: "full",
+      group: "chunk-preserve",
     },
   ],
 };
@@ -349,10 +402,10 @@ const policySection: FieldSection = {
 const cacheSection: FieldSection = {
   title: "缓存开关",
   fields: [
-    { key: "queryEmbeddingEnabled", label: "查询向量缓存", input: "checkbox", hint: "启用后可复用相同查询的 embedding 结果，降低重复模型调用成本。" },
-    { key: "retrievalResultEnabled", label: "召回结果缓存", input: "checkbox", hint: "启用后缓存检索召回结果；缓存键必须包含权限、配置和索引版本信息。" },
-    { key: "finalAnswerEnabled", label: "最终答案缓存", input: "checkbox", hint: "启用后缓存最终答案；涉及权限变更和引用时效时需严格评估风险。" },
-    { key: "crossUserFinalAnswerAllowed", label: "允许跨用户最终答案缓存", input: "checkbox", hint: "高风险配置，可能导致不同用户之间复用答案；P0 阶段禁止开启。", span: "full" },
+    { key: "queryEmbeddingEnabled", label: "查询向量缓存", input: "checkbox", hint: "启用后可复用相同查询的 embedding 结果，降低重复模型调用成本。", group: "cache-switch" },
+    { key: "retrievalResultEnabled", label: "召回结果缓存", input: "checkbox", hint: "启用后缓存检索召回结果；缓存键必须包含权限、配置和索引版本信息。", group: "cache-switch" },
+    { key: "finalAnswerEnabled", label: "最终答案缓存", input: "checkbox", hint: "启用后缓存最终答案；涉及权限变更和引用时效时需严格评估风险。", group: "cache-switch" },
+    { key: "crossUserFinalAnswerAllowed", label: "允许跨用户最终答案缓存", input: "checkbox", hint: "高风险配置，可能导致不同用户之间复用答案；P0 阶段禁止开启。", group: "cache-switch" },
   ],
 };
 
@@ -498,6 +551,32 @@ const summaryItems = computed(() => [
   { label: "切片大小", value: `${form.chunkDefaultSizeTokens} tokens` },
   { label: "向量库", value: form.qdrantBaseUrl },
 ]);
+const normalFieldsBySection = computed(() =>
+  new Map(
+    sections.map((section) => [
+      section.title,
+      section.fields.filter((field) => !field.group),
+    ]),
+  ),
+);
+const checkboxFieldsBySection = computed(() =>
+  new Map(
+    sections.map((section) => [
+      section.title,
+      section.fields.filter((field) => field.group === "chunk-preserve" || field.group === "cache-switch"),
+    ]),
+  ),
+);
+const validationErrorItems = computed(() => extractStructuredIssues(validationErrorPayload.value));
+const initializationErrorItems = computed(() =>
+  extractStructuredIssues(initializationErrorPayload.value),
+);
+const initializationFailedChecks = computed(() =>
+  extractBootstrapChecks(initializationErrorPayload.value).filter((item) => item.status !== "passed"),
+);
+const initializationDatabaseError = computed(() =>
+  extractDatabaseError(initializationErrorPayload.value),
+);
 
 onMounted(async () => {
   if (window.location.pathname === "/admin" || window.location.pathname === "/admin/") {
@@ -534,6 +613,7 @@ async function runValidation(): Promise<void> {
   try {
     const response = await validateSetupConfig(payload.value, form.setupToken || undefined);
     validationResult.value = response.data;
+    validationErrorPayload.value = null;
     lastValidatedPayload.value = response.data.valid ? payloadSignature.value : null;
     feedback.value = {
       tone: response.data.valid ? "success" : "error",
@@ -543,6 +623,7 @@ async function runValidation(): Promise<void> {
   } catch (error) {
     validationResult.value = null;
     lastValidatedPayload.value = null;
+    validationErrorPayload.value = error instanceof ApiRequestError ? error.payload : null;
     feedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "配置校验失败"),
@@ -564,6 +645,7 @@ async function runInitialization(): Promise<void> {
   try {
     const response = await initializeSetup(payload.value, form.setupToken || undefined);
     initializationResult.value = response.data;
+    initializationErrorPayload.value = null;
     feedback.value = {
       tone: "success",
       message: "初始化提交成功",
@@ -572,6 +654,7 @@ async function runInitialization(): Promise<void> {
     await refreshState();
   } catch (error) {
     initializationResult.value = null;
+    initializationErrorPayload.value = error instanceof ApiRequestError ? error.payload : null;
     feedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "初始化提交失败"),
@@ -586,6 +669,8 @@ function resetForm(): void {
   validationResult.value = null;
   lastValidatedPayload.value = null;
   initializationResult.value = null;
+  validationErrorPayload.value = null;
+  initializationErrorPayload.value = null;
   feedback.value = {
     tone: "neutral",
     message: "已恢复本地默认初始化配置",
@@ -679,6 +764,58 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function extractStructuredIssues(payload: ApiErrorPayload | null): SetupIssue[] {
+  const details = asRecord(payload?.details);
+  const errors = details?.errors;
+  return Array.isArray(errors) ? errors.filter((item): item is SetupIssue => isRecord(item)) : [];
+}
+
+function extractBootstrapChecks(payload: ApiErrorPayload | null): BootstrapCheckIssue[] {
+  const details = asRecord(payload?.details);
+  const checks = details?.checks;
+  if (!Array.isArray(checks)) {
+    return [];
+  }
+  return checks
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item) => ({
+      name: typeof item.name === "string" ? item.name : "unknown",
+      status: typeof item.status === "string" ? item.status : "unknown",
+      message: typeof item.message === "string" ? item.message : "",
+      required: item.required !== false,
+      latency_ms: typeof item.latency_ms === "number" ? item.latency_ms : undefined,
+    }));
+}
+
+function extractDatabaseError(payload: ApiErrorPayload | null): DatabaseErrorIssue | null {
+  const details = asRecord(payload?.details);
+  const databaseError = details?.database_error;
+  if (!isRecord(databaseError)) {
+    return null;
+  }
+  return {
+    type: asOptionalString(databaseError.type),
+    driver_type: asOptionalString(databaseError.driver_type),
+    message: asOptionalString(databaseError.message),
+    sqlstate: asOptionalString(databaseError.sqlstate),
+    constraint: asOptionalString(databaseError.constraint),
+    table: asOptionalString(databaseError.table),
+    column: asOptionalString(databaseError.column),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
 function validateLocalForm(
   current: SetupFormModel,
   currentSetupState: SetupStateData | null,
@@ -746,6 +883,7 @@ function validateLocalForm(
   }
   validateHttpUrl(current.minioEndpoint, "MinIO 地址", "minioEndpoint", "基础设施", add);
   validateHttpUrl(current.qdrantBaseUrl, "Qdrant 地址", "qdrantBaseUrl", "基础设施", add);
+  validateOptionalSecretRef(current.qdrantApiKeyRef, "Qdrant API Key 引用", "qdrantApiKeyRef", "基础设施", add);
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(current.minioBucket)) {
     add("error", "基础设施", "存储桶名称需符合 S3 命名规则。", "minioBucket");
   }
@@ -869,6 +1007,18 @@ function validateSecretRef(
   }
 }
 
+function validateOptionalSecretRef(
+  value: string,
+  label: string,
+  field: keyof SetupFormModel,
+  section: string,
+  add: (tone: LocalIssueTone, section: string, message: string, field?: keyof SetupFormModel) => void,
+): void {
+  if (value.trim()) {
+    validateSecretRef(value, label, field, section, add);
+  }
+}
+
 function validateCollectionPrefix(
   value: string,
   add: (tone: LocalIssueTone, section: string, message: string, field?: keyof SetupFormModel) => void,
@@ -969,25 +1119,25 @@ function isComposeDemoProvider(value: string): boolean {
 
       <div class="content-grid">
         <section class="editor">
-          <section v-for="section in sections" :key="section.title" class="panel">
-            <header class="panel__header">
+	          <section v-for="section in sections" :key="section.title" class="panel">
+	            <header class="panel__header">
               <h3>{{ section.title }}</h3>
               <span :class="toneClass(sectionCheckItems.find((item) => item.title === section.title)?.tone ?? 'neutral')">
                 {{ sectionToneText(sectionCheckItems.find((item) => item.title === section.title) ?? { errors: 0, warnings: 0 }) }}
               </span>
-            </header>
-            <div class="form-grid">
-              <label
-                v-for="field in section.fields"
-                :key="String(field.key)"
-                class="field"
-                :class="{
-                  'field--full': field.span === 'full',
-                  'field--checkbox': field.input === 'checkbox',
-                  'field--error': hasFieldError(field.key),
-                  'field--warning': hasFieldWarning(field.key),
-                }"
-              >
+	            </header>
+	            <div class="form-grid">
+	              <label
+	                v-for="field in normalFieldsBySection.get(section.title) ?? []"
+	                :key="String(field.key)"
+	                class="field"
+	                :class="{
+	                  'field--full': field.span === 'full',
+	                  'field--checkbox': field.input === 'checkbox',
+	                  'field--error': hasFieldError(field.key),
+	                  'field--warning': hasFieldWarning(field.key),
+	                }"
+	              >
                 <template v-if="field.input === 'checkbox'">
                   <input
                     class="checkbox"
@@ -1035,10 +1185,42 @@ function isComposeDemoProvider(value: string): boolean {
                   >
                     {{ issue.message }}
                   </li>
-                </ul>
-              </label>
-            </div>
-          </section>
+	                </ul>
+	              </label>
+	            </div>
+	            <div
+	              v-if="(checkboxFieldsBySection.get(section.title) ?? []).length"
+	              class="checkbox-grid"
+	            >
+	              <label
+	                v-for="field in checkboxFieldsBySection.get(section.title) ?? []"
+	                :key="String(field.key)"
+	                class="field field--checkbox"
+	                :class="{
+	                  'field--error': hasFieldError(field.key),
+	                  'field--warning': hasFieldWarning(field.key),
+	                }"
+	              >
+	                <input
+	                  class="checkbox"
+	                  type="checkbox"
+	                  :checked="Boolean(form[field.key])"
+	                  @change="updateFieldFromCheckbox(field, ($event.target as HTMLInputElement).checked)"
+	                />
+	                <span>{{ field.label }}</span>
+	                <p v-if="field.hint" class="field__hint">{{ field.hint }}</p>
+	                <ul v-if="fieldIssues(field.key).length" class="field-issues">
+	                  <li
+	                    v-for="issue in fieldIssues(field.key)"
+	                    :key="`${issue.tone}-${issue.message}`"
+	                    :class="`field-issue field-issue--${issue.tone}`"
+	                  >
+	                    {{ issue.message }}
+	                  </li>
+	                </ul>
+	              </label>
+	            </div>
+	          </section>
 
         </section>
 
@@ -1119,6 +1301,17 @@ function isComposeDemoProvider(value: string): boolean {
                 </li>
               </ul>
             </div>
+            <div v-else-if="validationErrorPayload" class="result-block">
+              <p class="tone tone--error">后端校验请求失败</p>
+              <ul v-if="validationErrorItems.length" class="issue-list">
+                <li v-for="issue in validationErrorItems" :key="`${normalizeIssueCode(issue)}-${issue.path}`">
+                  <strong>{{ normalizeIssueCode(issue) }}</strong>
+                  <span>{{ issue.path }}</span>
+                  <p>{{ issue.message }}</p>
+                </li>
+              </ul>
+              <p v-else class="empty-state">{{ validationErrorPayload.message ?? "未返回可解析的校验错误明细。" }}</p>
+            </div>
             <p v-else class="empty-state">尚未执行配置校验。</p>
           </section>
 
@@ -1144,6 +1337,54 @@ function isComposeDemoProvider(value: string): boolean {
                 <dd class="summary__value--break">{{ initializationResult.admin_user_id }}</dd>
               </div>
             </dl>
+            <div v-else-if="initializationErrorPayload" class="result-block">
+              <p class="tone tone--error">初始化提交失败</p>
+              <ul v-if="initializationFailedChecks.length" class="issue-list">
+                <li v-for="check in initializationFailedChecks" :key="check.name">
+                  <strong>{{ check.name }}</strong>
+                  <span>{{ check.required ? "required" : "optional" }}</span>
+                  <p>{{ check.message }}</p>
+                </li>
+              </ul>
+              <ul v-else-if="initializationErrorItems.length" class="issue-list">
+                <li v-for="issue in initializationErrorItems" :key="`${normalizeIssueCode(issue)}-${issue.path}`">
+                  <strong>{{ normalizeIssueCode(issue) }}</strong>
+                  <span>{{ issue.path }}</span>
+                  <p>{{ issue.message }}</p>
+                </li>
+              </ul>
+              <dl v-else-if="initializationDatabaseError" class="summary">
+                <div class="summary__row">
+                  <dt>异常类型</dt>
+                  <dd>{{ initializationDatabaseError.type ?? "-" }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>驱动错误</dt>
+                  <dd>{{ initializationDatabaseError.driver_type ?? "-" }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>错误信息</dt>
+                  <dd class="summary__value--break">{{ initializationDatabaseError.message ?? "-" }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>SQLSTATE</dt>
+                  <dd>{{ initializationDatabaseError.sqlstate ?? "-" }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>约束</dt>
+                  <dd class="summary__value--break">{{ initializationDatabaseError.constraint ?? "-" }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>数据表</dt>
+                  <dd>{{ initializationDatabaseError.table ?? "-" }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>字段</dt>
+                  <dd>{{ initializationDatabaseError.column ?? "-" }}</dd>
+                </div>
+              </dl>
+              <p v-else class="empty-state">{{ initializationErrorPayload.message ?? "未返回可解析的初始化错误明细。" }}</p>
+            </div>
             <p v-else class="empty-state">尚未提交初始化。</p>
           </section>
         </aside>
@@ -1319,13 +1560,25 @@ function isComposeDemoProvider(value: string): boolean {
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 14px 16px;
   padding: 18px;
 }
 
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  padding: 0 18px 18px;
+}
+
+.checkbox-grid > .field {
+  grid-column: auto;
+}
+
 .field {
   min-width: 0;
+  grid-column: span 3;
   display: grid;
   gap: 8px;
 }
@@ -1681,6 +1934,11 @@ function isComposeDemoProvider(value: string): boolean {
     grid-template-columns: 1fr;
   }
 
+  .checkbox-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .field,
   .field--full {
     grid-column: auto;
   }

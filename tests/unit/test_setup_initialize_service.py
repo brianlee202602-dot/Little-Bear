@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from app.modules.setup.initialize_service import SetupInitializationService
+from app.modules.setup.initialize_service import SetupInitializationService, SetupStatus
+
+
+class _CaptureSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, dict[str, object]]] = []
+
+    def execute(self, statement, params=None):
+        self.calls.append((statement, params or {}))
 
 
 def _valid_payload() -> dict:
@@ -94,3 +102,60 @@ def test_setup_initialize_validation_handles_malformed_config_without_crashing(
 
     assert result.valid is False
     assert any(issue["path"] == "$.config.storage.access_key_ref" for issue in result.errors)
+
+
+def test_prepare_model_provider_secrets_encrypts_plaintext_and_rewrites_refs(
+    monkeypatch,
+) -> None:
+    writes: list[tuple[str, str]] = []
+
+    def fake_put_secret(self, session, *, secret_ref: str, secret_value: str, **kwargs) -> None:
+        writes.append((secret_ref, secret_value))
+
+    monkeypatch.setattr(
+        "app.modules.setup.initialize_service.SecretStoreService.put_secret",
+        fake_put_secret,
+    )
+
+    payload = deepcopy(_valid_payload())
+    payload["setup"]["model_provider_secrets"] = {
+        "embedding_auth_token": " emb-key ",
+        "rerank_auth_token": None,
+        "llm_auth_token": "llm-key",
+    }
+    payload["config"]["model_gateway"] = {
+        "providers": {
+            "embedding": {"auth_token_ref": None},
+            "rerank": {"auth_token_ref": None},
+            "llm": {"auth_token_ref": None},
+        }
+    }
+
+    prepared = SetupInitializationService()._prepare_model_provider_secrets(object(), payload)
+
+    assert writes == [
+        ("secret://rag/model/embedding-api-key", "emb-key"),
+        ("secret://rag/model/llm-api-key", "llm-key"),
+    ]
+    assert "model_provider_secrets" not in prepared["setup"]
+    assert (
+        prepared["config"]["model_gateway"]["providers"]["embedding"]["auth_token_ref"]
+        == "secret://rag/model/embedding-api-key"
+    )
+    assert (
+        prepared["config"]["model_gateway"]["providers"]["rerank"]["auth_token_ref"] is None
+    )
+    assert (
+        prepared["config"]["model_gateway"]["providers"]["llm"]["auth_token_ref"]
+        == "secret://rag/model/llm-api-key"
+    )
+
+
+def test_mark_status_writes_json_value_without_jsonb_build_object_parameter() -> None:
+    session = _CaptureSession()
+
+    SetupInitializationService()._mark_status(session, SetupStatus.CREATING_ADMIN)
+
+    statement, params = session.calls[0]
+    assert "jsonb_build_object" not in str(statement)
+    assert params == {"value_json": '{"status": "creating_admin"}'}

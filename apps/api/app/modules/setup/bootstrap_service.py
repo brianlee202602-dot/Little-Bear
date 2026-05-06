@@ -276,7 +276,7 @@ class ServiceBootstrapService:
         started = time.monotonic()
         try:
             _redis_ping(redis_url, timeout)
-        except BootstrapProbeError as exc:
+        except (BootstrapProbeError, OSError) as exc:
             return BootstrapCheck("redis", "failed", str(exc), latency_ms=_elapsed_ms(started))
         return BootstrapCheck(
             "redis",
@@ -360,26 +360,27 @@ class ServiceBootstrapService:
         gateway = _as_dict(config.get("model_gateway"))
         providers = _as_dict(gateway.get("providers"))
         timeout_ms = _json_int(_as_dict(gateway.get("healthcheck")).get("timeout_ms")) or 2000
-        auth_headers: dict[str, str] = {}
-        auth_token_ref = gateway.get("auth_token_ref")
-        if isinstance(auth_token_ref, str) and auth_token_ref:
-            try:
-                token = SecretStoreService().get_secret_value(session, secret_ref=auth_token_ref)
-            except SecretStoreError as exc:
-                return [BootstrapCheck("model_gateway_auth", "failed", str(exc))]
-            auth_headers["authorization"] = f"Bearer {token}"
+        gateway_auth_token_ref = _str_or_none(gateway.get("auth_token_ref"))
 
         checks: list[BootstrapCheck] = []
         for provider_name in ("embedding", "rerank", "llm"):
             provider = _as_dict(providers.get(provider_name))
             base_url = str(provider.get("base_url") or "")
             path = str(provider.get("healthcheck_path") or "/health")
+            auth_headers_result = _model_provider_auth_headers(
+                session,
+                provider_name,
+                _str_or_none(provider.get("auth_token_ref")) or gateway_auth_token_ref,
+            )
+            if isinstance(auth_headers_result, BootstrapCheck):
+                checks.append(auth_headers_result)
+                continue
             started = time.monotonic()
             try:
                 _http_get(
                     _join_url(base_url, path),
                     timeout_seconds=_timeout_seconds(timeout_ms, default_ms=2000),
-                    headers=auth_headers,
+                    headers=auth_headers_result,
                 )
             except BootstrapProbeError as exc:
                 checks.append(
@@ -411,13 +412,38 @@ def _collect_secret_refs(config: dict[str, Any]) -> list[tuple[str, str | None, 
     auth = _as_dict(config.get("auth"))
     vector_store = _as_dict(config.get("vector_store"))
     gateway = _as_dict(config.get("model_gateway"))
-    return [
+    providers = _as_dict(gateway.get("providers"))
+    refs = [
         ("secret_minio_access_key", _str_or_none(storage.get("access_key_ref")), True),
         ("secret_minio_secret_key", _str_or_none(storage.get("secret_key_ref")), True),
         ("secret_jwt_signing_key", _str_or_none(auth.get("jwt_signing_key_ref")), True),
         ("secret_qdrant_api_key", _str_or_none(vector_store.get("api_key_ref")), False),
         ("secret_model_gateway_auth", _str_or_none(gateway.get("auth_token_ref")), False),
     ]
+    for provider_name in ("embedding", "rerank", "llm"):
+        provider = _as_dict(providers.get(provider_name))
+        refs.append(
+            (
+                f"secret_model_provider_{provider_name}_auth",
+                _str_or_none(provider.get("auth_token_ref")),
+                False,
+            )
+        )
+    return refs
+
+
+def _model_provider_auth_headers(
+    session: Session,
+    provider_name: str,
+    auth_token_ref: str | None,
+) -> dict[str, str] | BootstrapCheck:
+    if not auth_token_ref:
+        return {}
+    try:
+        token = SecretStoreService().get_secret_value(session, secret_ref=auth_token_ref)
+    except SecretStoreError as exc:
+        return BootstrapCheck(f"model_provider_{provider_name}_auth", "failed", str(exc))
+    return {"authorization": f"Bearer {token}"}
 
 
 def _redis_ping(redis_url: str, timeout: float) -> None:

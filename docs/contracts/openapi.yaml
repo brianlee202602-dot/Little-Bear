@@ -2216,6 +2216,8 @@ components:
           $ref: "#/components/schemas/SetupOrganization"
         roles:
           $ref: "#/components/schemas/SetupRoles"
+        model_provider_secrets:
+          $ref: "#/components/schemas/ModelProviderSecrets"
     SetupAdmin:
       type: object
       required: [username, display_name, initial_password]
@@ -2284,6 +2286,21 @@ components:
         default_user_role:
           type: string
           const: employee
+    ModelProviderSecrets:
+      type: object
+      properties:
+        embedding_auth_token:
+          type: [string, "null"]
+          format: password
+          writeOnly: true
+        rerank_auth_token:
+          type: [string, "null"]
+          format: password
+          writeOnly: true
+        llm_auth_token:
+          type: [string, "null"]
+          format: password
+          writeOnly: true
     ActiveConfigV1:
       type: object
       required:
@@ -2408,13 +2425,15 @@ components:
           additionalProperties: true
     ModelProviderConfig:
       type: object
-      required: [type, base_url, healthcheck_path]
+      required: [type, base_url, healthcheck_path, auth_token_ref]
       properties:
         type:
           type: string
           enum: [tei, openai_compatible, http]
         base_url:
           type: string
+        auth_token_ref:
+          type: [string, "null"]
         healthcheck_path:
           type: string
         embeddings_path:

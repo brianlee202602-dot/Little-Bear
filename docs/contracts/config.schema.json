@@ -29,6 +29,18 @@
         }
       ]
     },
+    "NullableWriteOnlySecretValue": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "writeOnly": true
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "SetupPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -42,6 +54,9 @@
         },
         "roles": {
           "$ref": "#/$defs/SetupRoles"
+        },
+        "model_provider_secrets": {
+          "$ref": "#/$defs/ModelProviderSecrets"
         }
       }
     },
@@ -197,6 +212,21 @@
         },
         "default_user_role": {
           "const": "employee"
+        }
+      }
+    },
+    "ModelProviderSecrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "embedding_auth_token": {
+          "$ref": "#/$defs/NullableWriteOnlySecretValue"
+        },
+        "rerank_auth_token": {
+          "$ref": "#/$defs/NullableWriteOnlySecretValue"
+        },
+        "llm_auth_token": {
+          "$ref": "#/$defs/NullableWriteOnlySecretValue"
         }
       }
     },
@@ -655,7 +685,7 @@
     "ModelProviderConfig": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "base_url", "healthcheck_path"],
+      "required": ["type", "base_url", "healthcheck_path", "auth_token_ref"],
       "properties": {
         "type": {
           "type": "string",
@@ -664,6 +694,9 @@
         "base_url": {
           "type": "string",
           "pattern": "^https?://"
+        },
+        "auth_token_ref": {
+          "$ref": "#/$defs/NullableSecretRef"
         },
         "healthcheck_path": {
           "type": "string",
