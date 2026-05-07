@@ -215,3 +215,47 @@ def test_auth_runtime_config_provider_reuses_secret_until_version_changes() -> N
     assert second is first
     assert third.config_version == 2
     assert secret_store.calls == 2
+
+
+def test_login_record_query_omits_nullable_enterprise_parameter(monkeypatch) -> None:
+    service = AuthService()
+    session = _FakeSession()
+
+    class _Rows:
+        def all(self):
+            return []
+
+    def execute(statement, params=None):
+        session.executed.append((str(statement), params or {}))
+        return _Rows()
+
+    monkeypatch.setattr(session, "execute", execute)
+
+    with pytest.raises(AuthServiceError):
+        service._load_login_record(session, "admin")
+
+    sql, params = session.executed[-1]
+    assert ":enterprise_code IS NULL" not in sql
+    assert "enterprise_code" not in params
+
+
+def test_login_record_query_filters_enterprise_code_when_provided(monkeypatch) -> None:
+    service = AuthService()
+    session = _FakeSession()
+
+    class _Rows:
+        def all(self):
+            return []
+
+    def execute(statement, params=None):
+        session.executed.append((str(statement), params or {}))
+        return _Rows()
+
+    monkeypatch.setattr(session, "execute", execute)
+
+    with pytest.raises(AuthServiceError):
+        service._load_login_record(session, "admin", enterprise_code="default")
+
+    sql, params = session.executed[-1]
+    assert "lower(e.code) = lower(:enterprise_code)" in sql
+    assert params["enterprise_code"] == "default"

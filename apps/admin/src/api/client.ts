@@ -101,6 +101,168 @@ export interface PasswordChangeRequest {
   new_password: string;
 }
 
+export type ConfigStatus = "draft" | "validating" | "active" | "archived" | "failed";
+export type ConfigRiskLevel = "low" | "medium" | "high" | "critical";
+
+export interface ConfigItemData {
+  key: string;
+  value_json: Record<string, unknown>;
+  scope_type: string;
+  status: ConfigStatus;
+  version: number;
+}
+
+export interface PaginationData {
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export interface ConfigItemResponse {
+  request_id: string;
+  data: ConfigItemData;
+}
+
+export interface ConfigItemListResponse {
+  request_id: string;
+  data: ConfigItemData[];
+  pagination: PaginationData;
+}
+
+export interface ConfigVersionData {
+  version: number;
+  status: ConfigStatus;
+  risk_level: ConfigRiskLevel;
+  created_by: string | null;
+}
+
+export interface ConfigVersionResponse {
+  request_id: string;
+  data: ConfigVersionData;
+}
+
+export interface ConfigVersionListResponse {
+  request_id: string;
+  data: ConfigVersionData[];
+}
+
+export type AuditResult = "success" | "failure" | "denied";
+
+export interface AuditLogData {
+  id: string;
+  request_id: string | null;
+  trace_id: string | null;
+  event_name: string;
+  actor_type: string;
+  actor_id: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  result: AuditResult;
+  risk_level: ConfigRiskLevel;
+  config_version: number | null;
+  permission_version: number | null;
+  index_version_hash: string | null;
+  summary_json: Record<string, unknown>;
+  error_code: string | null;
+  created_at: string | null;
+}
+
+export interface AuditLogListResponse {
+  request_id: string;
+  data: AuditLogData[];
+  pagination: PaginationData;
+}
+
+export type AdminUserStatus = "active" | "disabled" | "locked" | "deleted";
+
+export interface AdminDepartmentData {
+  id: string;
+  code: string;
+  name: string;
+  status: string;
+  is_primary: boolean;
+}
+
+export interface AdminRoleData {
+  id: string;
+  code: string;
+  name: string;
+  scope_type: "enterprise" | "department" | "knowledge_base";
+  is_builtin: boolean;
+  status: "active" | "disabled" | "archived";
+  scopes: string[];
+}
+
+export interface AdminUserData {
+  id: string;
+  username: string;
+  name: string;
+  status: AdminUserStatus;
+  enterprise_id: string;
+  email: string | null;
+  phone: string | null;
+  departments: AdminDepartmentData[];
+  roles: AdminRoleData[];
+  scopes: string[];
+}
+
+export interface AdminUserListResponse {
+  request_id: string;
+  data: AdminUserData[];
+  pagination: PaginationData;
+}
+
+export interface AdminUserResponse {
+  request_id: string;
+  data: AdminUserData;
+}
+
+export interface AdminUserCreateRequest {
+  username: string;
+  name: string;
+  initial_password: string;
+  department_ids: string[];
+  role_ids: string[];
+}
+
+export interface AdminUserPatchRequest {
+  name?: string;
+  status?: "active" | "disabled" | "locked";
+}
+
+export interface AdminPasswordResetRequest {
+  new_password: string;
+  force_change_password: boolean;
+}
+
+export interface AdminRoleListResponse {
+  request_id: string;
+  data: AdminRoleData[];
+}
+
+export interface AdminRoleBindingData {
+  id: string;
+  role_id: string;
+  subject_type: "user" | "department";
+  subject_id: string;
+  scope_type: "enterprise" | "department" | "knowledge_base";
+  scope_id: string | null;
+  role_code: string | null;
+  role_name: string | null;
+}
+
+export interface AdminRoleBindingListResponse {
+  request_id: string;
+  data: AdminRoleBindingData[];
+}
+
+export interface AdminRoleBindingInputData {
+  role_id: string;
+  scope_type: "enterprise" | "department" | "knowledge_base";
+  scope_id?: string | null;
+}
+
 export interface ApiErrorPayload {
   request_id?: string;
   error_code?: string;
@@ -203,6 +365,243 @@ export async function changeCurrentUserPassword(
     {
       method: "PUT",
       body: JSON.stringify(payload),
+    },
+    accessToken,
+  );
+}
+
+export async function listConfigs(accessToken: string): Promise<ConfigItemListResponse> {
+  return requestJson<ConfigItemListResponse>(
+    "/internal/v1/admin/configs",
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function getConfigItem(
+  key: string,
+  accessToken: string,
+): Promise<ConfigItemResponse> {
+  return requestJson<ConfigItemResponse>(
+    `/internal/v1/admin/configs/${encodeURIComponent(key)}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function saveConfigDraft(
+  key: string,
+  valueJson: Record<string, unknown>,
+  accessToken: string,
+): Promise<ConfigItemResponse> {
+  return requestJson<ConfigItemResponse>(
+    `/internal/v1/admin/configs/${encodeURIComponent(key)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ value_json: valueJson }),
+      headers: { "x-config-confirm": "save-draft" },
+    },
+    accessToken,
+  );
+}
+
+export async function validateAdminConfig(
+  config: Record<string, unknown>,
+  accessToken: string,
+): Promise<SetupValidationResponse> {
+  return requestJson<SetupValidationResponse>(
+    "/internal/v1/admin/config-validations",
+    {
+      method: "POST",
+      body: JSON.stringify({ config }),
+    },
+    accessToken,
+  );
+}
+
+export async function listConfigVersions(
+  accessToken: string,
+): Promise<ConfigVersionListResponse> {
+  return requestJson<ConfigVersionListResponse>(
+    "/internal/v1/admin/config-versions",
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function publishConfigVersion(
+  version: number,
+  accessToken: string,
+): Promise<ConfigVersionResponse> {
+  return requestJson<ConfigVersionResponse>(
+    `/internal/v1/admin/config-versions/${version}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ status: "active" }),
+      headers: { "x-config-confirm": "publish" },
+    },
+    accessToken,
+  );
+}
+
+export async function listAuditLogs(
+  accessToken: string,
+  filters: { resource_type?: string; result?: string; risk_level?: string } = {},
+): Promise<AuditLogListResponse> {
+  const params = new URLSearchParams({ page_size: "20" });
+  for (const [key, value] of Object.entries(filters)) {
+    if (value) {
+      params.set(key, value);
+    }
+  }
+  return requestJson<AuditLogListResponse>(
+    `/internal/v1/admin/audit-logs?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminUsers(
+  accessToken: string,
+  filters: { keyword?: string; status?: string; page?: number; page_size?: number } = {},
+): Promise<AdminUserListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  return requestJson<AdminUserListResponse>(
+    `/internal/v1/admin/users?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function createAdminUser(
+  payload: AdminUserCreateRequest,
+  accessToken: string,
+  confirmedHighRisk: boolean,
+): Promise<AdminUserResponse> {
+  return requestJson<AdminUserResponse>(
+    "/internal/v1/admin/users",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: confirmedHighRisk ? { "x-user-confirm": "create-admin" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function patchAdminUser(
+  userId: string,
+  payload: AdminUserPatchRequest,
+  accessToken: string,
+  confirmedDisableAdmin: boolean,
+): Promise<AdminUserResponse> {
+  return requestJson<AdminUserResponse>(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+      headers: confirmedDisableAdmin ? { "x-user-confirm": "disable-admin" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function deleteAdminUser(
+  userId: string,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<void> {
+  await requestVoid(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}`,
+    {
+      method: "DELETE",
+      headers: confirmed ? { "x-user-confirm": "delete" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function resetAdminUserPassword(
+  userId: string,
+  payload: AdminPasswordResetRequest,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<void> {
+  await requestVoid(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}/password`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      headers: confirmed ? { "x-user-confirm": "reset-password" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function unlockAdminUser(userId: string, accessToken: string): Promise<void> {
+  await requestVoid(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}/lock`,
+    { method: "DELETE" },
+    accessToken,
+  );
+}
+
+export async function listAdminRoles(accessToken: string): Promise<AdminRoleListResponse> {
+  return requestJson<AdminRoleListResponse>(
+    "/internal/v1/admin/roles",
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminUserRoleBindings(
+  userId: string,
+  accessToken: string,
+): Promise<AdminRoleBindingListResponse> {
+  return requestJson<AdminRoleBindingListResponse>(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}/role-bindings`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function createAdminUserRoleBindings(
+  userId: string,
+  bindings: AdminRoleBindingInputData[],
+  accessToken: string,
+  confirmedHighRisk: boolean,
+): Promise<AdminRoleBindingListResponse> {
+  return requestJson<AdminRoleBindingListResponse>(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}/role-bindings`,
+    {
+      method: "POST",
+      body: JSON.stringify({ bindings }),
+      headers: confirmedHighRisk ? { "x-role-binding-confirm": "high-risk" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function revokeAdminUserRoleBinding(
+  userId: string,
+  bindingId: string,
+  accessToken: string,
+  confirmedRemoveAdmin: boolean,
+): Promise<void> {
+  await requestVoid(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}/role-bindings/${encodeURIComponent(bindingId)}`,
+    {
+      method: "DELETE",
+      headers: confirmedRemoveAdmin ? { "x-role-binding-confirm": "remove-admin" } : undefined,
     },
     accessToken,
   );

@@ -348,9 +348,14 @@ class AuthService:
                 "username or password is invalid",
                 status_code=401,
             )
+        enterprise_filter = ""
+        params = {"username": normalized_username}
+        if normalized_enterprise_code is not None:
+            enterprise_filter = "AND lower(e.code) = lower(:enterprise_code)"
+            params["enterprise_code"] = normalized_enterprise_code
         rows = session.execute(
             text(
-                """
+                f"""
                 SELECT
                     u.id::text AS user_id,
                     u.enterprise_id::text AS enterprise_id,
@@ -368,15 +373,12 @@ class AuthService:
                 JOIN enterprises e ON e.id = u.enterprise_id
                 JOIN user_credentials uc ON uc.user_id = u.id
                 WHERE lower(u.username) = lower(:username)
-                  AND (
-                    :enterprise_code IS NULL
-                    OR lower(e.code) = lower(:enterprise_code)
-                  )
+                  {enterprise_filter}
                   AND u.deleted_at IS NULL
                 LIMIT 2
                 """
             ),
-            {"username": normalized_username, "enterprise_code": normalized_enterprise_code},
+            params,
         ).all()
         if not rows:
             raise AuthServiceError(

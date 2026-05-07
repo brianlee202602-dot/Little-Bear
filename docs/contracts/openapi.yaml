@@ -1293,6 +1293,7 @@ paths:
       tags: [AdminPermission]
       summary: Admin create role
       operationId: adminCreateRole
+      x-implementation-stage: P1
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
@@ -1336,6 +1337,7 @@ paths:
       tags: [AdminPermission]
       summary: Admin update role
       operationId: adminPatchRole
+      x-implementation-stage: P1
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
@@ -1362,6 +1364,7 @@ paths:
       tags: [AdminPermission]
       summary: Admin delete role
       operationId: adminDeleteRole
+      x-implementation-stage: P1
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true

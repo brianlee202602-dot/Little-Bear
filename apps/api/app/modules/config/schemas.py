@@ -65,3 +65,33 @@ class ActiveConfigSnapshot:
             "loaded_at": self.loaded_at.isoformat(),
             "activated_at": self.activated_at.isoformat() if self.activated_at else None,
         }
+
+
+@dataclass(frozen=True)
+class ConfigItem:
+    """管理后台看到的一个可编辑配置分组。"""
+
+    key: str
+    value_json: dict[str, Any]
+    scope_type: str
+    status: str
+    version: int
+
+
+@dataclass(frozen=True)
+class ConfigVersion:
+    """配置版本元数据，P0 不在列表响应里直接返回完整配置正文。"""
+
+    version: int
+    status: str
+    risk_level: str
+    created_by: str | None = None
+
+
+@dataclass(frozen=True)
+class ConfigValidationResult:
+    """配置校验结果，兼容 setup 校验响应结构。"""
+
+    valid: bool
+    errors: list[dict[str, object]] = field(default_factory=list)
+    warnings: list[dict[str, object]] = field(default_factory=list)

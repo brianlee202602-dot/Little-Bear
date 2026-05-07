@@ -4,13 +4,41 @@ import { computed, onMounted, reactive, ref } from "vue";
 import {
   ApiRequestError,
   type ApiErrorPayload,
+  type AdminRoleBindingData,
+  type AdminRoleData,
+  type AdminUserData,
+  createSession,
+  createAdminUser,
+  createAdminUserRoleBindings,
+  deleteAdminUser,
+  deleteCurrentSession,
+  getCurrentUser,
   getSetupState,
   initializeSetup,
+  listAdminRoles,
+  listAdminUserRoleBindings,
+  listAdminUsers,
+  listAuditLogs,
+  listConfigVersions,
+  listConfigs,
+  patchAdminUser,
+  publishConfigVersion,
+  refreshSession,
+  resetAdminUserPassword,
+  revokeAdminUserRoleBinding,
+  saveConfigDraft,
+  unlockAdminUser,
+  validateAdminConfig,
   validateSetupConfig,
+  type AuditLogData,
+  type ConfigItemData,
+  type ConfigVersionData,
+  type CurrentUserData,
   type SetupInitializationData,
   type SetupIssue,
   type SetupStateData,
   type SetupValidationData,
+  type TokenResponse,
 } from "@/api/client";
 import {
   buildSetupPayload,
@@ -37,6 +65,8 @@ type FieldOption = {
 
 type Tone = "success" | "error" | "warning" | "neutral";
 type LocalIssueTone = "error" | "warning";
+type ActiveView = "loading" | "setup" | "login" | "dashboard";
+type ActiveAdminTab = "config" | "users";
 
 type LocalValidationIssue = {
   field?: keyof SetupFormModel;
@@ -82,6 +112,15 @@ type FieldSection = {
   fields: FieldDefinition[];
 };
 
+type AuthTokenState = {
+  accessToken: string;
+  refreshToken: string;
+  accessTokenExpiresAt: number;
+};
+
+const AUTH_STORAGE_KEY = "little-bear.admin.auth";
+const TOKEN_REFRESH_SKEW_MS = 60_000;
+
 // 页面状态只保存在前端内存中；初始化成功后的可信状态以后端 active_config 为准。
 const form = reactive<SetupFormModel>(createDefaultSetupForm());
 
@@ -90,15 +129,85 @@ const busy = reactive({
   validating: false,
   submitting: false,
 });
+const authBusy = reactive({
+  bootstrapping: true,
+  loggingIn: false,
+  refreshing: false,
+  loggingOut: false,
+});
+const configBusy = reactive({
+  loading: false,
+  validating: false,
+  saving: false,
+  publishing: false,
+});
+const userAdminBusy = reactive({
+  loading: false,
+  creating: false,
+  updating: false,
+  resettingPassword: false,
+  updatingRoles: false,
+});
+const loginForm = reactive({
+  enterpriseCode: "",
+  username: "",
+  password: "",
+});
+const userSearchForm = reactive({
+  keyword: "",
+  status: "",
+});
+const userCreateForm = reactive({
+  username: "",
+  name: "",
+  initialPassword: "",
+  passwordConfirm: "",
+  roleIds: [] as string[],
+  confirmedHighRisk: false,
+});
+const userDangerForm = reactive({
+  confirmedDisableAdmin: false,
+  confirmedDelete: false,
+});
+const passwordResetForm = reactive({
+  newPassword: "",
+  passwordConfirm: "",
+  forceChangePassword: true,
+  confirmed: false,
+});
+const roleBindingForm = reactive({
+  roleId: "",
+  confirmedHighRisk: false,
+  confirmedRemoveAdmin: false,
+});
 
 const setupState = ref<SetupStateData | null>(null);
 const validationResult = ref<SetupValidationData | null>(null);
 const initializationResult = ref<SetupInitializationData | null>(null);
 const feedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
+const authFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
+const configFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
+const auditFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
+const userAdminFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
 const validationErrorPayload = ref<ApiErrorPayload | null>(null);
 const initializationErrorPayload = ref<ApiErrorPayload | null>(null);
 const submitConfirmed = ref(false);
 const lastValidatedPayload = ref<string | null>(null);
+const authTokens = ref<AuthTokenState | null>(loadStoredAuthTokens());
+const currentUser = ref<CurrentUserData | null>(null);
+const configItems = ref<ConfigItemData[]>([]);
+const configVersions = ref<ConfigVersionData[]>([]);
+const auditLogs = ref<AuditLogData[]>([]);
+const selectedConfigKey = ref<string>("");
+const configEditorText = ref("");
+const configValidationResult = ref<SetupValidationData | null>(null);
+const selectedDraftVersion = ref<number | null>(null);
+const lastConfigValidatedText = ref<string | null>(null);
+const selectedAdminTab = ref<ActiveAdminTab>("config");
+const adminUsers = ref<AdminUserData[]>([]);
+const adminRoles = ref<AdminRoleData[]>([]);
+const selectedAdminUserId = ref<string>("");
+const selectedUserRoleBindings = ref<AdminRoleBindingData[]>([]);
 
 const statusLabels: Record<string, string> = {
   not_initialized: "未初始化",
@@ -441,6 +550,127 @@ const backendValidationFresh = computed(
 const setupWritable = computed(
   () => !(setupState.value?.initialized ?? false) || setupState.value?.recovery_setup_allowed === true,
 );
+const setupModeRequired = computed(() => {
+  if (!setupState.value) {
+    return false;
+  }
+  return setupState.value.initialized !== true || setupState.value.recovery_setup_allowed === true;
+});
+const authenticated = computed(() => Boolean(authTokens.value?.accessToken && currentUser.value));
+const activeView = computed<ActiveView>(() => {
+  if (authBusy.bootstrapping || !setupState.value) {
+    return "loading";
+  }
+  if (setupModeRequired.value) {
+    return "setup";
+  }
+  if (!authenticated.value) {
+    return "login";
+  }
+  return "dashboard";
+});
+const userDisplayName = computed(() => currentUser.value?.name || currentUser.value?.username || "-");
+const userRoleLabels = computed(() => currentUser.value?.roles.map((role) => role.code).join(" / ") || "-");
+const canManageConfig = computed(() => hasScope(currentUser.value?.scopes ?? [], "config:manage"));
+const canReadConfig = computed(() => hasScope(currentUser.value?.scopes ?? [], "config:read"));
+const canReadAudit = computed(() => hasScope(currentUser.value?.scopes ?? [], "audit:read"));
+const canReadUsers = computed(() => hasScope(currentUser.value?.scopes ?? [], "user:read"));
+const canManageUsers = computed(() => hasScope(currentUser.value?.scopes ?? [], "user:manage"));
+const canReadRoles = computed(() => hasScope(currentUser.value?.scopes ?? [], "role:read"));
+const canManageRoles = computed(() => hasScope(currentUser.value?.scopes ?? [], "role:manage"));
+const selectedConfigItem = computed(() =>
+  configItems.value.find((item) => item.key === selectedConfigKey.value) ?? null,
+);
+const selectedAdminUser = computed(
+  () => adminUsers.value.find((user) => user.id === selectedAdminUserId.value) ?? null,
+);
+const assignableRoles = computed(() =>
+  adminRoles.value.filter((role) => role.status === "active" && role.scope_type === "enterprise"),
+);
+const selectedUserRoleIds = computed(() =>
+  new Set(selectedUserRoleBindings.value.map((binding) => binding.role_id)),
+);
+const selectedRoleForBinding = computed(
+  () => adminRoles.value.find((role) => role.id === roleBindingForm.roleId) ?? null,
+);
+const selectedCreateRoles = computed(() =>
+  adminRoles.value.filter((role) => userCreateForm.roleIds.includes(role.id)),
+);
+const canLoadUserAdmin = computed(() => canReadUsers.value || canReadRoles.value);
+const canCreateAdminUser = computed(
+  () =>
+    canManageUsers.value &&
+    userCreateForm.username.trim().length > 0 &&
+    userCreateForm.name.trim().length > 0 &&
+    userCreateForm.initialPassword.length > 0 &&
+    userCreateForm.initialPassword === userCreateForm.passwordConfirm &&
+    !userAdminBusy.creating,
+);
+const canResetSelectedUserPassword = computed(
+  () =>
+    Boolean(selectedAdminUser.value) &&
+    canManageUsers.value &&
+    passwordResetForm.newPassword.length > 0 &&
+    passwordResetForm.newPassword === passwordResetForm.passwordConfirm &&
+    passwordResetForm.confirmed &&
+    !userAdminBusy.resettingPassword,
+);
+const canAddSelectedUserRole = computed(
+  () =>
+    Boolean(selectedAdminUser.value) &&
+    Boolean(selectedRoleForBinding.value) &&
+    canManageRoles.value &&
+    !selectedUserRoleIds.value.has(roleBindingForm.roleId) &&
+    !userAdminBusy.updatingRoles,
+);
+const activeConfigVersion = computed(() => {
+  const activeVersion = configVersions.value.find((version) => version.status === "active");
+  return activeVersion?.version ?? selectedConfigItem.value?.version ?? 1;
+});
+const configEditorParseError = computed(() => {
+  if (!configEditorText.value.trim()) {
+    return "配置内容不能为空。";
+  }
+  try {
+    const parsed = JSON.parse(configEditorText.value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return "配置分组必须是 JSON object。";
+    }
+  } catch (error) {
+    return error instanceof Error ? error.message : "配置 JSON 无法解析。";
+  }
+  return null;
+});
+const configValidationFresh = computed(
+  () =>
+    configValidationResult.value?.valid === true &&
+    lastConfigValidatedText.value === configEditorText.value,
+);
+const canValidateSelectedConfig = computed(
+  () =>
+    Boolean(selectedConfigItem.value) &&
+    canManageConfig.value &&
+    !configBusy.loading &&
+    !configBusy.validating &&
+    !configBusy.saving &&
+    !configBusy.publishing &&
+    configEditorParseError.value === null,
+);
+const canSaveSelectedConfigDraft = computed(
+  () =>
+    canValidateSelectedConfig.value &&
+    !configBusy.validating &&
+    configValidationFresh.value,
+);
+const canPublishSelectedDraft = computed(
+  () =>
+    Boolean(selectedDraftVersion.value) &&
+    canManageConfig.value &&
+    !configBusy.loading &&
+    !configBusy.validating &&
+    !configBusy.saving &&
+    !configBusy.publishing,
+);
 const fieldIssueMap = computed(() => {
   const result = new Map<keyof SetupFormModel, LocalValidationIssue[]>();
   for (const issue of localValidationIssues.value) {
@@ -584,10 +814,14 @@ const initializationDatabaseError = computed(() =>
 );
 
 onMounted(async () => {
-  if (window.location.pathname === "/admin" || window.location.pathname === "/admin/") {
-    window.history.replaceState(null, "", "/admin/setup-initialization");
+  authBusy.bootstrapping = true;
+  try {
+    await refreshState();
+    await restoreAuthenticatedSession();
+    syncRouteToCurrentState();
+  } finally {
+    authBusy.bootstrapping = false;
   }
-  await refreshState();
 });
 
 async function refreshState(): Promise<void> {
@@ -597,6 +831,9 @@ async function refreshState(): Promise<void> {
     const response = await getSetupState(form.setupToken || undefined);
     setupState.value = response.data;
     feedback.value = null;
+    if (!authBusy.bootstrapping) {
+      syncRouteToCurrentState();
+    }
   } catch (error) {
     feedback.value = {
       tone: "error",
@@ -605,6 +842,770 @@ async function refreshState(): Promise<void> {
   } finally {
     busy.refreshing = false;
   }
+}
+
+async function submitLogin(): Promise<void> {
+  const username = loginForm.username.trim();
+  const password = loginForm.password;
+  if (!username || !password) {
+    authFeedback.value = {
+      tone: "error",
+      message: "请输入登录名和密码。",
+    };
+    return;
+  }
+
+  authBusy.loggingIn = true;
+  try {
+    const tokenResponse = await createSession({
+      username,
+      password,
+      enterprise_code: loginForm.enterpriseCode.trim() || undefined,
+    });
+    saveAuthTokens(tokenResponse);
+    const userResponse = await getCurrentUser(tokenResponse.access_token);
+    currentUser.value = userResponse.data;
+    await refreshConfigAdminState();
+    await refreshUserRoleAdminState();
+    loginForm.password = "";
+    authFeedback.value = {
+      tone: "success",
+      message: "登录成功。",
+    };
+    navigateTo("/admin");
+  } catch (error) {
+    clearAuthSession();
+    authFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "登录失败"),
+    };
+  } finally {
+    authBusy.loggingIn = false;
+  }
+}
+
+async function restoreAuthenticatedSession(): Promise<void> {
+  if (!authTokens.value?.accessToken || setupModeRequired.value) {
+    currentUser.value = null;
+    return;
+  }
+
+  try {
+    const accessToken = await ensureAccessToken();
+    if (!accessToken) {
+      clearAuthSession();
+      return;
+    }
+    const userResponse = await getCurrentUser(accessToken);
+    currentUser.value = userResponse.data;
+    authFeedback.value = null;
+    await refreshConfigAdminState();
+    await refreshUserRoleAdminState();
+  } catch {
+    clearAuthSession();
+  }
+}
+
+async function refreshConfigAdminState(): Promise<void> {
+  if (!canReadConfig.value && !canManageConfig.value) {
+    configItems.value = [];
+    configVersions.value = [];
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  configBusy.loading = true;
+  try {
+    const [itemsResponse, versionsResponse] = await Promise.all([
+      listConfigs(accessToken),
+      listConfigVersions(accessToken),
+    ]);
+    configItems.value = itemsResponse.data;
+    configVersions.value = versionsResponse.data;
+    if (canReadAudit.value) {
+      try {
+        const auditResponse = await listAuditLogs(accessToken, { resource_type: "config" });
+        auditLogs.value = auditResponse.data;
+        auditFeedback.value = null;
+      } catch (error) {
+        auditLogs.value = [];
+        auditFeedback.value = {
+          tone: "error",
+          message: normalizeErrorMessage(error, "读取配置审计日志失败"),
+        };
+      }
+    } else {
+      auditLogs.value = [];
+      auditFeedback.value = null;
+    }
+    if (!selectedConfigKey.value && configItems.value.length > 0) {
+      selectConfigItem(configItems.value[0].key);
+    }
+    configFeedback.value = {
+      tone: "success",
+      message: "配置管理数据已刷新。",
+    };
+  } catch (error) {
+    configFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取配置管理数据失败"),
+    };
+  } finally {
+    configBusy.loading = false;
+  }
+}
+
+async function refreshUserRoleAdminState(): Promise<void> {
+  if (!canLoadUserAdmin.value) {
+    adminUsers.value = [];
+    adminRoles.value = [];
+    selectedAdminUserId.value = "";
+    selectedUserRoleBindings.value = [];
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.loading = true;
+  try {
+    if (canReadRoles.value) {
+      const rolesResponse = await listAdminRoles(accessToken);
+      adminRoles.value = rolesResponse.data;
+      if (!roleBindingForm.roleId && assignableRoles.value.length > 0) {
+        roleBindingForm.roleId = assignableRoles.value[0].id;
+      }
+    } else {
+      adminRoles.value = [];
+    }
+    if (canReadUsers.value) {
+      const usersResponse = await listAdminUsers(accessToken, {
+        keyword: userSearchForm.keyword.trim() || undefined,
+        status: userSearchForm.status || undefined,
+      });
+      adminUsers.value = usersResponse.data;
+      if (
+        !selectedAdminUserId.value ||
+        !adminUsers.value.some((user) => user.id === selectedAdminUserId.value)
+      ) {
+        selectedAdminUserId.value = adminUsers.value[0]?.id ?? "";
+      }
+    } else {
+      adminUsers.value = [];
+      selectedAdminUserId.value = "";
+    }
+    await refreshSelectedUserRoleBindings(accessToken);
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "用户与角色数据已刷新。",
+    };
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取用户与角色数据失败"),
+    };
+  } finally {
+    userAdminBusy.loading = false;
+  }
+}
+
+async function refreshSelectedUserRoleBindings(existingAccessToken?: string): Promise<void> {
+  if (!selectedAdminUserId.value || !canReadRoles.value) {
+    selectedUserRoleBindings.value = [];
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+  const response = await listAdminUserRoleBindings(selectedAdminUserId.value, accessToken);
+  selectedUserRoleBindings.value = response.data;
+}
+
+async function selectAdminUser(userId: string): Promise<void> {
+  selectedAdminUserId.value = userId;
+  userDangerForm.confirmedDisableAdmin = false;
+  userDangerForm.confirmedDelete = false;
+  passwordResetForm.newPassword = "";
+  passwordResetForm.passwordConfirm = "";
+  passwordResetForm.confirmed = false;
+  roleBindingForm.confirmedRemoveAdmin = false;
+  try {
+    await refreshSelectedUserRoleBindings();
+  } catch (error) {
+    selectedUserRoleBindings.value = [];
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取用户角色绑定失败"),
+    };
+  }
+}
+
+function switchAdminTab(tab: ActiveAdminTab): void {
+  selectedAdminTab.value = tab;
+}
+
+function toggleCreateRole(roleId: string, checked: boolean): void {
+  const next = new Set(userCreateForm.roleIds);
+  if (checked) {
+    next.add(roleId);
+  } else {
+    next.delete(roleId);
+  }
+  userCreateForm.roleIds = Array.from(next);
+}
+
+async function submitCreateAdminUser(): Promise<void> {
+  if (userCreateForm.initialPassword !== userCreateForm.passwordConfirm) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "两次输入的初始密码不一致。",
+    };
+    return;
+  }
+  const highRisk = selectedCreateRoles.value.some(isHighRiskAdminRole);
+  if (highRisk && !userCreateForm.confirmedHighRisk) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "授予高风险角色前必须勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.creating = true;
+  try {
+    const response = await createAdminUser(
+      {
+        username: userCreateForm.username.trim(),
+        name: userCreateForm.name.trim(),
+        initial_password: userCreateForm.initialPassword,
+        department_ids: [],
+        role_ids: userCreateForm.roleIds,
+      },
+      accessToken,
+      userCreateForm.confirmedHighRisk,
+    );
+    selectedAdminUserId.value = response.data.id;
+    resetCreateUserForm();
+    await refreshUserRoleAdminState();
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "用户已创建。",
+    };
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "创建用户失败"),
+    };
+  } finally {
+    userAdminBusy.creating = false;
+  }
+}
+
+async function disableSelectedAdminUser(): Promise<void> {
+  const user = selectedAdminUser.value;
+  if (!user) {
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.updating = true;
+  try {
+    await patchAdminUser(
+      user.id,
+      { status: "disabled" },
+      accessToken,
+      userDangerForm.confirmedDisableAdmin,
+    );
+    await refreshUserRoleAdminState();
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "用户已禁用，相关会话已由后端吊销。",
+    };
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "禁用用户失败"),
+    };
+  } finally {
+    userAdminBusy.updating = false;
+  }
+}
+
+async function unlockSelectedAdminUser(): Promise<void> {
+  const user = selectedAdminUser.value;
+  if (!user) {
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.updating = true;
+  try {
+    await unlockAdminUser(user.id, accessToken);
+    await refreshUserRoleAdminState();
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "用户已解锁。",
+    };
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "解锁用户失败"),
+    };
+  } finally {
+    userAdminBusy.updating = false;
+  }
+}
+
+async function deleteSelectedAdminUser(): Promise<void> {
+  const user = selectedAdminUser.value;
+  if (!user || !userDangerForm.confirmedDelete) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "删除用户前必须勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.updating = true;
+  try {
+    await deleteAdminUser(user.id, accessToken, true);
+    selectedAdminUserId.value = "";
+    selectedUserRoleBindings.value = [];
+    await refreshUserRoleAdminState();
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "用户已删除。",
+    };
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "删除用户失败"),
+    };
+  } finally {
+    userAdminBusy.updating = false;
+  }
+}
+
+async function submitPasswordReset(): Promise<void> {
+  const user = selectedAdminUser.value;
+  if (!user) {
+    return;
+  }
+  if (passwordResetForm.newPassword !== passwordResetForm.passwordConfirm) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "两次输入的新密码不一致。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.resettingPassword = true;
+  try {
+    await resetAdminUserPassword(
+      user.id,
+      {
+        new_password: passwordResetForm.newPassword,
+        force_change_password: passwordResetForm.forceChangePassword,
+      },
+      accessToken,
+      passwordResetForm.confirmed,
+    );
+    passwordResetForm.newPassword = "";
+    passwordResetForm.passwordConfirm = "";
+    passwordResetForm.confirmed = false;
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "密码已重置，相关会话已由后端吊销。",
+    };
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "重置密码失败"),
+    };
+  } finally {
+    userAdminBusy.resettingPassword = false;
+  }
+}
+
+async function addSelectedUserRoleBinding(): Promise<void> {
+  const user = selectedAdminUser.value;
+  const role = selectedRoleForBinding.value;
+  if (!user || !role) {
+    return;
+  }
+  if (isHighRiskAdminRole(role) && !roleBindingForm.confirmedHighRisk) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "授予高风险角色前必须勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.updatingRoles = true;
+  try {
+    const response = await createAdminUserRoleBindings(
+      user.id,
+      [{ role_id: role.id, scope_type: role.scope_type }],
+      accessToken,
+      roleBindingForm.confirmedHighRisk,
+    );
+    selectedUserRoleBindings.value = response.data;
+    roleBindingForm.confirmedHighRisk = false;
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "角色已授予。",
+    };
+    await refreshUserRoleAdminState();
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "授予角色失败"),
+    };
+  } finally {
+    userAdminBusy.updatingRoles = false;
+  }
+}
+
+async function revokeSelectedUserRoleBinding(binding: AdminRoleBindingData): Promise<void> {
+  const user = selectedAdminUser.value;
+  if (!user) {
+    return;
+  }
+  if (binding.role_code === "system_admin" && !roleBindingForm.confirmedRemoveAdmin) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "移除系统管理员角色前必须勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.updatingRoles = true;
+  try {
+    await revokeAdminUserRoleBinding(
+      user.id,
+      binding.id,
+      accessToken,
+      roleBindingForm.confirmedRemoveAdmin,
+    );
+    await refreshSelectedUserRoleBindings(accessToken);
+    await refreshUserRoleAdminState();
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "角色绑定已撤销。",
+    };
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "撤销角色绑定失败"),
+    };
+  } finally {
+    userAdminBusy.updatingRoles = false;
+  }
+}
+
+function resetCreateUserForm(): void {
+  userCreateForm.username = "";
+  userCreateForm.name = "";
+  userCreateForm.initialPassword = "";
+  userCreateForm.passwordConfirm = "";
+  userCreateForm.roleIds = [];
+  userCreateForm.confirmedHighRisk = false;
+}
+
+function selectConfigItem(key: string): void {
+  const item = configItems.value.find((entry) => entry.key === key);
+  selectedConfigKey.value = key;
+  selectedDraftVersion.value = null;
+  configValidationResult.value = null;
+  lastConfigValidatedText.value = null;
+  if (!item) {
+    configEditorText.value = "";
+    return;
+  }
+  configEditorText.value = prettyJson(item.value_json);
+}
+
+function onConfigEditorInput(event: Event): void {
+  const target = event.target;
+  configEditorText.value = target instanceof HTMLTextAreaElement ? target.value : "";
+  configValidationResult.value = null;
+  lastConfigValidatedText.value = null;
+  selectedDraftVersion.value = null;
+}
+
+async function validateSelectedConfig(): Promise<void> {
+  const configBundle = buildEditedActiveConfigBundle();
+  if (!configBundle) {
+    configFeedback.value = {
+      tone: "error",
+      message: configEditorParseError.value ?? "请选择需要校验的配置分组。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  configBusy.validating = true;
+  try {
+    const response = await validateAdminConfig(configBundle, accessToken);
+    configValidationResult.value = response.data;
+    lastConfigValidatedText.value = response.data.valid ? configEditorText.value : null;
+    configFeedback.value = {
+      tone: response.data.valid ? "success" : "error",
+      message: response.data.valid ? "配置校验通过。" : "配置校验未通过。",
+    };
+  } catch (error) {
+    configValidationResult.value = null;
+    lastConfigValidatedText.value = null;
+    configFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "配置校验失败"),
+    };
+  } finally {
+    configBusy.validating = false;
+  }
+}
+
+async function saveSelectedDraft(): Promise<void> {
+  const selected = selectedConfigItem.value;
+  const valueJson = parseConfigEditorValue();
+  if (!selected || !valueJson) {
+    configFeedback.value = {
+      tone: "error",
+      message: configEditorParseError.value ?? "请选择需要保存的配置分组。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  configBusy.saving = true;
+  try {
+    const response = await saveConfigDraft(selected.key, valueJson, accessToken);
+    selectedDraftVersion.value =
+      response.data.status === "draft" ? response.data.version : selectedDraftVersion.value;
+    configFeedback.value = {
+      tone: "success",
+      message:
+        response.data.status === "draft"
+          ? `已保存配置草稿 v${response.data.version}。`
+          : "配置内容与当前生效版本一致。",
+    };
+    await refreshConfigAdminState();
+  } catch (error) {
+    configFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "保存配置草稿失败"),
+    };
+  } finally {
+    configBusy.saving = false;
+  }
+}
+
+async function publishDraftVersion(version?: number | null): Promise<void> {
+  const targetVersion = version ?? selectedDraftVersion.value;
+  if (!targetVersion) {
+    configFeedback.value = {
+      tone: "error",
+      message: "请选择需要发布的配置草稿版本。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  const currentKey = selectedConfigKey.value;
+  configBusy.publishing = true;
+  try {
+    const response = await publishConfigVersion(targetVersion, accessToken);
+    selectedDraftVersion.value = null;
+    configValidationResult.value = null;
+    lastConfigValidatedText.value = null;
+    configFeedback.value = {
+      tone: "success",
+      message: `已发布 active_config v${response.data.version}。`,
+    };
+    await refreshConfigAdminState();
+    if (currentKey && configItems.value.some((item) => item.key === currentKey)) {
+      selectConfigItem(currentKey);
+    }
+  } catch (error) {
+    configFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "发布配置版本失败"),
+    };
+  } finally {
+    configBusy.publishing = false;
+  }
+}
+
+async function ensureAccessToken(): Promise<string | null> {
+  const tokenState = authTokens.value;
+  if (!tokenState) {
+    return null;
+  }
+  if (Date.now() < tokenState.accessTokenExpiresAt - TOKEN_REFRESH_SKEW_MS) {
+    return tokenState.accessToken;
+  }
+  return refreshAccessToken();
+}
+
+async function refreshAccessToken(): Promise<string | null> {
+  const tokenState = authTokens.value;
+  if (!tokenState?.refreshToken) {
+    return null;
+  }
+  authBusy.refreshing = true;
+  try {
+    const response = await refreshSession(tokenState.refreshToken);
+    saveAuthTokens(response);
+    return response.access_token;
+  } catch {
+    clearAuthSession();
+    return null;
+  } finally {
+    authBusy.refreshing = false;
+  }
+}
+
+async function logout(): Promise<void> {
+  const accessToken = authTokens.value?.accessToken;
+  authBusy.loggingOut = true;
+  try {
+    if (accessToken) {
+      await deleteCurrentSession(accessToken);
+    }
+  } catch {
+    // 本地退出必须可靠，后端吊销失败不能阻塞清理本地登录态。
+  } finally {
+    clearAuthSession();
+    authBusy.loggingOut = false;
+    authFeedback.value = {
+      tone: "neutral",
+      message: "已退出登录。",
+    };
+    navigateTo("/admin/login");
+  }
+}
+
+function loadStoredAuthTokens(): AuthTokenState | null {
+  try {
+    const raw = window.sessionStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    if (
+      typeof parsed.accessToken === "string" &&
+      typeof parsed.refreshToken === "string" &&
+      typeof parsed.accessTokenExpiresAt === "number"
+    ) {
+      return parsed;
+    }
+  } catch {
+    window.sessionStorage.removeItem(AUTH_STORAGE_KEY);
+  }
+  return null;
+}
+
+function saveAuthTokens(response: TokenResponse): void {
+  const tokenState: AuthTokenState = {
+    accessToken: response.access_token,
+    refreshToken: response.refresh_token,
+    accessTokenExpiresAt: Date.now() + response.expires_in * 1000,
+  };
+  authTokens.value = tokenState;
+  window.sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(tokenState));
+}
+
+function clearAuthSession(): void {
+  authTokens.value = null;
+  currentUser.value = null;
+  configItems.value = [];
+  configVersions.value = [];
+  auditLogs.value = [];
+  adminUsers.value = [];
+  adminRoles.value = [];
+  selectedAdminUserId.value = "";
+  selectedUserRoleBindings.value = [];
+  selectedConfigKey.value = "";
+  configEditorText.value = "";
+  configValidationResult.value = null;
+  selectedDraftVersion.value = null;
+  lastConfigValidatedText.value = null;
+  window.sessionStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+function syncRouteToCurrentState(): void {
+  const path = window.location.pathname;
+  if (!setupState.value) {
+    return;
+  }
+  if (setupModeRequired.value) {
+    if (path !== "/admin/setup-initialization") {
+      navigateTo("/admin/setup-initialization", true);
+    }
+    return;
+  }
+  if (path === "/admin/setup-initialization") {
+    navigateTo(authenticated.value ? "/admin" : "/admin/login", true);
+    return;
+  }
+  if (authenticated.value && path === "/admin/login") {
+    navigateTo("/admin", true);
+    return;
+  }
+  if ((path === "/admin" || path === "/admin/") && !authenticated.value) {
+    navigateTo("/admin/login", true);
+  }
+}
+
+function navigateTo(path: string, replace = false): void {
+  if (window.location.pathname === path) {
+    return;
+  }
+  if (replace) {
+    window.history.replaceState(null, "", path);
+    return;
+  }
+  window.history.pushState(null, "", path);
 }
 
 async function runValidation(): Promise<void> {
@@ -756,6 +1757,85 @@ function formatSetupStatus(status: string): string {
 
 function toneClass(tone: Tone): string {
   return `tone tone--${tone}`;
+}
+
+function hasScope(scopes: string[], requiredScope: string): boolean {
+  if (scopes.includes("*") || scopes.includes(requiredScope)) {
+    return true;
+  }
+  const prefix = requiredScope.split(":", 1)[0];
+  return scopes.includes(`${prefix}:*`);
+}
+
+function isHighRiskAdminRole(role: AdminRoleData): boolean {
+  return (
+    role.code === "system_admin" ||
+    role.code === "security_admin" ||
+    role.code === "audit_admin" ||
+    role.scopes.includes("*") ||
+    role.scopes.some(isHighRiskScope)
+  );
+}
+
+function isHighRiskScope(scope: string): boolean {
+  if (["config:manage", "user:manage", "role:manage", "permission:manage"].includes(scope)) {
+    return true;
+  }
+  return ["config:*", "user:*", "role:*", "permission:*"].includes(scope);
+}
+
+function parseConfigEditorValue(): Record<string, unknown> | null {
+  if (configEditorParseError.value) {
+    return null;
+  }
+  const parsed = JSON.parse(configEditorText.value);
+  return parsed as Record<string, unknown>;
+}
+
+function buildEditedActiveConfigBundle(): Record<string, unknown> | null {
+  const selected = selectedConfigItem.value;
+  const valueJson = parseConfigEditorValue();
+  if (!selected || !valueJson) {
+    return null;
+  }
+  const config: Record<string, unknown> = {
+    schema_version: 1,
+    config_version: activeConfigVersion.value,
+    scope: {
+      type: selected.scope_type || "global",
+      id: "global",
+    },
+  };
+  for (const item of configItems.value) {
+    config[item.key] = item.key === selected.key ? valueJson : item.value_json;
+  }
+  return config;
+}
+
+function prettyJson(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function formatAuditTime(value: string | null): string {
+  if (!value) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function auditSummaryPreview(log: AuditLogData): string {
+  const summary = log.summary_json;
+  const version = log.config_version ? `v${log.config_version}` : "";
+  const hash = typeof summary.config_hash === "string" ? summary.config_hash.slice(0, 10) : "";
+  const previous =
+    typeof summary.previous_active_version === "number"
+      ? `from v${summary.previous_active_version}`
+      : "";
+  return [version, previous, hash].filter(Boolean).join(" / ") || "-";
 }
 
 function normalizeIssueCode(issue: SetupIssue): string {
@@ -1063,7 +2143,574 @@ function isComposeDemoProvider(value: string): boolean {
 </script>
 
 <template>
-  <main class="shell">
+  <main v-if="activeView === 'loading'" class="auth-screen">
+    <section class="login-card">
+      <p class="brand">Little Bear 管理后台</p>
+      <h1 class="title">正在检查系统状态</h1>
+      <p class="auth-copy">正在读取初始化状态和本地登录态。</p>
+    </section>
+  </main>
+
+  <main v-else-if="activeView === 'login'" class="auth-screen">
+    <section class="login-card">
+      <div class="login-card__header">
+        <p class="brand">Little Bear 管理后台</p>
+        <h1 class="title">登录管理后台</h1>
+        <p class="auth-copy">初始化完成后，请使用系统管理员账号进入管理后台。</p>
+      </div>
+
+      <form class="login-form" @submit.prevent="submitLogin">
+        <label class="field field--full">
+          <span class="field__label">企业编码</span>
+          <p class="field__hint">单企业部署可留空；多企业存在同名账号时必须填写。</p>
+          <input
+            v-model.trim="loginForm.enterpriseCode"
+            class="control"
+            type="text"
+            autocomplete="organization"
+          />
+        </label>
+        <label class="field field--full">
+          <span class="field__label">登录名</span>
+          <p class="field__hint">请输入初始化时创建的管理员登录名。</p>
+          <input
+            v-model.trim="loginForm.username"
+            class="control"
+            type="text"
+            autocomplete="username"
+            required
+          />
+        </label>
+        <label class="field field--full">
+          <span class="field__label">密码</span>
+          <p class="field__hint">密码只用于本次登录请求，不会保存在前端状态中。</p>
+          <input
+            v-model="loginForm.password"
+            class="control"
+            type="password"
+            autocomplete="current-password"
+            required
+          />
+        </label>
+
+        <div v-if="authFeedback" :class="['feedback', `feedback--${authFeedback.tone}`]">
+          {{ authFeedback.message }}
+        </div>
+
+        <button class="button" type="submit" :disabled="authBusy.loggingIn">
+          {{ authBusy.loggingIn ? "登录中..." : "登录" }}
+        </button>
+      </form>
+    </section>
+  </main>
+
+  <main v-else-if="activeView === 'dashboard'" class="admin-shell">
+    <aside class="admin-sidebar">
+      <div class="sidebar__block">
+        <p class="brand">Little Bear 管理后台</p>
+        <h1 class="title">运行控制台</h1>
+      </div>
+      <nav class="admin-nav" aria-label="管理后台导航">
+        <button
+          :class="['admin-nav__item', { 'admin-nav__item--active': selectedAdminTab === 'config' }]"
+          type="button"
+          @click="switchAdminTab('config')"
+        >
+          配置管理
+        </button>
+        <button
+          :class="['admin-nav__item', { 'admin-nav__item--active': selectedAdminTab === 'users' }]"
+          type="button"
+          @click="switchAdminTab('users')"
+        >
+          用户与角色
+        </button>
+      </nav>
+    </aside>
+
+    <section class="admin-workspace">
+      <header class="admin-toolbar">
+        <div>
+          <p class="eyebrow">/admin</p>
+          <h2>管理后台</h2>
+        </div>
+        <div class="user-menu">
+          <div>
+            <strong>{{ userDisplayName }}</strong>
+            <span>{{ userRoleLabels }}</span>
+          </div>
+          <button class="button button--secondary" type="button" @click="logout" :disabled="authBusy.loggingOut">
+            {{ authBusy.loggingOut ? "退出中..." : "退出登录" }}
+          </button>
+        </div>
+      </header>
+
+      <section class="dashboard-grid">
+        <section class="panel">
+          <header class="panel__header">
+            <h3>当前用户</h3>
+            <span :class="toneClass(authenticated ? 'success' : 'neutral')">
+              {{ authenticated ? "已登录" : "未登录" }}
+            </span>
+          </header>
+          <dl v-if="currentUser" class="summary">
+            <div class="summary__row">
+              <dt>登录名</dt>
+              <dd>{{ currentUser.username }}</dd>
+            </div>
+            <div class="summary__row">
+              <dt>显示名</dt>
+              <dd>{{ currentUser.name }}</dd>
+            </div>
+            <div class="summary__row">
+              <dt>账号状态</dt>
+              <dd>{{ currentUser.status }}</dd>
+            </div>
+            <div class="summary__row">
+              <dt>角色</dt>
+              <dd>{{ userRoleLabels }}</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section v-if="selectedAdminTab === 'users'" class="panel panel--wide">
+          <header class="panel__header">
+            <div>
+              <h3>用户与角色管理</h3>
+              <p :class="toneClass(canLoadUserAdmin ? 'success' : 'warning')">
+                {{
+                  canManageUsers && canManageRoles
+                    ? "可管理用户与角色"
+                    : canReadUsers || canReadRoles
+                      ? "可读取用户与角色"
+                      : "缺少用户或角色权限"
+                }}
+              </p>
+            </div>
+            <div class="panel__actions">
+              <button
+                class="button button--secondary"
+                type="button"
+                @click="refreshUserRoleAdminState"
+                :disabled="userAdminBusy.loading || !canLoadUserAdmin"
+              >
+                {{ userAdminBusy.loading ? "刷新中" : "刷新用户与角色" }}
+              </button>
+            </div>
+          </header>
+
+          <div class="user-admin-console">
+            <aside class="user-list" aria-label="用户列表">
+              <form class="user-filter" @submit.prevent="refreshUserRoleAdminState">
+                <label class="field field--full">
+                  <span class="field__label">关键词</span>
+                  <p class="field__hint">按登录名或显示名过滤用户。</p>
+                  <input v-model.trim="userSearchForm.keyword" class="control" type="text" />
+                </label>
+                <label class="field field--full">
+                  <span class="field__label">账号状态</span>
+                  <p class="field__hint">留空时显示全部未删除用户。</p>
+                  <select v-model="userSearchForm.status" class="control">
+                    <option value="">全部</option>
+                    <option value="active">active</option>
+                    <option value="disabled">disabled</option>
+                    <option value="locked">locked</option>
+                  </select>
+                </label>
+                <button class="button button--secondary button--small" type="submit">
+                  查询
+                </button>
+              </form>
+
+              <button
+                v-for="user in adminUsers"
+                :key="user.id"
+                :class="['user-list__item', { 'user-list__item--active': user.id === selectedAdminUserId }]"
+                type="button"
+                @click="selectAdminUser(user.id)"
+              >
+                <strong>{{ user.name || user.username }}</strong>
+                <span>{{ user.username }} / {{ user.status }}</span>
+              </button>
+              <p v-if="!adminUsers.length" class="empty-state">当前尚未读取到用户。</p>
+            </aside>
+
+            <section class="user-detail">
+              <div v-if="userAdminFeedback" :class="['feedback', `feedback--${userAdminFeedback.tone}`]">
+                {{ userAdminFeedback.message }}
+              </div>
+
+              <section class="user-admin-section">
+                <header class="subsection-header">
+                  <h4>创建用户</h4>
+                  <span :class="toneClass(canManageUsers ? 'success' : 'warning')">
+                    {{ canManageUsers ? "可创建" : "缺少 user:manage" }}
+                  </span>
+                </header>
+                <form class="form-grid form-grid--compact" @submit.prevent="submitCreateAdminUser">
+                  <label class="field">
+                    <span class="field__label">登录名</span>
+                    <p class="field__hint">用户的唯一登录标识。</p>
+                    <input v-model.trim="userCreateForm.username" class="control" type="text" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">显示名</span>
+                    <p class="field__hint">用于页面展示和审计摘要。</p>
+                    <input v-model.trim="userCreateForm.name" class="control" type="text" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">初始密码</span>
+                    <p class="field__hint">创建后将强制用户首次登录修改密码。</p>
+                    <input v-model="userCreateForm.initialPassword" class="control" type="password" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">确认密码</span>
+                    <p class="field__hint">两次密码必须完全一致。</p>
+                    <input v-model="userCreateForm.passwordConfirm" class="control" type="password" />
+                  </label>
+                  <div class="role-picker">
+                    <span class="field__label">初始角色</span>
+                    <p class="field__hint">未选择时后端会尝试授予 employee 默认角色。</p>
+                    <label v-for="role in assignableRoles" :key="role.id" class="role-option">
+                      <input
+                        type="checkbox"
+                        :checked="userCreateForm.roleIds.includes(role.id)"
+                        @change="toggleCreateRole(role.id, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>{{ role.code }}</span>
+                    </label>
+                  </div>
+                  <label class="confirm confirm--inline">
+                    <input v-model="userCreateForm.confirmedHighRisk" type="checkbox" />
+                    <span>确认授予高风险角色</span>
+                  </label>
+                  <button class="button" type="submit" :disabled="!canCreateAdminUser">
+                    {{ userAdminBusy.creating ? "创建中..." : "创建用户" }}
+                  </button>
+                </form>
+              </section>
+
+              <section class="user-admin-section">
+                <header class="subsection-header">
+                  <h4>当前选中用户</h4>
+                  <span :class="toneClass(selectedAdminUser ? 'success' : 'neutral')">
+                    {{ selectedAdminUser ? selectedAdminUser.status : "未选择" }}
+                  </span>
+                </header>
+                <dl v-if="selectedAdminUser" class="summary">
+                  <div class="summary__row">
+                    <dt>登录名</dt>
+                    <dd>{{ selectedAdminUser.username }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>显示名</dt>
+                    <dd>{{ selectedAdminUser.name }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>部门</dt>
+                    <dd>{{ selectedAdminUser.departments.map((department) => department.code).join(" / ") || "-" }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>角色</dt>
+                    <dd>{{ selectedAdminUser.roles.map((role) => role.code).join(" / ") || "-" }}</dd>
+                  </div>
+                </dl>
+                <p v-else class="empty-state">请选择一个用户查看详情。</p>
+              </section>
+
+              <section v-if="selectedAdminUser" class="user-admin-section">
+                <header class="subsection-header">
+                  <h4>密码与账号状态</h4>
+                  <span :class="toneClass(canManageUsers ? 'success' : 'warning')">
+                    {{ canManageUsers ? "受控写入" : "只读" }}
+                  </span>
+                </header>
+                <form class="form-grid form-grid--compact" @submit.prevent="submitPasswordReset">
+                  <label class="field">
+                    <span class="field__label">新密码</span>
+                    <p class="field__hint">必须满足当前 active_config 中的密码策略。</p>
+                    <input v-model="passwordResetForm.newPassword" class="control" type="password" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">确认新密码</span>
+                    <p class="field__hint">用于避免误输入。</p>
+                    <input v-model="passwordResetForm.passwordConfirm" class="control" type="password" />
+                  </label>
+                  <label class="confirm confirm--inline">
+                    <input v-model="passwordResetForm.forceChangePassword" type="checkbox" />
+                    <span>强制下次登录修改密码</span>
+                  </label>
+                  <label class="confirm confirm--inline">
+                    <input v-model="passwordResetForm.confirmed" type="checkbox" />
+                    <span>确认重置密码并吊销会话</span>
+                  </label>
+                  <button
+                    class="button button--secondary"
+                    type="submit"
+                    :disabled="!canResetSelectedUserPassword"
+                  >
+                    {{ userAdminBusy.resettingPassword ? "重置中..." : "重置密码" }}
+                  </button>
+                </form>
+                <div class="danger-actions">
+                  <label class="confirm confirm--inline">
+                    <input v-model="userDangerForm.confirmedDisableAdmin" type="checkbox" />
+                    <span>确认可能影响管理员权限</span>
+                  </label>
+                  <button
+                    class="button button--secondary"
+                    type="button"
+                    @click="disableSelectedAdminUser"
+                    :disabled="!canManageUsers || userAdminBusy.updating"
+                  >
+                    禁用用户
+                  </button>
+                  <button
+                    class="button button--secondary"
+                    type="button"
+                    @click="unlockSelectedAdminUser"
+                    :disabled="!canManageUsers || userAdminBusy.updating"
+                  >
+                    解锁用户
+                  </button>
+                  <label class="confirm confirm--inline">
+                    <input v-model="userDangerForm.confirmedDelete" type="checkbox" />
+                    <span>确认删除用户</span>
+                  </label>
+                  <button
+                    class="button button--danger"
+                    type="button"
+                    @click="deleteSelectedAdminUser"
+                    :disabled="!canManageUsers || userAdminBusy.updating || !userDangerForm.confirmedDelete"
+                  >
+                    删除用户
+                  </button>
+                </div>
+              </section>
+            </section>
+
+            <aside class="role-admin" aria-label="角色绑定">
+              <h4 class="config-versions__title">角色绑定</h4>
+              <div v-if="selectedUserRoleBindings.length" class="role-binding-list">
+                <article v-for="binding in selectedUserRoleBindings" :key="binding.id" class="role-binding-row">
+                  <div>
+                    <strong>{{ binding.role_code ?? binding.role_id }}</strong>
+                    <span>{{ binding.scope_type }}</span>
+                  </div>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="revokeSelectedUserRoleBinding(binding)"
+                    :disabled="!canManageRoles || userAdminBusy.updatingRoles"
+                  >
+                    撤销
+                  </button>
+                </article>
+              </div>
+              <p v-else class="empty-state">当前用户尚无可展示的角色绑定。</p>
+
+              <label class="field field--full">
+                <span class="field__label">授予角色</span>
+                <p class="field__hint">P0 页面只授予企业级角色，部门级和知识库级角色后续在对应资源页面绑定。</p>
+                <select v-model="roleBindingForm.roleId" class="control" :disabled="!canManageRoles">
+                  <option value="">请选择角色</option>
+                  <option v-for="role in assignableRoles" :key="role.id" :value="role.id">
+                    {{ role.code }}
+                  </option>
+                </select>
+              </label>
+              <label class="confirm confirm--inline">
+                <input v-model="roleBindingForm.confirmedHighRisk" type="checkbox" />
+                <span>确认授予高风险角色</span>
+              </label>
+              <label class="confirm confirm--inline">
+                <input v-model="roleBindingForm.confirmedRemoveAdmin" type="checkbox" />
+                <span>确认撤销系统管理员角色</span>
+              </label>
+              <button
+                class="button"
+                type="button"
+                @click="addSelectedUserRoleBinding"
+                :disabled="!canAddSelectedUserRole"
+              >
+                {{ userAdminBusy.updatingRoles ? "处理中..." : "授予角色" }}
+              </button>
+
+              <h4 class="config-versions__title">角色清单</h4>
+              <div v-if="adminRoles.length" class="role-list">
+                <article v-for="role in adminRoles" :key="role.id" class="role-row">
+                  <strong>{{ role.code }}</strong>
+                  <span>{{ role.scope_type }} / {{ role.status }}</span>
+                  <p>{{ role.scopes.join(" / ") || "-" }}</p>
+                </article>
+              </div>
+              <p v-else class="empty-state">当前尚未读取到角色。</p>
+            </aside>
+          </div>
+        </section>
+
+        <section v-if="selectedAdminTab === 'config'" class="panel panel--wide">
+          <header class="panel__header">
+            <div>
+              <h3>配置管理</h3>
+              <p :class="toneClass(canReadConfig || canManageConfig ? 'success' : 'warning')">
+                {{ canManageConfig ? "可管理配置" : canReadConfig ? "可读取配置" : "缺少配置权限" }}
+              </p>
+            </div>
+            <div class="panel__actions">
+              <button
+                class="button button--secondary"
+                type="button"
+                @click="refreshConfigAdminState"
+                :disabled="configBusy.loading || (!canReadConfig && !canManageConfig)"
+              >
+                {{ configBusy.loading ? "刷新中" : "刷新配置" }}
+              </button>
+            </div>
+          </header>
+          <div class="config-console">
+            <aside class="config-list" aria-label="配置分组">
+              <button
+                v-for="item in configItems"
+                :key="item.key"
+                :class="['config-list__item', { 'config-list__item--active': item.key === selectedConfigKey }]"
+                type="button"
+                @click="selectConfigItem(item.key)"
+              >
+                <strong>{{ item.key }}</strong>
+                <span>v{{ item.version }} / {{ item.status }}</span>
+              </button>
+              <p v-if="!configItems.length" class="empty-state">当前尚未读取到可展示的配置分组。</p>
+            </aside>
+
+            <section class="config-editor">
+              <div v-if="selectedConfigItem" class="config-meta">
+                <span>分组 {{ selectedConfigItem.key }}</span>
+                <span>版本 v{{ selectedConfigItem.version }}</span>
+                <span>{{ selectedConfigItem.scope_type }}</span>
+              </div>
+              <label class="field field--full config-editor__field">
+                <span class="field__label">配置 JSON</span>
+                <p class="field__hint">保存草稿前会校验 JSON 结构；发布版本前会重新执行依赖检查。</p>
+                <textarea
+                  class="control control--textarea"
+                  :value="configEditorText"
+                  :disabled="!selectedConfigItem || !canManageConfig"
+                  spellcheck="false"
+                  @input="onConfigEditorInput"
+                />
+                <ul v-if="configEditorParseError" class="field-issues">
+                  <li class="field-issue field-issue--error">{{ configEditorParseError }}</li>
+                </ul>
+              </label>
+
+              <div class="config-actions">
+                <button
+                  class="button button--secondary"
+                  type="button"
+                  @click="validateSelectedConfig"
+                  :disabled="!canValidateSelectedConfig"
+                >
+                  {{ configBusy.validating ? "校验中..." : "校验配置" }}
+                </button>
+                <button
+                  class="button button--secondary"
+                  type="button"
+                  @click="saveSelectedDraft"
+                  :disabled="!canSaveSelectedConfigDraft"
+                >
+                  {{ configBusy.saving ? "保存中..." : "保存草稿" }}
+                </button>
+                <button
+                  class="button"
+                  type="button"
+                  @click="publishDraftVersion()"
+                  :disabled="!canPublishSelectedDraft"
+                >
+                  {{ configBusy.publishing ? "发布中..." : "发布草稿" }}
+                </button>
+              </div>
+
+              <div v-if="configFeedback || configValidationResult" class="result-block result-block--compact">
+                <p v-if="configFeedback" :class="toneClass(configFeedback.tone)">
+                  {{ configFeedback.message }}
+                </p>
+                <template v-if="configValidationResult">
+                  <p :class="toneClass(configValidationResult.valid ? 'success' : 'error')">
+                    {{ configValidationResult.valid ? "后端校验通过" : "后端校验未通过" }}
+                  </p>
+                  <ul v-if="configValidationResult.errors.length" class="issue-list">
+                    <li
+                      v-for="issue in configValidationResult.errors"
+                      :key="`${issue.error_code ?? issue.code}-${issue.path}`"
+                    >
+                      <strong>{{ normalizeIssueCode(issue) }}</strong>
+                      <span>{{ issue.path }}</span>
+                      <p>{{ issue.message }}</p>
+                    </li>
+                  </ul>
+                  <ul v-if="configValidationResult.warnings.length" class="issue-list issue-list--warning">
+                    <li
+                      v-for="issue in configValidationResult.warnings"
+                      :key="`${issue.error_code ?? issue.code}-${issue.path}`"
+                    >
+                      <strong>{{ normalizeIssueCode(issue) }}</strong>
+                      <span>{{ issue.path }}</span>
+                      <p>{{ issue.message }}</p>
+                    </li>
+                  </ul>
+                </template>
+              </div>
+            </section>
+
+            <aside class="config-versions" aria-label="配置版本">
+              <h4 class="config-versions__title">配置版本</h4>
+              <div v-if="configVersions.length" class="version-list">
+                <div v-for="version in configVersions" :key="version.version" class="version-row">
+                  <div>
+                    <strong>v{{ version.version }}</strong>
+                    <span>{{ version.status }} / {{ version.risk_level }}</span>
+                  </div>
+                  <button
+                    v-if="version.status === 'draft' || version.status === 'validating'"
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="publishDraftVersion(version.version)"
+                    :disabled="!canManageConfig || configBusy.publishing"
+                  >
+                    发布
+                  </button>
+                </div>
+              </div>
+              <p v-else class="empty-state">当前尚未读取到配置版本。</p>
+
+              <h4 class="config-versions__title">配置审计</h4>
+              <p v-if="auditFeedback" :class="toneClass(auditFeedback.tone)">
+                {{ auditFeedback.message }}
+              </p>
+              <div v-if="auditLogs.length" class="audit-list">
+                <article v-for="log in auditLogs" :key="log.id" class="audit-row">
+                  <header>
+                    <strong>{{ log.event_name }}</strong>
+                    <span :class="toneClass(log.result === 'success' ? 'success' : 'error')">
+                      {{ log.result }}
+                    </span>
+                  </header>
+                  <p>{{ formatAuditTime(log.created_at) }}</p>
+                  <p>{{ auditSummaryPreview(log) }}</p>
+                  <p v-if="log.error_code" class="audit-row__error">{{ log.error_code }}</p>
+                </article>
+              </div>
+              <p v-else-if="canReadAudit" class="empty-state">当前尚未读取到配置审计记录。</p>
+              <p v-else class="empty-state">当前账号缺少审计读取权限。</p>
+            </aside>
+          </div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <main v-else class="shell">
     <aside class="sidebar">
       <div class="sidebar__block">
         <p class="brand">Little Bear 管理后台</p>
@@ -1427,6 +3074,456 @@ function isComposeDemoProvider(value: string): boolean {
 </template>
 
 <style scoped>
+.auth-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: #18202a;
+  background: #f3f5f7;
+}
+
+.login-card {
+  width: min(460px, 100%);
+  display: grid;
+  gap: 22px;
+  padding: 28px;
+  background: #ffffff;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+}
+
+.login-card__header {
+  display: grid;
+  gap: 8px;
+}
+
+.auth-copy {
+  margin: 0;
+  color: #667182;
+}
+
+.login-form {
+  display: grid;
+  gap: 16px;
+}
+
+.admin-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  color: #18202a;
+  background: #f3f5f7;
+}
+
+.admin-sidebar {
+  background: #20252d;
+  color: #f4f6f8;
+  padding: 24px 20px;
+  display: grid;
+  align-content: start;
+  gap: 22px;
+  border-right: 1px solid #303744;
+}
+
+.admin-nav {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-nav__item {
+  width: 100%;
+  border: 1px solid #3a4350;
+  border-radius: 8px;
+  background: transparent;
+  color: #d6dce5;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-nav__item--active {
+  border-color: #80b6a4;
+  background: #2a403a;
+  color: #ffffff;
+}
+
+.admin-workspace {
+  min-width: 0;
+  padding: 24px;
+  display: grid;
+  align-content: start;
+  gap: 20px;
+}
+
+.admin-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 16px;
+}
+
+.admin-toolbar h2 {
+  margin: 0;
+}
+
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.user-menu > div {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
+.user-menu span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.panel--wide {
+  grid-column: 1 / -1;
+}
+
+.panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.config-console {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) 260px;
+}
+
+.config-list,
+.config-versions {
+  min-width: 0;
+  padding: 16px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  background: #fbfcfd;
+}
+
+.config-list {
+  border-right: 1px solid #e7ebf0;
+}
+
+.config-versions {
+  border-left: 1px solid #e7ebf0;
+}
+
+.config-list__item {
+  width: 100%;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1d2935;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.config-list__item strong,
+.version-row strong {
+  overflow-wrap: anywhere;
+}
+
+.config-list__item span,
+.version-row span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.config-list__item--active {
+  border-color: #2f7d66;
+  background: #eff8f4;
+}
+
+.config-editor {
+  min-width: 0;
+  padding: 16px 18px 18px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.config-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.config-meta span {
+  border: 1px solid #d8dee6;
+  border-radius: 999px;
+  color: #516072;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+.config-editor__field {
+  padding: 0;
+}
+
+.control--textarea {
+  min-height: 420px;
+  resize: vertical;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  white-space: pre;
+}
+
+.config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.result-block--compact {
+  padding: 0;
+}
+
+.config-versions__title {
+  margin: 0;
+  color: #1d2935;
+  font-size: 14px;
+}
+
+.version-list {
+  display: grid;
+  gap: 10px;
+}
+
+.audit-list {
+  display: grid;
+  gap: 10px;
+}
+
+.version-row {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.version-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.audit-row {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.audit-row header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: start;
+}
+
+.audit-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.audit-row p {
+  margin: 0;
+  color: #667182;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.audit-row__error {
+  color: #9a2f2f !important;
+}
+
+.user-admin-console {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr) 300px;
+}
+
+.user-list,
+.role-admin {
+  min-width: 0;
+  padding: 16px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  background: #fbfcfd;
+}
+
+.user-list {
+  border-right: 1px solid #e7ebf0;
+}
+
+.role-admin {
+  border-left: 1px solid #e7ebf0;
+}
+
+.user-filter {
+  display: grid;
+  gap: 10px;
+}
+
+.user-list__item {
+  width: 100%;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1d2935;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.user-list__item strong {
+  overflow-wrap: anywhere;
+}
+
+.user-list__item span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.user-list__item--active {
+  border-color: #2f7d66;
+  background: #eff8f4;
+}
+
+.user-detail {
+  min-width: 0;
+  padding: 16px 18px 18px;
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.user-admin-section {
+  min-width: 0;
+  border: 1px solid #e7ebf0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.subsection-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid #e7ebf0;
+  background: #fbfcfd;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.subsection-header h4 {
+  margin: 0;
+  color: #1d2935;
+}
+
+.form-grid--compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 16px;
+}
+
+.role-picker {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.role-option {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1d2935;
+  overflow-wrap: anywhere;
+}
+
+.danger-actions {
+  padding: 0 16px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.role-binding-list,
+.role-list {
+  display: grid;
+  gap: 10px;
+}
+
+.role-binding-row,
+.role-row {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+}
+
+.role-binding-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.role-binding-row > div,
+.role-row {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.role-binding-row strong,
+.role-row strong {
+  overflow-wrap: anywhere;
+}
+
+.role-binding-row span,
+.role-row span,
+.role-row p {
+  margin: 0;
+  color: #667182;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .shell {
   min-height: 100vh;
   display: grid;
@@ -1894,6 +3991,17 @@ function isComposeDemoProvider(value: string): boolean {
   color: #21303d;
 }
 
+.button--danger {
+  border-color: #b54a4a;
+  background: #b54a4a;
+  color: #ffffff;
+}
+
+.button--small {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
 .tone {
   display: inline-flex;
   width: fit-content;
@@ -1924,10 +4032,12 @@ function isComposeDemoProvider(value: string): boolean {
 }
 
 @media (max-width: 1200px) {
+  .admin-shell,
   .shell {
     grid-template-columns: 1fr;
   }
 
+  .admin-sidebar,
   .sidebar {
     border-right: 0;
     border-bottom: 1px solid #303744;
@@ -1937,20 +4047,52 @@ function isComposeDemoProvider(value: string): boolean {
     grid-template-columns: 1fr;
   }
 
+  .config-console {
+    grid-template-columns: 1fr;
+  }
+
+  .user-admin-console {
+    grid-template-columns: 1fr;
+  }
+
+  .config-list,
+  .config-versions,
+  .user-list,
+  .role-admin {
+    border-left: 0;
+    border-right: 0;
+    border-top: 1px solid #e7ebf0;
+  }
+
   .flow-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 768px) {
+  .admin-workspace,
   .workspace {
     padding: 16px;
   }
 
+  .admin-toolbar,
   .toolbar,
   .action-bar {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .user-menu {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .user-menu > div {
+    justify-items: start;
   }
 
   .flow-strip {

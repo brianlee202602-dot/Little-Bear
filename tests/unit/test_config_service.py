@@ -87,10 +87,14 @@ class _FakeSession:
             self.value_hash = value_hash or "hash_from_string"
             self.config_hash = config_hash or self.value_hash
         self.execute_count = 0
+        self.next_version = 2
+        self.statements: list[tuple[str, dict[str, Any]]] = []
 
     def execute(self, statement, *_args, **_kwargs):
         self.execute_count += 1
         sql = str(statement)
+        params = _args[0] if _args and isinstance(_args[0], dict) else {}
+        self.statements.append((sql, params))
         if "FROM system_state" in sql:
             return _Result(
                 rows=[
@@ -135,6 +139,22 @@ class _FakeSession:
                     }
                 )
             )
+
+        if "COALESCE(MAX(version)" in sql:
+            return _Result(row=_Row({"version": self.next_version}))
+
+        if "cv.status = 'draft'" in sql:
+            return _Result(rows=[])
+
+        if "cv.config_hash = :config_hash" in sql:
+            return _Result(row=None)
+
+        if (
+            "INSERT INTO config_versions" in sql
+            or "INSERT INTO system_configs" in sql
+            or "INSERT INTO audit_logs" in sql
+        ):
+            return _Result()
 
         raise AssertionError(f"unexpected SQL: {sql}")
 
@@ -290,3 +310,66 @@ def test_config_service_uses_cache_until_invalidated(monkeypatch) -> None:
 
     assert third is not first
     assert session.execute_count == 4
+
+
+def test_config_service_lists_editable_active_config_sections() -> None:
+    items = ConfigService(cache=ConfigCache()).list_config_items(_FakeSession())
+
+    keys = {item.key for item in items}
+
+    assert "auth" in keys
+    assert "model_gateway" in keys
+    assert "config_version" not in keys
+    assert "schema_version" not in keys
+
+
+def test_config_service_saves_draft_from_active_config() -> None:
+    session = _FakeSession()
+    config = _example_config()
+    auth_config = dict(config["auth"])
+    auth_config["access_token_ttl_minutes"] = 45
+
+    item = ConfigService(cache=ConfigCache()).save_config_draft(
+        session,
+        key="auth",
+        value_json=auth_config,
+        actor_user_id=None,
+    )
+
+    assert item.key == "auth"
+    assert item.status == "draft"
+    assert item.version == 2
+    assert item.value_json["access_token_ttl_minutes"] == 45
+    assert any("INSERT INTO config_versions" in sql for sql, _params in session.statements)
+    assert any("INSERT INTO system_configs" in sql for sql, _params in session.statements)
+
+
+def test_config_service_rejects_non_editable_metadata_key() -> None:
+    with pytest.raises(ConfigServiceError) as exc_info:
+        ConfigService(cache=ConfigCache()).get_config_item(_FakeSession(), "config_version")
+
+    assert exc_info.value.error_code == "CONFIG_KEY_NOT_FOUND"
+
+
+def test_config_validation_reports_schema_errors_without_dependency_checks(monkeypatch) -> None:
+    called = False
+
+    def fake_bootstrap(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "app.modules.setup.bootstrap_service.ServiceBootstrapService.bootstrap",
+        fake_bootstrap,
+    )
+    invalid_config = _example_config()
+    del invalid_config["auth"]
+
+    result = ConfigService(cache=ConfigCache()).validate_config_payload(
+        _FakeSession(),
+        config=invalid_config,
+    )
+
+    assert result.valid is False
+    assert result.errors
+    assert called is False
