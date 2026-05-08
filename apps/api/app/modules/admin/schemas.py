@@ -12,6 +12,8 @@ class AdminDepartment:
     name: str
     status: str
     is_primary: bool = False
+    is_default: bool = False
+    org_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,12 @@ class AdminUser:
 @dataclass(frozen=True)
 class AdminUserList:
     items: list[AdminUser]
+    total: int
+
+
+@dataclass(frozen=True)
+class AdminDepartmentList:
+    items: list[AdminDepartment]
     total: int
 
 

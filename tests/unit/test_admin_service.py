@@ -40,6 +40,10 @@ class _Result:
         return self._all_rows
 
 
+_ENTERPRISE_ID = "33333333-3333-3333-3333-333333333333"
+_ACTOR_USER_ID = "11111111-1111-1111-1111-111111111111"
+
+
 class _FakeSession:
     def __init__(self) -> None:
         self.executed: list[tuple[str, dict[str, object]]] = []
@@ -110,6 +114,102 @@ def test_list_users_scopes_department_reader_to_shared_departments() -> None:
     sql, params = session.executed[0]
     assert "user_department_memberships actor_udm" in sql
     assert params["actor_user_id"] == actor.user_id
+
+
+def test_list_departments_filters_enterprise_and_status() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "department_id": "department_1",
+                        "code": "default",
+                        "name": "默认部门",
+                        "status": "active",
+                        "is_default": True,
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+
+    result = AdminService().list_departments(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        page=1,
+        page_size=20,
+        keyword="默认",
+        status="active",
+    )
+
+    assert result.total == 1
+    assert result.items[0].is_default is True
+    sql, params = session.executed[0]
+    assert "enterprise_id = CAST(:enterprise_id AS uuid)" in sql
+    assert "deleted_at IS NULL" in sql
+    assert "(code ILIKE :keyword OR name ILIKE :keyword)" in sql
+    assert "status = :status" in sql
+    assert params["enterprise_id"] == _ENTERPRISE_ID
+    assert params["status"] == "active"
+
+
+def test_create_department_requires_org_manage_scope() -> None:
+    actor = AdminActorContext(
+        user_id=_ACTOR_USER_ID,
+        scopes=("org:read",),
+        department_ids=(),
+    )
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        AdminService().create_department(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            code="engineering",
+            name="研发部",
+            actor_context=actor,
+        )
+
+    assert exc_info.value.error_code == "ADMIN_SCOPE_REQUIRED"
+    assert exc_info.value.details["required_scope"] == "org:manage"
+
+
+def test_create_department_bumps_versions_and_audits() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(one=_Row({"org_version": 4})),
+        _Result(),
+        _Result(one=_Row({"permission_version": 7})),
+    ]
+    actor = AdminActorContext(
+        user_id=_ACTOR_USER_ID,
+        scopes=("org:manage",),
+        department_ids=(),
+    )
+
+    department = AdminService().create_department(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        code="engineering",
+        name="研发部",
+        actor_context=actor,
+    )
+
+    assert department.code == "engineering"
+    assert department.is_default is False
+    sql_statements = [statement for statement, _params in session.executed]
+    assert any("SET org_version = org_version + 1" in statement for statement in sql_statements)
+    assert any("INSERT INTO departments" in statement for statement in sql_statements)
+    assert any("SET permission_version = permission_version + 1" in statement for statement in sql_statements)
+    assert any("department.created" in str(params) for _statement, params in session.executed)
+    insert_params = next(
+        params for statement, params in session.executed if "INSERT INTO departments" in statement
+    )
+    assert insert_params["org_version"] == 4
+    assert insert_params["code"] == "engineering"
 
 
 def test_create_role_binding_requires_confirmation_for_high_risk_role(monkeypatch) -> None:

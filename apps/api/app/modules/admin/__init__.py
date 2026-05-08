@@ -3,6 +3,7 @@
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminDepartment,
+    AdminDepartmentList,
     AdminRole,
     AdminRoleBinding,
     AdminUser,
@@ -13,6 +14,7 @@ from app.modules.admin.service import AdminActorContext, AdminService, RoleBindi
 __all__ = [
     "AdminActorContext",
     "AdminDepartment",
+    "AdminDepartmentList",
     "AdminRole",
     "AdminRoleBinding",
     "AdminService",

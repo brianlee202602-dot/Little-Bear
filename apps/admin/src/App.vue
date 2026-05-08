@@ -4,17 +4,20 @@ import { computed, onMounted, reactive, ref } from "vue";
 import {
   ApiRequestError,
   type ApiErrorPayload,
+  type AdminDepartmentData,
   type AdminRoleBindingData,
   type AdminRoleData,
   type AdminUserData,
-  createSession,
+  createAdminDepartment,
   createAdminUser,
+  createSession,
   createAdminUserRoleBindings,
   deleteAdminUser,
   deleteCurrentSession,
   getCurrentUser,
   getSetupState,
   initializeSetup,
+  listAdminDepartments,
   listAdminRoles,
   listAdminUserRoleBindings,
   listAdminUsers,
@@ -143,13 +146,13 @@ const configBusy = reactive({
 });
 const userAdminBusy = reactive({
   loading: false,
+  creatingDepartment: false,
   creating: false,
   updating: false,
   resettingPassword: false,
   updatingRoles: false,
 });
 const loginForm = reactive({
-  enterpriseCode: "",
   username: "",
   password: "",
 });
@@ -162,8 +165,13 @@ const userCreateForm = reactive({
   name: "",
   initialPassword: "",
   passwordConfirm: "",
+  departmentIds: [] as string[],
   roleIds: [] as string[],
   confirmedHighRisk: false,
+});
+const departmentCreateForm = reactive({
+  code: "",
+  name: "",
 });
 const userDangerForm = reactive({
   confirmedDisableAdmin: false,
@@ -205,6 +213,7 @@ const selectedDraftVersion = ref<number | null>(null);
 const lastConfigValidatedText = ref<string | null>(null);
 const selectedAdminTab = ref<ActiveAdminTab>("config");
 const adminUsers = ref<AdminUserData[]>([]);
+const adminDepartments = ref<AdminDepartmentData[]>([]);
 const adminRoles = ref<AdminRoleData[]>([]);
 const selectedAdminUserId = ref<string>("");
 const selectedUserRoleBindings = ref<AdminRoleBindingData[]>([]);
@@ -223,6 +232,14 @@ const statusLabels: Record<string, string> = {
   recovery_required: "需要恢复初始化",
   recovery_validating_config: "恢复校验中",
   recovery_publishing_config: "恢复发布中",
+};
+const builtinRoleLabels: Record<string, string> = {
+  system_admin: "系统管理员",
+  security_admin: "安全管理员",
+  audit_admin: "审计管理员",
+  department_admin: "部门管理员",
+  knowledge_base_admin: "知识库管理员",
+  employee: "普通员工",
 };
 
 // 以下 FieldSection 是“表单元数据”：模板按定义渲染字段，减少重复 DOM 和字段遗漏。
@@ -570,13 +587,23 @@ const activeView = computed<ActiveView>(() => {
   return "dashboard";
 });
 const userDisplayName = computed(() => currentUser.value?.name || currentUser.value?.username || "-");
-const userRoleLabels = computed(() => currentUser.value?.roles.map((role) => role.code).join(" / ") || "-");
+const userRoleLabels = computed(() => formatRoleList(currentUser.value?.roles ?? []));
 const canManageConfig = computed(() => hasScope(currentUser.value?.scopes ?? [], "config:manage"));
 const canReadConfig = computed(() => hasScope(currentUser.value?.scopes ?? [], "config:read"));
 const canReadAudit = computed(() => hasScope(currentUser.value?.scopes ?? [], "audit:read"));
-const canReadUsers = computed(() => hasScope(currentUser.value?.scopes ?? [], "user:read"));
+const canReadUsers = computed(
+  () => hasScope(currentUser.value?.scopes ?? [], "user:read") || canManageUsers.value,
+);
 const canManageUsers = computed(() => hasScope(currentUser.value?.scopes ?? [], "user:manage"));
-const canReadRoles = computed(() => hasScope(currentUser.value?.scopes ?? [], "role:read"));
+const canReadDepartments = computed(
+  () => hasScope(currentUser.value?.scopes ?? [], "org:read") || canManageDepartments.value,
+);
+const canManageDepartments = computed(() =>
+  hasScope(currentUser.value?.scopes ?? [], "org:manage"),
+);
+const canReadRoles = computed(
+  () => hasScope(currentUser.value?.scopes ?? [], "role:read") || canManageRoles.value,
+);
 const canManageRoles = computed(() => hasScope(currentUser.value?.scopes ?? [], "role:manage"));
 const selectedConfigItem = computed(() =>
   configItems.value.find((item) => item.key === selectedConfigKey.value) ?? null,
@@ -587,6 +614,9 @@ const selectedAdminUser = computed(
 const assignableRoles = computed(() =>
   adminRoles.value.filter((role) => role.status === "active" && role.scope_type === "enterprise"),
 );
+const activeDepartments = computed(() =>
+  adminDepartments.value.filter((department) => department.status === "active"),
+);
 const selectedUserRoleIds = computed(() =>
   new Set(selectedUserRoleBindings.value.map((binding) => binding.role_id)),
 );
@@ -596,7 +626,16 @@ const selectedRoleForBinding = computed(
 const selectedCreateRoles = computed(() =>
   adminRoles.value.filter((role) => userCreateForm.roleIds.includes(role.id)),
 );
-const canLoadUserAdmin = computed(() => canReadUsers.value || canReadRoles.value);
+const canLoadUserAdmin = computed(
+  () => canReadUsers.value || canReadRoles.value || canReadDepartments.value,
+);
+const canCreateDepartment = computed(
+  () =>
+    canManageDepartments.value &&
+    departmentCreateForm.code.trim().length > 0 &&
+    departmentCreateForm.name.trim().length > 0 &&
+    !userAdminBusy.creatingDepartment,
+);
 const canCreateAdminUser = computed(
   () =>
     canManageUsers.value &&
@@ -604,6 +643,7 @@ const canCreateAdminUser = computed(
     userCreateForm.name.trim().length > 0 &&
     userCreateForm.initialPassword.length > 0 &&
     userCreateForm.initialPassword === userCreateForm.passwordConfirm &&
+    userCreateForm.departmentIds.length > 0 &&
     !userAdminBusy.creating,
 );
 const canResetSelectedUserPassword = computed(
@@ -860,7 +900,6 @@ async function submitLogin(): Promise<void> {
     const tokenResponse = await createSession({
       username,
       password,
-      enterprise_code: loginForm.enterpriseCode.trim() || undefined,
     });
     saveAuthTokens(tokenResponse);
     const userResponse = await getCurrentUser(tokenResponse.access_token);
@@ -961,6 +1000,7 @@ async function refreshConfigAdminState(): Promise<void> {
 async function refreshUserRoleAdminState(): Promise<void> {
   if (!canLoadUserAdmin.value) {
     adminUsers.value = [];
+    adminDepartments.value = [];
     adminRoles.value = [];
     selectedAdminUserId.value = "";
     selectedUserRoleBindings.value = [];
@@ -981,6 +1021,14 @@ async function refreshUserRoleAdminState(): Promise<void> {
       }
     } else {
       adminRoles.value = [];
+    }
+    if (canReadDepartments.value) {
+      const departmentsResponse = await listAdminDepartments(accessToken, { status: "active" });
+      adminDepartments.value = departmentsResponse.data;
+      ensureDefaultCreateDepartmentSelection();
+    } else {
+      adminDepartments.value = [];
+      userCreateForm.departmentIds = [];
     }
     if (canReadUsers.value) {
       const usersResponse = await listAdminUsers(accessToken, {
@@ -1059,11 +1107,74 @@ function toggleCreateRole(roleId: string, checked: boolean): void {
   userCreateForm.roleIds = Array.from(next);
 }
 
+function toggleCreateDepartment(departmentId: string, checked: boolean): void {
+  const next = new Set(userCreateForm.departmentIds);
+  if (checked) {
+    next.add(departmentId);
+  } else {
+    next.delete(departmentId);
+  }
+  userCreateForm.departmentIds = Array.from(next);
+}
+
+function ensureDefaultCreateDepartmentSelection(): void {
+  const availableIds = new Set(activeDepartments.value.map((department) => department.id));
+  userCreateForm.departmentIds = userCreateForm.departmentIds.filter((id) => availableIds.has(id));
+  if (userCreateForm.departmentIds.length > 0) {
+    return;
+  }
+  const defaultDepartment =
+    activeDepartments.value.find((department) => department.is_default) ?? activeDepartments.value[0];
+  if (defaultDepartment) {
+    userCreateForm.departmentIds = [defaultDepartment.id];
+  }
+}
+
+async function submitCreateDepartment(): Promise<void> {
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.creatingDepartment = true;
+  try {
+    const response = await createAdminDepartment(
+      {
+        code: departmentCreateForm.code.trim(),
+        name: departmentCreateForm.name.trim(),
+      },
+      accessToken,
+    );
+    departmentCreateForm.code = "";
+    departmentCreateForm.name = "";
+    userCreateForm.departmentIds = [response.data.id];
+    await refreshUserRoleAdminState();
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "部门已创建，并已选为新用户归属部门。",
+    };
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "创建部门失败"),
+    };
+  } finally {
+    userAdminBusy.creatingDepartment = false;
+  }
+}
+
 async function submitCreateAdminUser(): Promise<void> {
   if (userCreateForm.initialPassword !== userCreateForm.passwordConfirm) {
     userAdminFeedback.value = {
       tone: "error",
       message: "两次输入的初始密码不一致。",
+    };
+    return;
+  }
+  if (userCreateForm.departmentIds.length === 0) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "请至少选择一个归属部门。",
     };
     return;
   }
@@ -1087,7 +1198,7 @@ async function submitCreateAdminUser(): Promise<void> {
         username: userCreateForm.username.trim(),
         name: userCreateForm.name.trim(),
         initial_password: userCreateForm.initialPassword,
-        department_ids: [],
+        department_ids: userCreateForm.departmentIds,
         role_ids: userCreateForm.roleIds,
       },
       accessToken,
@@ -1339,8 +1450,10 @@ function resetCreateUserForm(): void {
   userCreateForm.name = "";
   userCreateForm.initialPassword = "";
   userCreateForm.passwordConfirm = "";
+  userCreateForm.departmentIds = [];
   userCreateForm.roleIds = [];
   userCreateForm.confirmedHighRisk = false;
+  ensureDefaultCreateDepartmentSelection();
 }
 
 function selectConfigItem(key: string): void {
@@ -1755,6 +1868,52 @@ function formatSetupStatus(status: string): string {
   return statusLabels[status] ?? `未知状态（${status}）`;
 }
 
+function formatRoleLabel(role: { code?: string | null; name?: string | null } | null | undefined): string {
+  if (!role) {
+    return "-";
+  }
+  const code = role.code?.trim();
+  if (code && builtinRoleLabels[code]) {
+    return builtinRoleLabels[code];
+  }
+  return role.name?.trim() || code || "-";
+}
+
+function formatRoleCodeLabel(roleCode: string | null | undefined, fallback = "-"): string {
+  if (!roleCode) {
+    return fallback;
+  }
+  return builtinRoleLabels[roleCode] ?? roleCode;
+}
+
+function formatRoleList(roles: Array<{ code?: string | null; name?: string | null }>): string {
+  const labels = roles.map((role) => formatRoleLabel(role)).filter((label) => label !== "-");
+  return labels.length ? labels.join(" / ") : "-";
+}
+
+function formatDepartmentLabel(
+  department: { code?: string | null; name?: string | null } | null | undefined,
+): string {
+  if (!department) {
+    return "-";
+  }
+  const name = department.name?.trim();
+  const code = department.code?.trim();
+  if (name && code) {
+    return `${name}（${code}）`;
+  }
+  return name || code || "-";
+}
+
+function formatDepartmentList(
+  departments: Array<{ code?: string | null; name?: string | null }>,
+): string {
+  const labels = departments
+    .map((department) => formatDepartmentLabel(department))
+    .filter((label) => label !== "-");
+  return labels.length ? labels.join(" / ") : "-";
+}
+
 function toneClass(tone: Tone): string {
   return `tone tone--${tone}`;
 }
@@ -2156,20 +2315,10 @@ function isComposeDemoProvider(value: string): boolean {
       <div class="login-card__header">
         <p class="brand">Little Bear 管理后台</p>
         <h1 class="title">登录管理后台</h1>
-        <p class="auth-copy">初始化完成后，请使用系统管理员账号进入管理后台。</p>
+        <p class="auth-copy">当前为单企业部署，请使用系统管理员账号进入管理后台。</p>
       </div>
 
       <form class="login-form" @submit.prevent="submitLogin">
-        <label class="field field--full">
-          <span class="field__label">企业编码</span>
-          <p class="field__hint">单企业部署可留空；多企业存在同名账号时必须填写。</p>
-          <input
-            v-model.trim="loginForm.enterpriseCode"
-            class="control"
-            type="text"
-            autocomplete="organization"
-          />
-        </label>
         <label class="field field--full">
           <span class="field__label">登录名</span>
           <p class="field__hint">请输入初始化时创建的管理员登录名。</p>
@@ -2342,6 +2491,30 @@ function isComposeDemoProvider(value: string): boolean {
 
               <section class="user-admin-section">
                 <header class="subsection-header">
+                  <h4>创建部门</h4>
+                  <span :class="toneClass(canManageDepartments ? 'success' : 'warning')">
+                    {{ canManageDepartments ? "可创建" : "缺少 org:manage" }}
+                  </span>
+                </header>
+                <form class="form-grid form-grid--compact" @submit.prevent="submitCreateDepartment">
+                  <label class="field">
+                    <span class="field__label">部门编码</span>
+                    <p class="field__hint">企业内唯一，建议使用字母、数字、下划线或连字符。</p>
+                    <input v-model.trim="departmentCreateForm.code" class="control" type="text" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">部门名称</span>
+                    <p class="field__hint">用于用户归属、权限范围和管理后台展示。</p>
+                    <input v-model.trim="departmentCreateForm.name" class="control" type="text" />
+                  </label>
+                  <button class="button" type="submit" :disabled="!canCreateDepartment">
+                    {{ userAdminBusy.creatingDepartment ? "创建中..." : "创建部门" }}
+                  </button>
+                </form>
+              </section>
+
+              <section class="user-admin-section">
+                <header class="subsection-header">
                   <h4>创建用户</h4>
                   <span :class="toneClass(canManageUsers ? 'success' : 'warning')">
                     {{ canManageUsers ? "可创建" : "缺少 user:manage" }}
@@ -2368,17 +2541,38 @@ function isComposeDemoProvider(value: string): boolean {
                     <p class="field__hint">两次密码必须完全一致。</p>
                     <input v-model="userCreateForm.passwordConfirm" class="control" type="password" />
                   </label>
+                  <div class="option-picker">
+                    <span class="field__label">归属部门</span>
+                    <p class="field__hint">至少选择一个部门；第一个选中的部门会作为用户主部门。</p>
+                    <div class="option-picker__grid">
+                      <label
+                        v-for="department in activeDepartments"
+                        :key="department.id"
+                        class="option-card"
+                      >
+                        <input
+                          type="checkbox"
+                          :checked="userCreateForm.departmentIds.includes(department.id)"
+                          @change="toggleCreateDepartment(department.id, ($event.target as HTMLInputElement).checked)"
+                        />
+                        <span>{{ formatDepartmentLabel(department) }}</span>
+                      </label>
+                    </div>
+                    <p v-if="!activeDepartments.length" class="empty-state">请先创建可用部门。</p>
+                  </div>
                   <div class="role-picker">
                     <span class="field__label">初始角色</span>
-                    <p class="field__hint">未选择时后端会尝试授予 employee 默认角色。</p>
-                    <label v-for="role in assignableRoles" :key="role.id" class="role-option">
-                      <input
-                        type="checkbox"
-                        :checked="userCreateForm.roleIds.includes(role.id)"
-                        @change="toggleCreateRole(role.id, ($event.target as HTMLInputElement).checked)"
-                      />
-                      <span>{{ role.code }}</span>
-                    </label>
+	                    <p class="field__hint">未选择时后端会尝试授予普通员工默认角色。</p>
+                    <div class="option-picker__grid">
+                      <label v-for="role in assignableRoles" :key="role.id" class="option-card">
+                        <input
+                          type="checkbox"
+                          :checked="userCreateForm.roleIds.includes(role.id)"
+                          @change="toggleCreateRole(role.id, ($event.target as HTMLInputElement).checked)"
+                        />
+	                        <span>{{ formatRoleLabel(role) }}</span>
+                      </label>
+                    </div>
                   </div>
                   <label class="confirm confirm--inline">
                     <input v-model="userCreateForm.confirmedHighRisk" type="checkbox" />
@@ -2408,11 +2602,11 @@ function isComposeDemoProvider(value: string): boolean {
                   </div>
                   <div class="summary__row">
                     <dt>部门</dt>
-                    <dd>{{ selectedAdminUser.departments.map((department) => department.code).join(" / ") || "-" }}</dd>
+                    <dd>{{ formatDepartmentList(selectedAdminUser.departments) }}</dd>
                   </div>
                   <div class="summary__row">
                     <dt>角色</dt>
-                    <dd>{{ selectedAdminUser.roles.map((role) => role.code).join(" / ") || "-" }}</dd>
+	                    <dd>{{ formatRoleList(selectedAdminUser.roles) }}</dd>
                   </div>
                 </dl>
                 <p v-else class="empty-state">请选择一个用户查看详情。</p>
@@ -2494,7 +2688,7 @@ function isComposeDemoProvider(value: string): boolean {
               <div v-if="selectedUserRoleBindings.length" class="role-binding-list">
                 <article v-for="binding in selectedUserRoleBindings" :key="binding.id" class="role-binding-row">
                   <div>
-                    <strong>{{ binding.role_code ?? binding.role_id }}</strong>
+	                    <strong>{{ formatRoleCodeLabel(binding.role_code, binding.role_name ?? binding.role_id) }}</strong>
                     <span>{{ binding.scope_type }}</span>
                   </div>
                   <button
@@ -2515,7 +2709,7 @@ function isComposeDemoProvider(value: string): boolean {
                 <select v-model="roleBindingForm.roleId" class="control" :disabled="!canManageRoles">
                   <option value="">请选择角色</option>
                   <option v-for="role in assignableRoles" :key="role.id" :value="role.id">
-                    {{ role.code }}
+	                    {{ formatRoleLabel(role) }}
                   </option>
                 </select>
               </label>
@@ -2539,7 +2733,7 @@ function isComposeDemoProvider(value: string): boolean {
               <h4 class="config-versions__title">角色清单</h4>
               <div v-if="adminRoles.length" class="role-list">
                 <article v-for="role in adminRoles" :key="role.id" class="role-row">
-                  <strong>{{ role.code }}</strong>
+	                  <strong>{{ formatRoleLabel(role) }}</strong>
                   <span>{{ role.scope_type }} / {{ role.status }}</span>
                   <p>{{ role.scopes.join(" / ") || "-" }}</p>
                 </article>
@@ -3457,20 +3651,48 @@ function isComposeDemoProvider(value: string): boolean {
   padding: 16px;
 }
 
-.role-picker {
+.role-picker,
+.option-picker {
   grid-column: 1 / -1;
   min-width: 0;
   display: grid;
   gap: 8px;
 }
 
-.role-option {
+.option-picker__grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.role-option,
+.option-card {
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.role-option {
   color: #1d2935;
   overflow-wrap: anywhere;
+}
+
+.option-card {
+  min-height: 48px;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 10px 12px;
+  color: #1d2935;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .option-picker__grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .danger-actions {

@@ -9,7 +9,10 @@ from starlette.responses import JSONResponse, Response
 
 from app.api.schemas.admin import (
     AdminPasswordResetRequest,
+    DepartmentCreateRequest,
     DepartmentData,
+    DepartmentListResponse,
+    DepartmentResponse,
     RoleBindingCreateRequest,
     RoleBindingData,
     RoleBindingListResponse,
@@ -25,7 +28,12 @@ from app.api.schemas.admin import (
 from app.api.schemas.config import PaginationData
 from app.db.session import session_scope
 from app.modules.admin.errors import AdminServiceError
-from app.modules.admin.schemas import AdminDepartment, AdminRole, AdminRoleBinding, AdminUser
+from app.modules.admin.schemas import (
+    AdminDepartment,
+    AdminRole,
+    AdminRoleBinding,
+    AdminUser,
+)
 from app.modules.admin.service import AdminActorContext, AdminService, RoleBindingInput
 from app.modules.auth.errors import AuthServiceError
 from app.modules.auth.schemas import AuthContext
@@ -100,6 +108,71 @@ async def create_user(
     except SQLAlchemyError as exc:
         return _database_error_response(exc, stage="admin_user_create")
     return UserResponse(request_id=_request_id(), data=_user_data(user))
+
+
+@router.get("/departments", response_model=DepartmentListResponse)
+async def list_departments(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=200),
+    keyword: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    authorization: str | None = Header(default=None),
+) -> DepartmentListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="org:read")
+            result = service.list_departments(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                status=status_filter,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_department_list")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_department_list")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_department_list")
+    return DepartmentListResponse(
+        request_id=_request_id(),
+        data=[_department_data(department) for department in result.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=result.total),
+    )
+
+
+@router.post(
+    "/departments",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DepartmentResponse,
+)
+async def create_department(
+    payload: DepartmentCreateRequest,
+    authorization: str | None = Header(default=None),
+) -> DepartmentResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="org:manage")
+            department = service.create_department(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                code=payload.code,
+                name=payload.name,
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_department_create")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_department_create")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_department_create")
+    return DepartmentResponse(request_id=_request_id(), data=_department_data(department))
 
 
 @router.get("/users/{user_id}", response_model=UserResponse)
@@ -462,6 +535,7 @@ def _department_data(department: AdminDepartment) -> DepartmentData:
         name=department.name,
         status=department.status,
         is_primary=department.is_primary,
+        is_default=department.is_default,
     )
 
 

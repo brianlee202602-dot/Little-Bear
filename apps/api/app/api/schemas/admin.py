@@ -17,6 +17,21 @@ class DepartmentData(BaseModel):
     name: str
     status: str
     is_primary: bool = False
+    is_default: bool = False
+
+
+class DepartmentCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    name: str = Field(min_length=1, max_length=128)
+
+
+class DepartmentPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    status: str | None = Field(default=None)
 
 
 class RoleData(BaseModel):
@@ -82,6 +97,21 @@ class UserListResponse(BaseModel):
 
     request_id: str
     data: list[UserData]
+    pagination: PaginationData
+
+
+class DepartmentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: DepartmentData
+
+
+class DepartmentListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[DepartmentData]
     pagination: PaginationData
 
 

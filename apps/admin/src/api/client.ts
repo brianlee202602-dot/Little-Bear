@@ -54,7 +54,6 @@ export interface SetupInitializationResponse {
 export interface LoginRequest {
   username: string;
   password: string;
-  enterprise_code?: string;
 }
 
 export interface TokenResponse {
@@ -182,6 +181,23 @@ export interface AdminDepartmentData {
   name: string;
   status: string;
   is_primary: boolean;
+  is_default: boolean;
+}
+
+export interface AdminDepartmentCreateRequest {
+  code: string;
+  name: string;
+}
+
+export interface AdminDepartmentListResponse {
+  request_id: string;
+  data: AdminDepartmentData[];
+  pagination: PaginationData;
+}
+
+export interface AdminDepartmentResponse {
+  request_id: string;
+  data: AdminDepartmentData;
 }
 
 export interface AdminRoleData {
@@ -478,6 +494,41 @@ export async function listAdminUsers(
   return requestJson<AdminUserListResponse>(
     `/internal/v1/admin/users?${params.toString()}`,
     { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminDepartments(
+  accessToken: string,
+  filters: { keyword?: string; status?: string; page?: number; page_size?: number } = {},
+): Promise<AdminDepartmentListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  return requestJson<AdminDepartmentListResponse>(
+    `/internal/v1/admin/departments?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function createAdminDepartment(
+  payload: AdminDepartmentCreateRequest,
+  accessToken: string,
+): Promise<AdminDepartmentResponse> {
+  return requestJson<AdminDepartmentResponse>(
+    "/internal/v1/admin/departments",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
     accessToken,
   );
 }
