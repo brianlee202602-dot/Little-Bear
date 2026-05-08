@@ -15,7 +15,7 @@ class DepartmentData(BaseModel):
     id: str
     code: str
     name: str
-    status: str
+    status: Literal["active", "disabled", "deleted"]
     is_primary: bool = False
     is_default: bool = False
 
@@ -31,7 +31,7 @@ class DepartmentPatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=128)
-    status: str | None = Field(default=None)
+    status: Literal["active", "disabled"] | None = None
 
 
 class RoleData(BaseModel):
@@ -78,6 +78,12 @@ class UserPatchRequest(BaseModel):
     status: Literal["active", "disabled", "locked"] | None = None
 
 
+class UserDepartmentsPutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    department_ids: list[str] = Field(min_length=1)
+
+
 class AdminPasswordResetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -113,6 +119,32 @@ class DepartmentListResponse(BaseModel):
     request_id: str
     data: list[DepartmentData]
     pagination: PaginationData
+
+
+class KnowledgeBaseData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    status: Literal["active", "disabled", "archived"]
+    owner_department_id: str
+    default_visibility: Literal["department", "enterprise"]
+    config_scope_id: str | None = None
+
+
+class KnowledgeBaseListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[KnowledgeBaseData]
+    pagination: PaginationData
+
+
+class UserDepartmentsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[DepartmentData]
 
 
 class RoleResponse(BaseModel):

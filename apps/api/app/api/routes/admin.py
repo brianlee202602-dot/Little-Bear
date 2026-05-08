@@ -12,7 +12,10 @@ from app.api.schemas.admin import (
     DepartmentCreateRequest,
     DepartmentData,
     DepartmentListResponse,
+    DepartmentPatchRequest,
     DepartmentResponse,
+    KnowledgeBaseData,
+    KnowledgeBaseListResponse,
     RoleBindingCreateRequest,
     RoleBindingData,
     RoleBindingListResponse,
@@ -21,6 +24,8 @@ from app.api.schemas.admin import (
     RoleResponse,
     UserCreateRequest,
     UserData,
+    UserDepartmentsPutRequest,
+    UserDepartmentsResponse,
     UserListResponse,
     UserPatchRequest,
     UserResponse,
@@ -30,6 +35,7 @@ from app.db.session import session_scope
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminDepartment,
+    AdminKnowledgeBase,
     AdminRole,
     AdminRoleBinding,
     AdminUser,
@@ -175,6 +181,91 @@ async def create_department(
     return DepartmentResponse(request_id=_request_id(), data=_department_data(department))
 
 
+@router.get("/departments/{department_id}", response_model=DepartmentResponse)
+async def get_department(
+    department_id: str,
+    authorization: str | None = Header(default=None),
+) -> DepartmentResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="org:read")
+            department = service.get_department(
+                session,
+                department_id,
+                enterprise_id=auth_context.user.enterprise_id,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_department_get")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_department_get")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_department_get")
+    return DepartmentResponse(request_id=_request_id(), data=_department_data(department))
+
+
+@router.patch("/departments/{department_id}", response_model=DepartmentResponse)
+async def patch_department(
+    department_id: str,
+    payload: DepartmentPatchRequest,
+    authorization: str | None = Header(default=None),
+) -> DepartmentResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="org:manage")
+            department = service.patch_department(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                department_id=department_id,
+                name=payload.name,
+                status=payload.status,
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_department_patch")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_department_patch")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_department_patch")
+    return DepartmentResponse(request_id=_request_id(), data=_department_data(department))
+
+
+@router.delete(
+    "/departments/{department_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
+)
+async def delete_department(
+    department_id: str,
+    authorization: str | None = Header(default=None),
+    x_department_confirm: str | None = Header(default=None),
+) -> Response | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="org:manage")
+            service.delete_department(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                department_id=department_id,
+                confirmed=x_department_confirm == "delete",
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_department_delete")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_department_delete")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_department_delete")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/users/{user_id}", response_model=UserResponse)
 async def get_user(
     user_id: str,
@@ -259,6 +350,67 @@ async def delete_user(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.get("/users/{user_id}/departments", response_model=UserDepartmentsResponse)
+async def list_user_departments(
+    user_id: str,
+    authorization: str | None = Header(default=None),
+) -> UserDepartmentsResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="org:read")
+            departments = service.list_user_departments(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                user_id=user_id,
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_user_department_list")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_user_department_list")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_user_department_list")
+    return UserDepartmentsResponse(
+        request_id=_request_id(),
+        data=[_department_data(department) for department in departments],
+    )
+
+
+@router.put("/users/{user_id}/departments", response_model=UserDepartmentsResponse)
+async def replace_user_departments(
+    user_id: str,
+    payload: UserDepartmentsPutRequest,
+    authorization: str | None = Header(default=None),
+    x_department_confirm: str | None = Header(default=None),
+) -> UserDepartmentsResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="org:manage")
+            departments = service.replace_user_departments(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                user_id=user_id,
+                department_ids=payload.department_ids,
+                confirmed_remove_primary=x_department_confirm == "replace-primary",
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_user_department_replace")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_user_department_replace")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_user_department_replace")
+    return UserDepartmentsResponse(
+        request_id=_request_id(),
+        data=[_department_data(department) for department in departments],
+    )
+
+
 @router.put(
     "/users/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT, response_model=None
 )
@@ -316,6 +468,40 @@ async def unlock_user(
     except SQLAlchemyError as exc:
         return _database_error_response(exc, stage="admin_user_unlock")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/knowledge-bases", response_model=KnowledgeBaseListResponse)
+async def list_knowledge_bases(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=200),
+    keyword: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    authorization: str | None = Header(default=None),
+) -> KnowledgeBaseListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="knowledge_base:manage")
+            result = service.list_knowledge_bases(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                status=status_filter,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_knowledge_base_list")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_knowledge_base_list")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_knowledge_base_list")
+    return KnowledgeBaseListResponse(
+        request_id=_request_id(),
+        data=[_knowledge_base_data(knowledge_base) for knowledge_base in result.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=result.total),
+    )
 
 
 @router.get("/roles", response_model=RoleListResponse)
@@ -536,6 +722,17 @@ def _department_data(department: AdminDepartment) -> DepartmentData:
         status=department.status,
         is_primary=department.is_primary,
         is_default=department.is_default,
+    )
+
+
+def _knowledge_base_data(knowledge_base: AdminKnowledgeBase) -> KnowledgeBaseData:
+    return KnowledgeBaseData(
+        id=knowledge_base.id,
+        name=knowledge_base.name,
+        status=knowledge_base.status,
+        owner_department_id=knowledge_base.owner_department_id,
+        default_visibility=knowledge_base.default_visibility,
+        config_scope_id=knowledge_base.config_scope_id,
     )
 
 

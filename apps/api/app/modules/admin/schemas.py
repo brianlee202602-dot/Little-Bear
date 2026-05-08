@@ -54,6 +54,22 @@ class AdminDepartmentList:
 
 
 @dataclass(frozen=True)
+class AdminKnowledgeBase:
+    id: str
+    name: str
+    status: str
+    owner_department_id: str
+    default_visibility: str
+    config_scope_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AdminKnowledgeBaseList:
+    items: list[AdminKnowledgeBase]
+    total: int
+
+
+@dataclass(frozen=True)
 class AdminRoleBinding:
     id: str
     role_id: str

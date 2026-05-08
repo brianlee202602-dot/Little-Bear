@@ -7,6 +7,8 @@ from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminDepartment,
     AdminDepartmentList,
+    AdminKnowledgeBase,
+    AdminKnowledgeBaseList,
     AdminRole,
     AdminRoleBinding,
     AdminUser,
@@ -146,6 +148,17 @@ def _binding() -> AdminRoleBinding:
     )
 
 
+def _knowledge_base() -> AdminKnowledgeBase:
+    return AdminKnowledgeBase(
+        id="kb_1",
+        name="制度知识库",
+        status="active",
+        owner_department_id="department_1",
+        default_visibility="department",
+        config_scope_id=None,
+    )
+
+
 def test_admin_user_list_route_requires_user_read_scope(monkeypatch) -> None:
     seen: dict[str, object] = {}
 
@@ -282,6 +295,209 @@ def test_department_create_route_requires_org_manage_scope(monkeypatch) -> None:
     assert seen["actor_user_id"] == "user_1"
     assert seen["actor_context"].user_id == "user_1"
     assert response.json()["data"]["name"] == "研发部"
+
+
+def test_knowledge_base_list_route_requires_manage_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_knowledge_bases(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminKnowledgeBaseList(items=[_knowledge_base()], total=1)
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.list_knowledge_bases",
+        list_knowledge_bases,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/knowledge-bases",
+        headers={"authorization": "Bearer access.jwt", "x-request-id": "req_kbs"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "knowledge_base:manage"
+    assert seen["enterprise_id"] == "ent_1"
+    payload = response.json()
+    assert payload["request_id"] == "req_kbs"
+    assert payload["data"][0]["name"] == "制度知识库"
+    assert payload["pagination"]["total"] == 1
+
+
+def test_department_get_route_requires_org_read_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def get_department(_self, _session, department_id, **kwargs):
+        seen["department_id"] = department_id
+        seen.update(kwargs)
+        return _admin_department()
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr("app.api.routes.admin.AdminService.get_department", get_department)
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/departments/department_1",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "org:read"
+    assert seen["department_id"] == "department_1"
+    assert seen["enterprise_id"] == "ent_1"
+
+
+def test_department_patch_route_passes_actor_context(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def patch_department(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminDepartment(
+            id=kwargs["department_id"],
+            code="engineering",
+            name=kwargs["name"],
+            status=kwargs["status"],
+            is_default=False,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.admin.AdminService.patch_department", patch_department)
+
+    client = TestClient(_create_test_app())
+    response = client.patch(
+        "/internal/v1/admin/departments/department_2",
+        headers={"authorization": "Bearer access.jwt"},
+        json={"name": "研发平台部", "status": "disabled"},
+    )
+
+    assert response.status_code == 200
+    assert seen["actor_user_id"] == "user_1"
+    assert seen["department_id"] == "department_2"
+    assert seen["actor_context"].department_ids == ("department_1",)
+    assert response.json()["data"]["status"] == "disabled"
+
+
+def test_department_delete_route_passes_confirmation_header(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def delete_department(_self, _session, **kwargs):
+        seen.update(kwargs)
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.admin.AdminService.delete_department", delete_department)
+
+    client = TestClient(_create_test_app())
+    response = client.delete(
+        "/internal/v1/admin/departments/department_2",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-department-confirm": "delete",
+        },
+    )
+
+    assert response.status_code == 204
+    assert seen["confirmed"] is True
+    assert seen["department_id"] == "department_2"
+    assert seen["actor_context"].user_id == "user_1"
+
+
+def test_user_departments_list_route_requires_org_read_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_user_departments(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return [_admin_department()]
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.list_user_departments",
+        list_user_departments,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/users/user_2/departments",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "org:read"
+    assert seen["user_id"] == "user_2"
+    assert seen["actor_context"].user_id == "user_1"
+    assert response.json()["data"][0]["code"] == "default"
+
+
+def test_user_departments_replace_route_passes_confirmation_header(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def replace_user_departments(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return [
+            AdminDepartment(
+                id="department_2",
+                code="engineering",
+                name="研发部",
+                status="active",
+                is_primary=True,
+            )
+        ]
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.replace_user_departments",
+        replace_user_departments,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.put(
+        "/internal/v1/admin/users/user_2/departments",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-department-confirm": "replace-primary",
+        },
+        json={"department_ids": ["department_2"]},
+    )
+
+    assert response.status_code == 200
+    assert seen["user_id"] == "user_2"
+    assert seen["department_ids"] == ["department_2"]
+    assert seen["confirmed_remove_primary"] is True
+    assert seen["actor_context"].department_ids == ("department_1",)
+    assert response.json()["data"][0]["is_primary"] is True
 
 
 def test_role_list_route_requires_role_read_scope(monkeypatch) -> None:

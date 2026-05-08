@@ -5,6 +5,7 @@ import {
   ApiRequestError,
   type ApiErrorPayload,
   type AdminDepartmentData,
+  type AdminKnowledgeBaseData,
   type AdminRoleBindingData,
   type AdminRoleData,
   type AdminUserData,
@@ -12,21 +13,27 @@ import {
   createAdminUser,
   createSession,
   createAdminUserRoleBindings,
+  deleteAdminDepartment,
   deleteAdminUser,
   deleteCurrentSession,
   getCurrentUser,
+  getAdminDepartment,
   getSetupState,
   initializeSetup,
   listAdminDepartments,
+  listAdminKnowledgeBases,
   listAdminRoles,
+  listAdminUserDepartments,
   listAdminUserRoleBindings,
   listAdminUsers,
   listAuditLogs,
   listConfigVersions,
   listConfigs,
+  patchAdminDepartment,
   patchAdminUser,
   publishConfigVersion,
   refreshSession,
+  replaceAdminUserDepartments,
   resetAdminUserPassword,
   revokeAdminUserRoleBinding,
   saveConfigDraft,
@@ -69,7 +76,15 @@ type FieldOption = {
 type Tone = "success" | "error" | "warning" | "neutral";
 type LocalIssueTone = "error" | "warning";
 type ActiveView = "loading" | "setup" | "login" | "dashboard";
-type ActiveAdminTab = "config" | "users";
+type ActiveAdminTab = "config" | "departments" | "users";
+type DepartmentModalMode = "create" | "edit" | "delete" | null;
+type UserModalMode = "create" | "edit" | "departments" | "roles" | "password" | "delete" | null;
+type RoleScopeType = AdminRoleData["scope_type"];
+type RoleBindingCandidate = {
+  role: AdminRoleData;
+  scopeType: RoleScopeType;
+  scopeId: string | null;
+};
 
 type LocalValidationIssue = {
   field?: keyof SetupFormModel;
@@ -146,17 +161,27 @@ const configBusy = reactive({
 });
 const userAdminBusy = reactive({
   loading: false,
-  creatingDepartment: false,
   creating: false,
   updating: false,
+  updatingDepartments: false,
   resettingPassword: false,
   updatingRoles: false,
+});
+const departmentAdminBusy = reactive({
+  loading: false,
+  creating: false,
+  updating: false,
+  deleting: false,
 });
 const loginForm = reactive({
   username: "",
   password: "",
 });
 const userSearchForm = reactive({
+  keyword: "",
+  status: "",
+});
+const departmentSearchForm = reactive({
   keyword: "",
   status: "",
 });
@@ -173,8 +198,19 @@ const departmentCreateForm = reactive({
   code: "",
   name: "",
 });
-const userDangerForm = reactive({
+const departmentEditForm = reactive({
+  name: "",
+  status: "active" as "active" | "disabled",
+});
+const userEditForm = reactive({
+  name: "",
+  status: "active" as "active" | "disabled" | "locked",
   confirmedDisableAdmin: false,
+});
+const departmentDangerForm = reactive({
+  confirmedDelete: false,
+});
+const userDangerForm = reactive({
   confirmedDelete: false,
 });
 const passwordResetForm = reactive({
@@ -183,8 +219,13 @@ const passwordResetForm = reactive({
   forceChangePassword: true,
   confirmed: false,
 });
+const userDepartmentForm = reactive({
+  departmentIds: [] as string[],
+  confirmedReplacePrimary: false,
+});
 const roleBindingForm = reactive({
   roleId: "",
+  scopeId: "",
   confirmedHighRisk: false,
   confirmedRemoveAdmin: false,
 });
@@ -197,6 +238,9 @@ const authFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | n
 const configFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
 const auditFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
 const userAdminFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
+const departmentAdminFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(
+  null,
+);
 const validationErrorPayload = ref<ApiErrorPayload | null>(null);
 const initializationErrorPayload = ref<ApiErrorPayload | null>(null);
 const submitConfirmed = ref(false);
@@ -214,9 +258,14 @@ const lastConfigValidatedText = ref<string | null>(null);
 const selectedAdminTab = ref<ActiveAdminTab>("config");
 const adminUsers = ref<AdminUserData[]>([]);
 const adminDepartments = ref<AdminDepartmentData[]>([]);
+const adminKnowledgeBases = ref<AdminKnowledgeBaseData[]>([]);
 const adminRoles = ref<AdminRoleData[]>([]);
+const selectedDepartmentId = ref<string>("");
 const selectedAdminUserId = ref<string>("");
+const selectedUserDepartments = ref<AdminDepartmentData[]>([]);
 const selectedUserRoleBindings = ref<AdminRoleBindingData[]>([]);
+const departmentModalMode = ref<DepartmentModalMode>(null);
+const userModalMode = ref<UserModalMode>(null);
 
 const statusLabels: Record<string, string> = {
   not_initialized: "未初始化",
@@ -605,36 +654,131 @@ const canReadRoles = computed(
   () => hasScope(currentUser.value?.scopes ?? [], "role:read") || canManageRoles.value,
 );
 const canManageRoles = computed(() => hasScope(currentUser.value?.scopes ?? [], "role:manage"));
+const canManageKnowledgeBases = computed(() =>
+  hasScope(currentUser.value?.scopes ?? [], "knowledge_base:manage"),
+);
 const selectedConfigItem = computed(() =>
   configItems.value.find((item) => item.key === selectedConfigKey.value) ?? null,
 );
 const selectedAdminUser = computed(
   () => adminUsers.value.find((user) => user.id === selectedAdminUserId.value) ?? null,
 );
-const assignableRoles = computed(() =>
+const selectedDepartment = computed(
+  () => adminDepartments.value.find((department) => department.id === selectedDepartmentId.value) ?? null,
+);
+const selectedUserDepartmentsForDisplay = computed(() => {
+  if (selectedUserDepartments.value.length > 0) {
+    return selectedUserDepartments.value;
+  }
+  return selectedAdminUser.value?.departments ?? [];
+});
+const initialAssignableRoles = computed(() =>
   adminRoles.value.filter((role) => role.status === "active" && role.scope_type === "enterprise"),
 );
+const assignableRoles = computed(() => adminRoles.value.filter((role) => role.status === "active"));
 const activeDepartments = computed(() =>
   adminDepartments.value.filter((department) => department.status === "active"),
 );
-const selectedUserRoleIds = computed(() =>
-  new Set(selectedUserRoleBindings.value.map((binding) => binding.role_id)),
+const activeKnowledgeBases = computed(() =>
+  adminKnowledgeBases.value.filter((knowledgeBase) => knowledgeBase.status === "active"),
+);
+const roleBindingCandidates = computed<RoleBindingCandidate[]>(() =>
+  assignableRoles.value.flatMap((role): RoleBindingCandidate[] => {
+    if (role.scope_type === "enterprise") {
+      return [{ role, scopeType: role.scope_type, scopeId: null }];
+    }
+    if (role.scope_type === "department") {
+      return activeDepartments.value.map((department) => ({
+        role,
+        scopeType: role.scope_type,
+        scopeId: department.id,
+      }));
+    }
+    return activeKnowledgeBases.value.map((knowledgeBase) => ({
+      role,
+      scopeType: role.scope_type,
+      scopeId: knowledgeBase.id,
+    }));
+  }),
+);
+const selectedUserRoleBindingKeys = computed(() =>
+  new Set(selectedUserRoleBindings.value.map(roleBindingKey)),
+);
+const selectedUserDepartmentIds = computed(() => new Set(userDepartmentForm.departmentIds));
+const currentSelectedUserPrimaryDepartmentId = computed(() => {
+  const departments = selectedUserDepartmentsForDisplay.value;
+  return departments.find((department) => department.is_primary)?.id ?? departments[0]?.id ?? "";
+});
+const nextSelectedUserPrimaryDepartmentId = computed(() => userDepartmentForm.departmentIds[0] ?? "");
+const selectedUserPrimaryDepartmentWillChange = computed(
+  () =>
+    Boolean(currentSelectedUserPrimaryDepartmentId.value) &&
+    Boolean(nextSelectedUserPrimaryDepartmentId.value) &&
+    currentSelectedUserPrimaryDepartmentId.value !== nextSelectedUserPrimaryDepartmentId.value,
 );
 const selectedRoleForBinding = computed(
   () => adminRoles.value.find((role) => role.id === roleBindingForm.roleId) ?? null,
 );
+const selectedRoleBindingScopeType = computed(
+  () => selectedRoleForBinding.value?.scope_type ?? "enterprise",
+);
+const selectedRoleBindingScopeReady = computed(() => {
+  const role = selectedRoleForBinding.value;
+  if (!role) {
+    return false;
+  }
+  return role.scope_type === "enterprise" || Boolean(roleBindingForm.scopeId);
+});
+const selectedRoleBindingKey = computed(() => {
+  const role = selectedRoleForBinding.value;
+  if (!role) {
+    return "";
+  }
+  return roleBindingKeyFromParts(
+    role.id,
+    role.scope_type,
+    role.scope_type === "enterprise" ? null : roleBindingForm.scopeId,
+  );
+});
+const availableRoleBindingCandidates = computed(() =>
+  roleBindingCandidates.value.filter(
+    (candidate) =>
+      !selectedUserRoleBindingKeys.value.has(
+        roleBindingKeyFromParts(candidate.role.id, candidate.scopeType, candidate.scopeId),
+      ),
+  ),
+);
 const selectedCreateRoles = computed(() =>
   adminRoles.value.filter((role) => userCreateForm.roleIds.includes(role.id)),
+);
+const selectedAdminUserIsSystemAdmin = computed(
+  () => selectedAdminUser.value?.roles.some((role) => role.code === "system_admin") === true,
 );
 const canLoadUserAdmin = computed(
   () => canReadUsers.value || canReadRoles.value || canReadDepartments.value,
 );
+const canLoadDepartmentAdmin = computed(() => canReadDepartments.value || canManageDepartments.value);
 const canCreateDepartment = computed(
   () =>
     canManageDepartments.value &&
     departmentCreateForm.code.trim().length > 0 &&
     departmentCreateForm.name.trim().length > 0 &&
-    !userAdminBusy.creatingDepartment,
+    !departmentAdminBusy.creating,
+);
+const canUpdateSelectedDepartment = computed(
+  () =>
+    Boolean(selectedDepartment.value) &&
+    canManageDepartments.value &&
+    departmentEditForm.name.trim().length > 0 &&
+    !departmentAdminBusy.updating,
+);
+const canDeleteSelectedDepartment = computed(
+  () =>
+    Boolean(selectedDepartment.value) &&
+    canManageDepartments.value &&
+    selectedDepartment.value?.is_default !== true &&
+    departmentDangerForm.confirmedDelete &&
+    !departmentAdminBusy.deleting,
 );
 const canCreateAdminUser = computed(
   () =>
@@ -646,6 +790,23 @@ const canCreateAdminUser = computed(
     userCreateForm.departmentIds.length > 0 &&
     !userAdminBusy.creating,
 );
+const canUpdateSelectedAdminUser = computed(
+  () =>
+    Boolean(selectedAdminUser.value) &&
+    canManageUsers.value &&
+    userEditForm.name.trim().length > 0 &&
+    (userEditForm.status !== "disabled" ||
+      !selectedAdminUserIsSystemAdmin.value ||
+      userEditForm.confirmedDisableAdmin) &&
+    !userAdminBusy.updating,
+);
+const canDeleteSelectedAdminUser = computed(
+  () =>
+    Boolean(selectedAdminUser.value) &&
+    canManageUsers.value &&
+    userDangerForm.confirmedDelete &&
+    !userAdminBusy.updating,
+);
 const canResetSelectedUserPassword = computed(
   () =>
     Boolean(selectedAdminUser.value) &&
@@ -655,14 +816,50 @@ const canResetSelectedUserPassword = computed(
     passwordResetForm.confirmed &&
     !userAdminBusy.resettingPassword,
 );
+const canSaveSelectedUserDepartments = computed(
+  () =>
+    Boolean(selectedAdminUser.value) &&
+    canManageDepartments.value &&
+    userDepartmentForm.departmentIds.length > 0 &&
+    (!selectedUserPrimaryDepartmentWillChange.value ||
+      userDepartmentForm.confirmedReplacePrimary) &&
+    !userAdminBusy.updatingDepartments,
+);
 const canAddSelectedUserRole = computed(
   () =>
     Boolean(selectedAdminUser.value) &&
     Boolean(selectedRoleForBinding.value) &&
     canManageRoles.value &&
-    !selectedUserRoleIds.value.has(roleBindingForm.roleId) &&
+    selectedRoleBindingScopeReady.value &&
+    Boolean(selectedRoleBindingKey.value) &&
+    !selectedUserRoleBindingKeys.value.has(selectedRoleBindingKey.value) &&
     !userAdminBusy.updatingRoles,
 );
+const roleBindingDisabledReason = computed(() => {
+  if (canAddSelectedUserRole.value || userAdminBusy.updatingRoles) {
+    return "";
+  }
+  if (!selectedAdminUser.value) {
+    return "请选择需要授权的用户。";
+  }
+  if (!canManageRoles.value) {
+    return "当前账号缺少 role:manage，不能授予角色。";
+  }
+  if (!selectedRoleForBinding.value) {
+    return availableRoleBindingCandidates.value.length === 0
+      ? "当前没有可授予的角色作用域；请确认部门或知识库作用域已创建且当前账号有读取权限。"
+      : "请选择要授予的角色。";
+  }
+  if (!selectedRoleBindingScopeReady.value) {
+    return selectedRoleBindingScopeType.value === "department"
+      ? "请选择部门作用域。"
+      : "请选择知识库作用域。";
+  }
+  if (selectedUserRoleBindingKeys.value.has(selectedRoleBindingKey.value)) {
+    return "该角色作用域已经绑定，请选择其他角色或作用域。";
+  }
+  return "";
+});
 const activeConfigVersion = computed(() => {
   const activeVersion = configVersions.value.find((version) => version.status === "active");
   return activeVersion?.version ?? selectedConfigItem.value?.version ?? 1;
@@ -1001,8 +1198,10 @@ async function refreshUserRoleAdminState(): Promise<void> {
   if (!canLoadUserAdmin.value) {
     adminUsers.value = [];
     adminDepartments.value = [];
+    adminKnowledgeBases.value = [];
     adminRoles.value = [];
     selectedAdminUserId.value = "";
+    selectedUserDepartments.value = [];
     selectedUserRoleBindings.value = [];
     return;
   }
@@ -1019,6 +1218,7 @@ async function refreshUserRoleAdminState(): Promise<void> {
       if (!roleBindingForm.roleId && assignableRoles.value.length > 0) {
         roleBindingForm.roleId = assignableRoles.value[0].id;
       }
+      syncRoleBindingScopeDefault();
     } else {
       adminRoles.value = [];
     }
@@ -1026,9 +1226,17 @@ async function refreshUserRoleAdminState(): Promise<void> {
       const departmentsResponse = await listAdminDepartments(accessToken, { status: "active" });
       adminDepartments.value = departmentsResponse.data;
       ensureDefaultCreateDepartmentSelection();
+      syncRoleBindingScopeDefault();
     } else {
       adminDepartments.value = [];
       userCreateForm.departmentIds = [];
+    }
+    if (canManageKnowledgeBases.value) {
+      const knowledgeBasesResponse = await listAdminKnowledgeBases(accessToken, { status: "active" });
+      adminKnowledgeBases.value = knowledgeBasesResponse.data;
+      syncRoleBindingScopeDefault();
+    } else {
+      adminKnowledgeBases.value = [];
     }
     if (canReadUsers.value) {
       const usersResponse = await listAdminUsers(accessToken, {
@@ -1046,7 +1254,13 @@ async function refreshUserRoleAdminState(): Promise<void> {
       adminUsers.value = [];
       selectedAdminUserId.value = "";
     }
+    await refreshSelectedUserDepartments(accessToken);
     await refreshSelectedUserRoleBindings(accessToken);
+    if (!roleBindingForm.roleId || selectedUserRoleBindingKeys.value.has(selectedRoleBindingKey.value)) {
+      selectNextAvailableRoleBindingTarget();
+    } else {
+      syncRoleBindingScopeDefault();
+    }
     userAdminFeedback.value = {
       tone: "success",
       message: "用户与角色数据已刷新。",
@@ -1061,6 +1275,46 @@ async function refreshUserRoleAdminState(): Promise<void> {
   }
 }
 
+async function refreshDepartmentAdminState(): Promise<void> {
+  if (!canLoadDepartmentAdmin.value) {
+    adminDepartments.value = [];
+    selectedDepartmentId.value = "";
+    syncDepartmentEditForm();
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  departmentAdminBusy.loading = true;
+  try {
+    const response = await listAdminDepartments(accessToken, {
+      keyword: departmentSearchForm.keyword.trim() || undefined,
+      status: departmentSearchForm.status || undefined,
+    });
+    adminDepartments.value = response.data;
+    if (
+      !selectedDepartmentId.value ||
+      !adminDepartments.value.some((department) => department.id === selectedDepartmentId.value)
+    ) {
+      selectedDepartmentId.value = adminDepartments.value[0]?.id ?? "";
+    }
+    syncDepartmentEditForm();
+    departmentAdminFeedback.value = {
+      tone: "success",
+      message: "部门数据已刷新。",
+    };
+  } catch (error) {
+    departmentAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取部门数据失败"),
+    };
+  } finally {
+    departmentAdminBusy.loading = false;
+  }
+}
+
 async function refreshSelectedUserRoleBindings(existingAccessToken?: string): Promise<void> {
   if (!selectedAdminUserId.value || !canReadRoles.value) {
     selectedUserRoleBindings.value = [];
@@ -1072,29 +1326,65 @@ async function refreshSelectedUserRoleBindings(existingAccessToken?: string): Pr
   }
   const response = await listAdminUserRoleBindings(selectedAdminUserId.value, accessToken);
   selectedUserRoleBindings.value = response.data;
+  syncRoleBindingScopeDefault();
+}
+
+async function refreshSelectedUserDepartments(existingAccessToken?: string): Promise<void> {
+  if (!selectedAdminUserId.value) {
+    selectedUserDepartments.value = [];
+    syncSelectedUserDepartmentForm();
+    return;
+  }
+  if (!canReadDepartments.value) {
+    selectedUserDepartments.value = selectedAdminUser.value?.departments ?? [];
+    syncSelectedUserDepartmentForm();
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+  const response = await listAdminUserDepartments(selectedAdminUserId.value, accessToken);
+  selectedUserDepartments.value = response.data;
+  updateSelectedAdminUserDepartments(response.data);
+  syncSelectedUserDepartmentForm();
 }
 
 async function selectAdminUser(userId: string): Promise<void> {
   selectedAdminUserId.value = userId;
-  userDangerForm.confirmedDisableAdmin = false;
   userDangerForm.confirmedDelete = false;
   passwordResetForm.newPassword = "";
   passwordResetForm.passwordConfirm = "";
   passwordResetForm.confirmed = false;
+  userDepartmentForm.confirmedReplacePrimary = false;
+  selectedUserDepartments.value = selectedAdminUser.value?.departments ?? [];
+  syncSelectedUserDepartmentForm();
   roleBindingForm.confirmedRemoveAdmin = false;
   try {
+    await refreshSelectedUserDepartments();
     await refreshSelectedUserRoleBindings();
+    syncUserEditForm();
   } catch (error) {
+    selectedUserDepartments.value = selectedAdminUser.value?.departments ?? [];
     selectedUserRoleBindings.value = [];
+    syncSelectedUserDepartmentForm();
+    syncUserEditForm();
     userAdminFeedback.value = {
       tone: "error",
-      message: normalizeErrorMessage(error, "读取用户角色绑定失败"),
+      message: normalizeErrorMessage(error, "读取用户部门或角色绑定失败"),
     };
   }
 }
 
 function switchAdminTab(tab: ActiveAdminTab): void {
   selectedAdminTab.value = tab;
+  if (tab === "departments") {
+    void refreshDepartmentAdminState();
+  } else if (tab === "users") {
+    void refreshUserRoleAdminState();
+  } else if (tab === "config") {
+    void refreshConfigAdminState();
+  }
 }
 
 function toggleCreateRole(roleId: string, checked: boolean): void {
@@ -1117,6 +1407,19 @@ function toggleCreateDepartment(departmentId: string, checked: boolean): void {
   userCreateForm.departmentIds = Array.from(next);
 }
 
+function toggleSelectedUserDepartment(departmentId: string, checked: boolean): void {
+  const next = new Set(userDepartmentForm.departmentIds);
+  if (checked) {
+    next.add(departmentId);
+  } else {
+    next.delete(departmentId);
+  }
+  userDepartmentForm.departmentIds = Array.from(next);
+  if (!selectedUserPrimaryDepartmentWillChange.value) {
+    userDepartmentForm.confirmedReplacePrimary = false;
+  }
+}
+
 function ensureDefaultCreateDepartmentSelection(): void {
   const availableIds = new Set(activeDepartments.value.map((department) => department.id));
   userCreateForm.departmentIds = userCreateForm.departmentIds.filter((id) => availableIds.has(id));
@@ -1130,13 +1433,133 @@ function ensureDefaultCreateDepartmentSelection(): void {
   }
 }
 
+function openCreateDepartmentModal(): void {
+  departmentCreateForm.code = "";
+  departmentCreateForm.name = "";
+  departmentAdminFeedback.value = null;
+  departmentModalMode.value = "create";
+}
+
+async function openEditDepartmentModal(department: AdminDepartmentData): Promise<void> {
+  departmentModalMode.value = "edit";
+  await selectDepartment(department.id);
+}
+
+async function openDeleteDepartmentModal(department: AdminDepartmentData): Promise<void> {
+  departmentDangerForm.confirmedDelete = false;
+  departmentModalMode.value = "delete";
+  await selectDepartment(department.id);
+}
+
+function closeDepartmentModal(): void {
+  departmentModalMode.value = null;
+  departmentDangerForm.confirmedDelete = false;
+}
+
+function openCreateUserModal(): void {
+  resetCreateUserForm();
+  userAdminFeedback.value = null;
+  userModalMode.value = "create";
+}
+
+async function openEditUserModal(user: AdminUserData): Promise<void> {
+  userModalMode.value = "edit";
+  await selectAdminUser(user.id);
+  syncUserEditForm();
+}
+
+async function openUserDepartmentsModal(user: AdminUserData): Promise<void> {
+  userModalMode.value = "departments";
+  await selectAdminUser(user.id);
+}
+
+async function openUserRolesModal(user: AdminUserData): Promise<void> {
+  userModalMode.value = "roles";
+  await selectAdminUser(user.id);
+  if (!roleBindingForm.roleId && assignableRoles.value.length > 0) {
+    roleBindingForm.roleId = assignableRoles.value[0].id;
+  }
+  if (!roleBindingForm.roleId || selectedUserRoleBindingKeys.value.has(selectedRoleBindingKey.value)) {
+    selectNextAvailableRoleBindingTarget();
+  } else {
+    syncRoleBindingScopeDefault();
+  }
+}
+
+async function openPasswordResetModal(user: AdminUserData): Promise<void> {
+  userModalMode.value = "password";
+  await selectAdminUser(user.id);
+}
+
+async function openDeleteUserModal(user: AdminUserData): Promise<void> {
+  userDangerForm.confirmedDelete = false;
+  userModalMode.value = "delete";
+  await selectAdminUser(user.id);
+}
+
+function closeUserModal(): void {
+  userModalMode.value = null;
+  userDangerForm.confirmedDelete = false;
+  passwordResetForm.newPassword = "";
+  passwordResetForm.passwordConfirm = "";
+  passwordResetForm.confirmed = false;
+  roleBindingForm.scopeId = "";
+  roleBindingForm.confirmedHighRisk = false;
+  roleBindingForm.confirmedRemoveAdmin = false;
+}
+
+function onRoleBindingRoleChange(roleId: string): void {
+  roleBindingForm.roleId = roleId;
+  roleBindingForm.confirmedHighRisk = false;
+  syncRoleBindingScopeDefault();
+}
+
+function syncRoleBindingScopeDefault(): void {
+  const role = selectedRoleForBinding.value;
+  if (!role || role.scope_type === "enterprise") {
+    roleBindingForm.scopeId = "";
+    return;
+  }
+  const candidates =
+    role.scope_type === "department" ? activeDepartments.value : activeKnowledgeBases.value;
+  const currentScopeExists = candidates.some((item) => item.id === roleBindingForm.scopeId);
+  if (currentScopeExists) {
+    const currentKey = roleBindingKeyFromParts(role.id, role.scope_type, roleBindingForm.scopeId);
+    if (!selectedUserRoleBindingKeys.value.has(currentKey)) {
+      return;
+    }
+  }
+  const nextAvailableScope = candidates.find(
+    (item) =>
+      !selectedUserRoleBindingKeys.value.has(
+        roleBindingKeyFromParts(role.id, role.scope_type, item.id),
+      ),
+  );
+  roleBindingForm.scopeId = nextAvailableScope?.id ?? candidates[0]?.id ?? "";
+}
+
+function selectNextAvailableRoleBindingTarget(): void {
+  const currentRoleId = selectedRoleForBinding.value?.id;
+  const candidate =
+    availableRoleBindingCandidates.value.find((item) => item.role.id === currentRoleId) ??
+    availableRoleBindingCandidates.value[0];
+  roleBindingForm.confirmedHighRisk = false;
+  if (!candidate) {
+    roleBindingForm.roleId = "";
+    roleBindingForm.scopeId = "";
+    return;
+  }
+  roleBindingForm.roleId = candidate.role.id;
+  roleBindingForm.scopeId = candidate.scopeId ?? "";
+}
+
 async function submitCreateDepartment(): Promise<void> {
   const accessToken = await ensureAccessToken();
   if (!accessToken) {
     return;
   }
 
-  userAdminBusy.creatingDepartment = true;
+  departmentAdminBusy.creating = true;
   try {
     const response = await createAdminDepartment(
       {
@@ -1147,20 +1570,148 @@ async function submitCreateDepartment(): Promise<void> {
     );
     departmentCreateForm.code = "";
     departmentCreateForm.name = "";
-    userCreateForm.departmentIds = [response.data.id];
-    await refreshUserRoleAdminState();
-    userAdminFeedback.value = {
+    departmentSearchForm.status = "";
+    selectedDepartmentId.value = response.data.id;
+    upsertDepartment(response.data);
+    syncDepartmentEditForm();
+    ensureDefaultCreateDepartmentSelection();
+    await refreshDepartmentAdminState();
+    departmentAdminFeedback.value = {
       tone: "success",
-      message: "部门已创建，并已选为新用户归属部门。",
+      message: "部门已创建。",
     };
+    closeDepartmentModal();
   } catch (error) {
-    userAdminFeedback.value = {
+    departmentAdminFeedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "创建部门失败"),
     };
   } finally {
-    userAdminBusy.creatingDepartment = false;
+    departmentAdminBusy.creating = false;
   }
+}
+
+async function selectDepartment(departmentId: string): Promise<void> {
+  selectedDepartmentId.value = departmentId;
+  departmentDangerForm.confirmedDelete = false;
+  syncDepartmentEditForm();
+
+  const accessToken = await ensureAccessToken();
+  if (!accessToken || !canReadDepartments.value) {
+    return;
+  }
+  try {
+    const response = await getAdminDepartment(departmentId, accessToken);
+    upsertDepartment(response.data);
+    syncDepartmentEditForm();
+  } catch (error) {
+    departmentAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取部门详情失败"),
+    };
+  }
+}
+
+async function submitPatchDepartment(): Promise<void> {
+  const department = selectedDepartment.value;
+  if (!department) {
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  departmentAdminBusy.updating = true;
+  try {
+    const response = await patchAdminDepartment(
+      department.id,
+      {
+        name: departmentEditForm.name.trim(),
+        status: departmentEditForm.status,
+      },
+      accessToken,
+    );
+    upsertDepartment(response.data);
+    syncDepartmentEditForm();
+    await refreshDepartmentAdminState();
+    departmentAdminFeedback.value = {
+      tone: "success",
+      message: "部门已更新。",
+    };
+    closeDepartmentModal();
+  } catch (error) {
+    departmentAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "更新部门失败"),
+    };
+  } finally {
+    departmentAdminBusy.updating = false;
+  }
+}
+
+async function deleteSelectedDepartment(): Promise<void> {
+  const department = selectedDepartment.value;
+  if (!department || !departmentDangerForm.confirmedDelete) {
+    departmentAdminFeedback.value = {
+      tone: "error",
+      message: "删除部门前必须勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  departmentAdminBusy.deleting = true;
+  try {
+    await deleteAdminDepartment(department.id, accessToken, true);
+    selectedDepartmentId.value = "";
+    departmentDangerForm.confirmedDelete = false;
+    await refreshDepartmentAdminState();
+    ensureDefaultCreateDepartmentSelection();
+    departmentAdminFeedback.value = {
+      tone: "success",
+      message: "部门已删除。",
+    };
+    closeDepartmentModal();
+  } catch (error) {
+    departmentAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "删除部门失败"),
+    };
+  } finally {
+    departmentAdminBusy.deleting = false;
+  }
+}
+
+function syncDepartmentEditForm(): void {
+  const department = selectedDepartment.value;
+  departmentEditForm.name = department?.name ?? "";
+  departmentEditForm.status =
+    department?.status === "disabled" || department?.status === "active"
+      ? department.status
+      : "active";
+}
+
+function syncUserEditForm(): void {
+  const user = selectedAdminUser.value;
+  userEditForm.name = user?.name ?? "";
+  userEditForm.status =
+    user?.status === "disabled" || user?.status === "locked" || user?.status === "active"
+      ? user.status
+      : "active";
+  userEditForm.confirmedDisableAdmin = false;
+}
+
+function upsertDepartment(department: AdminDepartmentData): void {
+  const index = adminDepartments.value.findIndex((item) => item.id === department.id);
+  if (index >= 0) {
+    adminDepartments.value[index] = department;
+    return;
+  }
+  adminDepartments.value = [department, ...adminDepartments.value];
 }
 
 async function submitCreateAdminUser(): Promise<void> {
@@ -1211,6 +1762,7 @@ async function submitCreateAdminUser(): Promise<void> {
       tone: "success",
       message: "用户已创建。",
     };
+    closeUserModal();
   } catch (error) {
     userAdminFeedback.value = {
       tone: "error",
@@ -1221,9 +1773,27 @@ async function submitCreateAdminUser(): Promise<void> {
   }
 }
 
-async function disableSelectedAdminUser(): Promise<void> {
+async function submitPatchSelectedAdminUser(): Promise<void> {
   const user = selectedAdminUser.value;
   if (!user) {
+    return;
+  }
+  if (!userEditForm.name.trim()) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "显示名不能为空。",
+    };
+    return;
+  }
+  if (
+    userEditForm.status === "disabled" &&
+    selectedAdminUserIsSystemAdmin.value &&
+    !userEditForm.confirmedDisableAdmin
+  ) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "禁用系统管理员前必须勾选确认项。",
+    };
     return;
   }
   const accessToken = await ensureAccessToken();
@@ -1233,49 +1803,30 @@ async function disableSelectedAdminUser(): Promise<void> {
 
   userAdminBusy.updating = true;
   try {
+    const shouldUnlock = user.status === "locked" && userEditForm.status === "active";
+    if (shouldUnlock) {
+      await unlockAdminUser(user.id, accessToken);
+    }
     await patchAdminUser(
       user.id,
-      { status: "disabled" },
+      {
+        name: userEditForm.name.trim(),
+        status: shouldUnlock ? undefined : userEditForm.status,
+      },
       accessToken,
-      userDangerForm.confirmedDisableAdmin,
+      userEditForm.confirmedDisableAdmin,
     );
     await refreshUserRoleAdminState();
+    syncUserEditForm();
     userAdminFeedback.value = {
       tone: "success",
-      message: "用户已禁用，相关会话已由后端吊销。",
+      message: "用户信息已更新。",
     };
+    closeUserModal();
   } catch (error) {
     userAdminFeedback.value = {
       tone: "error",
-      message: normalizeErrorMessage(error, "禁用用户失败"),
-    };
-  } finally {
-    userAdminBusy.updating = false;
-  }
-}
-
-async function unlockSelectedAdminUser(): Promise<void> {
-  const user = selectedAdminUser.value;
-  if (!user) {
-    return;
-  }
-  const accessToken = await ensureAccessToken();
-  if (!accessToken) {
-    return;
-  }
-
-  userAdminBusy.updating = true;
-  try {
-    await unlockAdminUser(user.id, accessToken);
-    await refreshUserRoleAdminState();
-    userAdminFeedback.value = {
-      tone: "success",
-      message: "用户已解锁。",
-    };
-  } catch (error) {
-    userAdminFeedback.value = {
-      tone: "error",
-      message: normalizeErrorMessage(error, "解锁用户失败"),
+      message: normalizeErrorMessage(error, "更新用户失败"),
     };
   } finally {
     userAdminBusy.updating = false;
@@ -1306,6 +1857,7 @@ async function deleteSelectedAdminUser(): Promise<void> {
       tone: "success",
       message: "用户已删除。",
     };
+    closeUserModal();
   } catch (error) {
     userAdminFeedback.value = {
       tone: "error",
@@ -1313,6 +1865,59 @@ async function deleteSelectedAdminUser(): Promise<void> {
     };
   } finally {
     userAdminBusy.updating = false;
+  }
+}
+
+async function saveSelectedUserDepartments(): Promise<void> {
+  const user = selectedAdminUser.value;
+  if (!user) {
+    return;
+  }
+  if (userDepartmentForm.departmentIds.length === 0) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "请至少选择一个用户归属部门。",
+    };
+    return;
+  }
+  if (
+    selectedUserPrimaryDepartmentWillChange.value &&
+    !userDepartmentForm.confirmedReplacePrimary
+  ) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: "更换主部门前必须勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  userAdminBusy.updatingDepartments = true;
+  try {
+    const response = await replaceAdminUserDepartments(
+      user.id,
+      { department_ids: userDepartmentForm.departmentIds },
+      accessToken,
+      userDepartmentForm.confirmedReplacePrimary,
+    );
+    selectedUserDepartments.value = response.data;
+    updateSelectedAdminUserDepartments(response.data);
+    syncSelectedUserDepartmentForm();
+    userAdminFeedback.value = {
+      tone: "success",
+      message: "用户部门归属已更新。",
+    };
+    closeUserModal();
+  } catch (error) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "更新用户部门归属失败"),
+    };
+  } finally {
+    userAdminBusy.updatingDepartments = false;
   }
 }
 
@@ -1351,6 +1956,7 @@ async function submitPasswordReset(): Promise<void> {
       tone: "success",
       message: "密码已重置，相关会话已由后端吊销。",
     };
+    closeUserModal();
   } catch (error) {
     userAdminFeedback.value = {
       tone: "error",
@@ -1374,6 +1980,13 @@ async function addSelectedUserRoleBinding(): Promise<void> {
     };
     return;
   }
+  if (role.scope_type !== "enterprise" && !roleBindingForm.scopeId) {
+    userAdminFeedback.value = {
+      tone: "error",
+      message: role.scope_type === "department" ? "请选择部门作用域。" : "请选择知识库作用域。",
+    };
+    return;
+  }
   const accessToken = await ensureAccessToken();
   if (!accessToken) {
     return;
@@ -1383,17 +1996,24 @@ async function addSelectedUserRoleBinding(): Promise<void> {
   try {
     const response = await createAdminUserRoleBindings(
       user.id,
-      [{ role_id: role.id, scope_type: role.scope_type }],
+      [
+        {
+          role_id: role.id,
+          scope_type: role.scope_type,
+          scope_id: role.scope_type === "enterprise" ? null : roleBindingForm.scopeId,
+        },
+      ],
       accessToken,
       roleBindingForm.confirmedHighRisk,
     );
     selectedUserRoleBindings.value = response.data;
     roleBindingForm.confirmedHighRisk = false;
+    await refreshUserRoleAdminState();
+    selectNextAvailableRoleBindingTarget();
     userAdminFeedback.value = {
       tone: "success",
       message: "角色已授予。",
     };
-    await refreshUserRoleAdminState();
   } catch (error) {
     userAdminFeedback.value = {
       tone: "error",
@@ -1429,8 +2049,12 @@ async function revokeSelectedUserRoleBinding(binding: AdminRoleBindingData): Pro
       accessToken,
       roleBindingForm.confirmedRemoveAdmin,
     );
-    await refreshSelectedUserRoleBindings(accessToken);
     await refreshUserRoleAdminState();
+    roleBindingForm.roleId = binding.role_id;
+    roleBindingForm.scopeId = binding.scope_id ?? "";
+    roleBindingForm.confirmedHighRisk = false;
+    roleBindingForm.confirmedRemoveAdmin = false;
+    syncRoleBindingScopeDefault();
     userAdminFeedback.value = {
       tone: "success",
       message: "角色绑定已撤销。",
@@ -1454,6 +2078,24 @@ function resetCreateUserForm(): void {
   userCreateForm.roleIds = [];
   userCreateForm.confirmedHighRisk = false;
   ensureDefaultCreateDepartmentSelection();
+}
+
+function syncSelectedUserDepartmentForm(): void {
+  userDepartmentForm.departmentIds = selectedUserDepartmentsForDisplay.value.map(
+    (department) => department.id,
+  );
+  userDepartmentForm.confirmedReplacePrimary = false;
+}
+
+function updateSelectedAdminUserDepartments(departments: AdminDepartmentData[]): void {
+  const index = adminUsers.value.findIndex((user) => user.id === selectedAdminUserId.value);
+  if (index < 0) {
+    return;
+  }
+  adminUsers.value[index] = {
+    ...adminUsers.value[index],
+    departments,
+  };
 }
 
 function selectConfigItem(key: string): void {
@@ -1675,6 +2317,8 @@ function clearAuthSession(): void {
   configVersions.value = [];
   auditLogs.value = [];
   adminUsers.value = [];
+  adminDepartments.value = [];
+  adminKnowledgeBases.value = [];
   adminRoles.value = [];
   selectedAdminUserId.value = "";
   selectedUserRoleBindings.value = [];
@@ -1912,6 +2556,36 @@ function formatDepartmentList(
     .map((department) => formatDepartmentLabel(department))
     .filter((label) => label !== "-");
   return labels.length ? labels.join(" / ") : "-";
+}
+
+function formatKnowledgeBaseLabel(
+  knowledgeBase: { name?: string | null; id?: string | null } | null | undefined,
+): string {
+  return knowledgeBase?.name?.trim() || knowledgeBase?.id?.trim() || "-";
+}
+
+function formatRoleBindingScope(binding: AdminRoleBindingData): string {
+  if (binding.scope_type === "enterprise") {
+    return "全企业";
+  }
+  if (binding.scope_type === "department") {
+    const department = adminDepartments.value.find((item) => item.id === binding.scope_id);
+    return `部门：${formatDepartmentLabel(department ?? { code: binding.scope_id, name: "" })}`;
+  }
+  const knowledgeBase = adminKnowledgeBases.value.find((item) => item.id === binding.scope_id);
+  return `知识库：${formatKnowledgeBaseLabel(knowledgeBase ?? { id: binding.scope_id, name: "" })}`;
+}
+
+function roleBindingKey(binding: AdminRoleBindingData): string {
+  return roleBindingKeyFromParts(binding.role_id, binding.scope_type, binding.scope_id);
+}
+
+function roleBindingKeyFromParts(
+  roleId: string,
+  scopeType: "enterprise" | "department" | "knowledge_base",
+  scopeId: string | null,
+): string {
+  return `${roleId}:${scopeType}:${scopeType === "enterprise" ? "enterprise" : scopeId ?? ""}`;
 }
 
 function toneClass(tone: Tone): string {
@@ -2368,11 +3042,18 @@ function isComposeDemoProvider(value: string): boolean {
           配置管理
         </button>
         <button
+          :class="['admin-nav__item', { 'admin-nav__item--active': selectedAdminTab === 'departments' }]"
+          type="button"
+          @click="switchAdminTab('departments')"
+        >
+          部门管理
+        </button>
+        <button
           :class="['admin-nav__item', { 'admin-nav__item--active': selectedAdminTab === 'users' }]"
           type="button"
           @click="switchAdminTab('users')"
         >
-          用户与角色
+          用户管理
         </button>
       </nav>
     </aside>
@@ -2395,7 +3076,7 @@ function isComposeDemoProvider(value: string): boolean {
       </header>
 
       <section class="dashboard-grid">
-        <section class="panel">
+        <section v-if="selectedAdminTab === 'config'" class="panel">
           <header class="panel__header">
             <h3>当前用户</h3>
             <span :class="toneClass(authenticated ? 'success' : 'neutral')">
@@ -2422,16 +3103,122 @@ function isComposeDemoProvider(value: string): boolean {
           </dl>
         </section>
 
+        <section v-if="selectedAdminTab === 'departments'" class="panel panel--wide">
+          <header class="panel__header">
+            <div>
+              <h3>部门管理</h3>
+              <p :class="toneClass(canLoadDepartmentAdmin ? 'success' : 'warning')">
+                {{
+                  canManageDepartments
+                    ? "可创建、修改和删除部门"
+                    : canReadDepartments
+                      ? "可读取部门"
+                      : "缺少组织权限"
+                }}
+              </p>
+            </div>
+            <div class="panel__actions">
+              <button
+                class="button button--secondary"
+                type="button"
+                @click="refreshDepartmentAdminState"
+                :disabled="departmentAdminBusy.loading || !canLoadDepartmentAdmin"
+              >
+                {{ departmentAdminBusy.loading ? "刷新中" : "刷新部门" }}
+              </button>
+              <button
+                class="button"
+                type="button"
+                @click="openCreateDepartmentModal"
+                :disabled="!canManageDepartments"
+              >
+                新增部门
+              </button>
+            </div>
+          </header>
+
+          <div class="admin-list-panel">
+            <div
+              v-if="departmentAdminFeedback"
+              :class="['feedback feedback--wide', `feedback--${departmentAdminFeedback.tone}`]"
+            >
+              {{ departmentAdminFeedback.message }}
+            </div>
+
+            <form class="list-filter" @submit.prevent="refreshDepartmentAdminState">
+              <label class="field">
+                <span class="field__label">关键词</span>
+                <p class="field__hint">按部门编码或部门名称过滤。</p>
+                <input v-model.trim="departmentSearchForm.keyword" class="control" type="text" />
+              </label>
+              <label class="field">
+                <span class="field__label">部门状态</span>
+                <p class="field__hint">留空时显示全部未删除部门。</p>
+                <select v-model="departmentSearchForm.status" class="control">
+                  <option value="">全部</option>
+                  <option value="active">active</option>
+                  <option value="disabled">disabled</option>
+                </select>
+              </label>
+              <button class="button button--secondary" type="submit" :disabled="departmentAdminBusy.loading">
+                查询
+              </button>
+            </form>
+
+            <div v-if="adminDepartments.length" class="entity-table entity-table--departments">
+              <div class="entity-table__row entity-table__row--header">
+                <span>部门</span>
+                <span>编码</span>
+                <span>状态</span>
+                <span>默认部门</span>
+                <span>操作</span>
+              </div>
+              <article v-for="department in adminDepartments" :key="department.id" class="entity-table__row">
+                <div class="entity-main">
+                  <strong>{{ department.name }}</strong>
+                  <span>{{ department.is_default ? "默认组织部门" : "普通部门" }}</span>
+                </div>
+                <div class="entity-cell">{{ department.code }}</div>
+                <div class="entity-cell">
+                  <span :class="toneClass(department.status === 'active' ? 'success' : 'neutral')">
+                    {{ department.status }}
+                  </span>
+                </div>
+                <div class="entity-cell">{{ department.is_default ? "是" : "否" }}</div>
+                <div class="row-actions">
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="openEditDepartmentModal(department)"
+                    :disabled="!canManageDepartments"
+                  >
+                    编辑
+                  </button>
+                  <button
+                    class="button button--danger button--small"
+                    type="button"
+                    @click="openDeleteDepartmentModal(department)"
+                    :disabled="!canManageDepartments || department.is_default"
+                  >
+                    删除
+                  </button>
+                </div>
+              </article>
+            </div>
+            <p v-else class="empty-state empty-state--plain">当前尚未读取到部门。</p>
+          </div>
+        </section>
+
         <section v-if="selectedAdminTab === 'users'" class="panel panel--wide">
           <header class="panel__header">
             <div>
-              <h3>用户与角色管理</h3>
+              <h3>用户管理</h3>
               <p :class="toneClass(canLoadUserAdmin ? 'success' : 'warning')">
                 {{
                   canManageUsers && canManageRoles
-                    ? "可管理用户与角色"
+                    ? "可管理用户、部门归属和角色绑定"
                     : canReadUsers || canReadRoles
-                      ? "可读取用户与角色"
+                      ? "可读取用户信息"
                       : "缺少用户或角色权限"
                 }}
               </p>
@@ -2443,303 +3230,115 @@ function isComposeDemoProvider(value: string): boolean {
                 @click="refreshUserRoleAdminState"
                 :disabled="userAdminBusy.loading || !canLoadUserAdmin"
               >
-                {{ userAdminBusy.loading ? "刷新中" : "刷新用户与角色" }}
+                {{ userAdminBusy.loading ? "刷新中" : "刷新用户" }}
+              </button>
+              <button class="button" type="button" @click="openCreateUserModal" :disabled="!canManageUsers">
+                新增用户
               </button>
             </div>
           </header>
 
-          <div class="user-admin-console">
-            <aside class="user-list" aria-label="用户列表">
-              <form class="user-filter" @submit.prevent="refreshUserRoleAdminState">
-                <label class="field field--full">
-                  <span class="field__label">关键词</span>
-                  <p class="field__hint">按登录名或显示名过滤用户。</p>
-                  <input v-model.trim="userSearchForm.keyword" class="control" type="text" />
-                </label>
-                <label class="field field--full">
-                  <span class="field__label">账号状态</span>
-                  <p class="field__hint">留空时显示全部未删除用户。</p>
-                  <select v-model="userSearchForm.status" class="control">
-                    <option value="">全部</option>
-                    <option value="active">active</option>
-                    <option value="disabled">disabled</option>
-                    <option value="locked">locked</option>
-                  </select>
-                </label>
-                <button class="button button--secondary button--small" type="submit">
-                  查询
-                </button>
-              </form>
+          <div class="admin-list-panel">
+            <div v-if="userAdminFeedback" :class="['feedback feedback--wide', `feedback--${userAdminFeedback.tone}`]">
+              {{ userAdminFeedback.message }}
+            </div>
 
-              <button
-                v-for="user in adminUsers"
-                :key="user.id"
-                :class="['user-list__item', { 'user-list__item--active': user.id === selectedAdminUserId }]"
-                type="button"
-                @click="selectAdminUser(user.id)"
-              >
-                <strong>{{ user.name || user.username }}</strong>
-                <span>{{ user.username }} / {{ user.status }}</span>
+            <form class="list-filter" @submit.prevent="refreshUserRoleAdminState">
+              <label class="field">
+                <span class="field__label">关键词</span>
+                <p class="field__hint">按登录名或显示名过滤用户。</p>
+                <input v-model.trim="userSearchForm.keyword" class="control" type="text" />
+              </label>
+              <label class="field">
+                <span class="field__label">账号状态</span>
+                <p class="field__hint">留空时显示全部未删除用户。</p>
+                <select v-model="userSearchForm.status" class="control">
+                  <option value="">全部</option>
+                  <option value="active">active</option>
+                  <option value="disabled">disabled</option>
+                  <option value="locked">locked</option>
+                </select>
+              </label>
+              <button class="button button--secondary" type="submit" :disabled="userAdminBusy.loading">
+                查询
               </button>
-              <p v-if="!adminUsers.length" class="empty-state">当前尚未读取到用户。</p>
-            </aside>
+            </form>
 
-            <section class="user-detail">
-              <div v-if="userAdminFeedback" :class="['feedback', `feedback--${userAdminFeedback.tone}`]">
-                {{ userAdminFeedback.message }}
+            <div v-if="adminUsers.length" class="entity-table entity-table--users">
+              <div class="entity-table__row entity-table__row--header">
+                <span>用户</span>
+                <span>状态</span>
+                <span>部门</span>
+                <span>角色</span>
+                <span>操作</span>
               </div>
-
-              <section class="user-admin-section">
-                <header class="subsection-header">
-                  <h4>创建部门</h4>
-                  <span :class="toneClass(canManageDepartments ? 'success' : 'warning')">
-                    {{ canManageDepartments ? "可创建" : "缺少 org:manage" }}
-                  </span>
-                </header>
-                <form class="form-grid form-grid--compact" @submit.prevent="submitCreateDepartment">
-                  <label class="field">
-                    <span class="field__label">部门编码</span>
-                    <p class="field__hint">企业内唯一，建议使用字母、数字、下划线或连字符。</p>
-                    <input v-model.trim="departmentCreateForm.code" class="control" type="text" />
-                  </label>
-                  <label class="field">
-                    <span class="field__label">部门名称</span>
-                    <p class="field__hint">用于用户归属、权限范围和管理后台展示。</p>
-                    <input v-model.trim="departmentCreateForm.name" class="control" type="text" />
-                  </label>
-                  <button class="button" type="submit" :disabled="!canCreateDepartment">
-                    {{ userAdminBusy.creatingDepartment ? "创建中..." : "创建部门" }}
-                  </button>
-                </form>
-              </section>
-
-              <section class="user-admin-section">
-                <header class="subsection-header">
-                  <h4>创建用户</h4>
-                  <span :class="toneClass(canManageUsers ? 'success' : 'warning')">
-                    {{ canManageUsers ? "可创建" : "缺少 user:manage" }}
-                  </span>
-                </header>
-                <form class="form-grid form-grid--compact" @submit.prevent="submitCreateAdminUser">
-                  <label class="field">
-                    <span class="field__label">登录名</span>
-                    <p class="field__hint">用户的唯一登录标识。</p>
-                    <input v-model.trim="userCreateForm.username" class="control" type="text" />
-                  </label>
-                  <label class="field">
-                    <span class="field__label">显示名</span>
-                    <p class="field__hint">用于页面展示和审计摘要。</p>
-                    <input v-model.trim="userCreateForm.name" class="control" type="text" />
-                  </label>
-                  <label class="field">
-                    <span class="field__label">初始密码</span>
-                    <p class="field__hint">创建后将强制用户首次登录修改密码。</p>
-                    <input v-model="userCreateForm.initialPassword" class="control" type="password" />
-                  </label>
-                  <label class="field">
-                    <span class="field__label">确认密码</span>
-                    <p class="field__hint">两次密码必须完全一致。</p>
-                    <input v-model="userCreateForm.passwordConfirm" class="control" type="password" />
-                  </label>
-                  <div class="option-picker">
-                    <span class="field__label">归属部门</span>
-                    <p class="field__hint">至少选择一个部门；第一个选中的部门会作为用户主部门。</p>
-                    <div class="option-picker__grid">
-                      <label
-                        v-for="department in activeDepartments"
-                        :key="department.id"
-                        class="option-card"
-                      >
-                        <input
-                          type="checkbox"
-                          :checked="userCreateForm.departmentIds.includes(department.id)"
-                          @change="toggleCreateDepartment(department.id, ($event.target as HTMLInputElement).checked)"
-                        />
-                        <span>{{ formatDepartmentLabel(department) }}</span>
-                      </label>
-                    </div>
-                    <p v-if="!activeDepartments.length" class="empty-state">请先创建可用部门。</p>
-                  </div>
-                  <div class="role-picker">
-                    <span class="field__label">初始角色</span>
-	                    <p class="field__hint">未选择时后端会尝试授予普通员工默认角色。</p>
-                    <div class="option-picker__grid">
-                      <label v-for="role in assignableRoles" :key="role.id" class="option-card">
-                        <input
-                          type="checkbox"
-                          :checked="userCreateForm.roleIds.includes(role.id)"
-                          @change="toggleCreateRole(role.id, ($event.target as HTMLInputElement).checked)"
-                        />
-	                        <span>{{ formatRoleLabel(role) }}</span>
-                      </label>
-                    </div>
-                  </div>
-                  <label class="confirm confirm--inline">
-                    <input v-model="userCreateForm.confirmedHighRisk" type="checkbox" />
-                    <span>确认授予高风险角色</span>
-                  </label>
-                  <button class="button" type="submit" :disabled="!canCreateAdminUser">
-                    {{ userAdminBusy.creating ? "创建中..." : "创建用户" }}
-                  </button>
-                </form>
-              </section>
-
-              <section class="user-admin-section">
-                <header class="subsection-header">
-                  <h4>当前选中用户</h4>
-                  <span :class="toneClass(selectedAdminUser ? 'success' : 'neutral')">
-                    {{ selectedAdminUser ? selectedAdminUser.status : "未选择" }}
-                  </span>
-                </header>
-                <dl v-if="selectedAdminUser" class="summary">
-                  <div class="summary__row">
-                    <dt>登录名</dt>
-                    <dd>{{ selectedAdminUser.username }}</dd>
-                  </div>
-                  <div class="summary__row">
-                    <dt>显示名</dt>
-                    <dd>{{ selectedAdminUser.name }}</dd>
-                  </div>
-                  <div class="summary__row">
-                    <dt>部门</dt>
-                    <dd>{{ formatDepartmentList(selectedAdminUser.departments) }}</dd>
-                  </div>
-                  <div class="summary__row">
-                    <dt>角色</dt>
-	                    <dd>{{ formatRoleList(selectedAdminUser.roles) }}</dd>
-                  </div>
-                </dl>
-                <p v-else class="empty-state">请选择一个用户查看详情。</p>
-              </section>
-
-              <section v-if="selectedAdminUser" class="user-admin-section">
-                <header class="subsection-header">
-                  <h4>密码与账号状态</h4>
-                  <span :class="toneClass(canManageUsers ? 'success' : 'warning')">
-                    {{ canManageUsers ? "受控写入" : "只读" }}
-                  </span>
-                </header>
-                <form class="form-grid form-grid--compact" @submit.prevent="submitPasswordReset">
-                  <label class="field">
-                    <span class="field__label">新密码</span>
-                    <p class="field__hint">必须满足当前 active_config 中的密码策略。</p>
-                    <input v-model="passwordResetForm.newPassword" class="control" type="password" />
-                  </label>
-                  <label class="field">
-                    <span class="field__label">确认新密码</span>
-                    <p class="field__hint">用于避免误输入。</p>
-                    <input v-model="passwordResetForm.passwordConfirm" class="control" type="password" />
-                  </label>
-                  <label class="confirm confirm--inline">
-                    <input v-model="passwordResetForm.forceChangePassword" type="checkbox" />
-                    <span>强制下次登录修改密码</span>
-                  </label>
-                  <label class="confirm confirm--inline">
-                    <input v-model="passwordResetForm.confirmed" type="checkbox" />
-                    <span>确认重置密码并吊销会话</span>
-                  </label>
-                  <button
-                    class="button button--secondary"
-                    type="submit"
-                    :disabled="!canResetSelectedUserPassword"
-                  >
-                    {{ userAdminBusy.resettingPassword ? "重置中..." : "重置密码" }}
-                  </button>
-                </form>
-                <div class="danger-actions">
-                  <label class="confirm confirm--inline">
-                    <input v-model="userDangerForm.confirmedDisableAdmin" type="checkbox" />
-                    <span>确认可能影响管理员权限</span>
-                  </label>
-                  <button
-                    class="button button--secondary"
-                    type="button"
-                    @click="disableSelectedAdminUser"
-                    :disabled="!canManageUsers || userAdminBusy.updating"
-                  >
-                    禁用用户
-                  </button>
-                  <button
-                    class="button button--secondary"
-                    type="button"
-                    @click="unlockSelectedAdminUser"
-                    :disabled="!canManageUsers || userAdminBusy.updating"
-                  >
-                    解锁用户
-                  </button>
-                  <label class="confirm confirm--inline">
-                    <input v-model="userDangerForm.confirmedDelete" type="checkbox" />
-                    <span>确认删除用户</span>
-                  </label>
-                  <button
-                    class="button button--danger"
-                    type="button"
-                    @click="deleteSelectedAdminUser"
-                    :disabled="!canManageUsers || userAdminBusy.updating || !userDangerForm.confirmedDelete"
-                  >
-                    删除用户
-                  </button>
+              <article v-for="user in adminUsers" :key="user.id" class="entity-table__row">
+                <div class="entity-main">
+                  <strong>{{ user.name || user.username }}</strong>
+                  <span>{{ user.username }}</span>
                 </div>
-              </section>
-            </section>
-
-            <aside class="role-admin" aria-label="角色绑定">
-              <h4 class="config-versions__title">角色绑定</h4>
-              <div v-if="selectedUserRoleBindings.length" class="role-binding-list">
-                <article v-for="binding in selectedUserRoleBindings" :key="binding.id" class="role-binding-row">
-                  <div>
-	                    <strong>{{ formatRoleCodeLabel(binding.role_code, binding.role_name ?? binding.role_id) }}</strong>
-                    <span>{{ binding.scope_type }}</span>
-                  </div>
+                <div class="entity-cell">
+                  <span :class="toneClass(user.status === 'active' ? 'success' : user.status === 'locked' ? 'warning' : 'neutral')">
+                    {{ user.status }}
+                  </span>
+                </div>
+                <div class="badge-list">
+                  <span v-for="department in user.departments" :key="department.id" class="badge">
+                    {{ formatDepartmentLabel(department) }}
+                  </span>
+                  <span v-if="!user.departments.length" class="empty-inline">-</span>
+                </div>
+                <div class="badge-list">
+                  <span v-for="role in user.roles" :key="role.id" class="badge">
+                    {{ formatRoleLabel(role) }}
+                  </span>
+                  <span v-if="!user.roles.length" class="empty-inline">-</span>
+                </div>
+                <div class="row-actions row-actions--dense">
                   <button
                     class="button button--secondary button--small"
                     type="button"
-                    @click="revokeSelectedUserRoleBinding(binding)"
-                    :disabled="!canManageRoles || userAdminBusy.updatingRoles"
+                    @click="openEditUserModal(user)"
+                    :disabled="!canManageUsers"
                   >
-                    撤销
+                    编辑
                   </button>
-                </article>
-              </div>
-              <p v-else class="empty-state">当前用户尚无可展示的角色绑定。</p>
-
-              <label class="field field--full">
-                <span class="field__label">授予角色</span>
-                <p class="field__hint">P0 页面只授予企业级角色，部门级和知识库级角色后续在对应资源页面绑定。</p>
-                <select v-model="roleBindingForm.roleId" class="control" :disabled="!canManageRoles">
-                  <option value="">请选择角色</option>
-                  <option v-for="role in assignableRoles" :key="role.id" :value="role.id">
-	                    {{ formatRoleLabel(role) }}
-                  </option>
-                </select>
-              </label>
-              <label class="confirm confirm--inline">
-                <input v-model="roleBindingForm.confirmedHighRisk" type="checkbox" />
-                <span>确认授予高风险角色</span>
-              </label>
-              <label class="confirm confirm--inline">
-                <input v-model="roleBindingForm.confirmedRemoveAdmin" type="checkbox" />
-                <span>确认撤销系统管理员角色</span>
-              </label>
-              <button
-                class="button"
-                type="button"
-                @click="addSelectedUserRoleBinding"
-                :disabled="!canAddSelectedUserRole"
-              >
-                {{ userAdminBusy.updatingRoles ? "处理中..." : "授予角色" }}
-              </button>
-
-              <h4 class="config-versions__title">角色清单</h4>
-              <div v-if="adminRoles.length" class="role-list">
-                <article v-for="role in adminRoles" :key="role.id" class="role-row">
-	                  <strong>{{ formatRoleLabel(role) }}</strong>
-                  <span>{{ role.scope_type }} / {{ role.status }}</span>
-                  <p>{{ role.scopes.join(" / ") || "-" }}</p>
-                </article>
-              </div>
-              <p v-else class="empty-state">当前尚未读取到角色。</p>
-            </aside>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="openUserDepartmentsModal(user)"
+                    :disabled="!canReadDepartments"
+                  >
+                    部门
+                  </button>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="openUserRolesModal(user)"
+                    :disabled="!canReadRoles"
+                  >
+                    角色
+                  </button>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="openPasswordResetModal(user)"
+                    :disabled="!canManageUsers"
+                  >
+                    密码
+                  </button>
+                  <button
+                    class="button button--danger button--small"
+                    type="button"
+                    @click="openDeleteUserModal(user)"
+                    :disabled="!canManageUsers"
+                  >
+                    删除
+                  </button>
+                </div>
+              </article>
+            </div>
+            <p v-else class="empty-state empty-state--plain">当前尚未读取到用户。</p>
           </div>
         </section>
 
@@ -2901,6 +3500,547 @@ function isComposeDemoProvider(value: string): boolean {
           </div>
         </section>
       </section>
+
+      <div
+        v-if="departmentModalMode"
+        class="modal-backdrop"
+        role="presentation"
+        @click.self="closeDepartmentModal"
+      >
+        <section class="modal" role="dialog" aria-modal="true" aria-labelledby="department-modal-title">
+          <header class="modal__header">
+            <div>
+              <p class="eyebrow">部门管理</p>
+              <h3 id="department-modal-title">
+                {{
+                  departmentModalMode === "create"
+                    ? "新增部门"
+                    : departmentModalMode === "edit"
+                      ? "编辑部门"
+                      : "删除部门"
+                }}
+              </h3>
+            </div>
+            <button class="button button--secondary button--small" type="button" @click="closeDepartmentModal">
+              关闭
+            </button>
+          </header>
+
+          <form v-if="departmentModalMode === 'create'" @submit.prevent="submitCreateDepartment">
+            <div class="modal__body">
+              <div
+                v-if="departmentAdminFeedback"
+                :class="['feedback feedback--wide', `feedback--${departmentAdminFeedback.tone}`]"
+              >
+                {{ departmentAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">部门编码</span>
+                  <p class="field__hint">企业内唯一，建议使用字母、数字、下划线或连字符。</p>
+                  <input v-model.trim="departmentCreateForm.code" class="control" type="text" />
+                </label>
+                <label class="field">
+                  <span class="field__label">部门名称</span>
+                  <p class="field__hint">用于用户归属、权限范围和管理后台展示。</p>
+                  <input v-model.trim="departmentCreateForm.name" class="control" type="text" />
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeDepartmentModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canCreateDepartment">
+                {{ departmentAdminBusy.creating ? "创建中..." : "创建部门" }}
+              </button>
+            </footer>
+          </form>
+
+          <form v-else-if="departmentModalMode === 'edit' && selectedDepartment" @submit.prevent="submitPatchDepartment">
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>部门编码</dt>
+                  <dd>{{ selectedDepartment.code }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>默认部门</dt>
+                  <dd>{{ selectedDepartment.is_default ? "是" : "否" }}</dd>
+                </div>
+              </dl>
+              <div
+                v-if="departmentAdminFeedback"
+                :class="['feedback feedback--wide', `feedback--${departmentAdminFeedback.tone}`]"
+              >
+                {{ departmentAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">部门名称</span>
+                  <p class="field__hint">修改后会刷新组织版本和权限版本。</p>
+                  <input v-model.trim="departmentEditForm.name" class="control" type="text" />
+                </label>
+                <label class="field">
+                  <span class="field__label">部门状态</span>
+                  <p class="field__hint">默认部门不能禁用；禁用会影响用户权限上下文。</p>
+                  <select
+                    v-model="departmentEditForm.status"
+                    class="control"
+                    :disabled="selectedDepartment.is_default"
+                  >
+                    <option value="active">active</option>
+                    <option value="disabled">disabled</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeDepartmentModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canUpdateSelectedDepartment">
+                {{ departmentAdminBusy.updating ? "保存中..." : "保存修改" }}
+              </button>
+            </footer>
+          </form>
+
+          <div v-else-if="departmentModalMode === 'delete' && selectedDepartment">
+            <div class="modal__body">
+              <div class="danger-panel">
+                <h4>确认删除部门</h4>
+                <p>
+                  将删除部门 {{ formatDepartmentLabel(selectedDepartment) }}。默认部门不能删除，已有关联用户或权限范围时后端会阻止该操作。
+                </p>
+                <label class="confirm confirm--inline">
+                  <input
+                    v-model="departmentDangerForm.confirmedDelete"
+                    type="checkbox"
+                    :disabled="selectedDepartment.is_default"
+                  />
+                  <span>确认删除该部门</span>
+                </label>
+              </div>
+              <div
+                v-if="departmentAdminFeedback"
+                :class="['feedback feedback--wide', `feedback--${departmentAdminFeedback.tone}`]"
+              >
+                {{ departmentAdminFeedback.message }}
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeDepartmentModal">
+                取消
+              </button>
+              <button
+                class="button button--danger"
+                type="button"
+                @click="deleteSelectedDepartment"
+                :disabled="!canDeleteSelectedDepartment"
+              >
+                {{ departmentAdminBusy.deleting ? "删除中..." : "删除部门" }}
+              </button>
+            </footer>
+          </div>
+        </section>
+      </div>
+
+      <div v-if="userModalMode" class="modal-backdrop" role="presentation" @click.self="closeUserModal">
+        <section class="modal modal--wide" role="dialog" aria-modal="true" aria-labelledby="user-modal-title">
+          <header class="modal__header">
+            <div>
+              <p class="eyebrow">用户管理</p>
+              <h3 id="user-modal-title">
+                {{
+                  userModalMode === "create"
+                    ? "新增用户"
+                    : userModalMode === "edit"
+                      ? "编辑用户"
+                      : userModalMode === "departments"
+                        ? "维护部门归属"
+                        : userModalMode === "roles"
+                          ? "维护角色绑定"
+                          : userModalMode === "password"
+                            ? "重置密码"
+                            : "删除用户"
+                }}
+              </h3>
+            </div>
+            <button class="button button--secondary button--small" type="button" @click="closeUserModal">
+              关闭
+            </button>
+          </header>
+
+          <form v-if="userModalMode === 'create'" @submit.prevent="submitCreateAdminUser">
+            <div class="modal__body">
+              <div v-if="userAdminFeedback" :class="['feedback feedback--wide', `feedback--${userAdminFeedback.tone}`]">
+                {{ userAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">登录名</span>
+                  <p class="field__hint">用户的唯一登录标识。</p>
+                  <input v-model.trim="userCreateForm.username" class="control" type="text" />
+                </label>
+                <label class="field">
+                  <span class="field__label">显示名</span>
+                  <p class="field__hint">用于页面展示和审计摘要。</p>
+                  <input v-model.trim="userCreateForm.name" class="control" type="text" />
+                </label>
+                <label class="field">
+                  <span class="field__label">初始密码</span>
+                  <p class="field__hint">创建后将强制用户首次登录修改密码。</p>
+                  <input v-model="userCreateForm.initialPassword" class="control" type="password" />
+                </label>
+                <label class="field">
+                  <span class="field__label">确认密码</span>
+                  <p class="field__hint">两次密码必须完全一致。</p>
+                  <input v-model="userCreateForm.passwordConfirm" class="control" type="password" />
+                </label>
+                <div class="option-picker">
+                  <span class="field__label">归属部门</span>
+                  <p class="field__hint">至少选择一个部门；第一个选中的部门会作为用户主部门。</p>
+                  <div class="option-picker__grid">
+                    <label v-for="department in activeDepartments" :key="department.id" class="option-card">
+                      <input
+                        type="checkbox"
+                        :checked="userCreateForm.departmentIds.includes(department.id)"
+                        @change="toggleCreateDepartment(department.id, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>{{ formatDepartmentLabel(department) }}</span>
+                    </label>
+                  </div>
+                  <p v-if="!activeDepartments.length" class="empty-state empty-state--plain">请先创建可用部门。</p>
+                </div>
+                <div class="role-picker">
+                  <span class="field__label">初始角色</span>
+                  <p class="field__hint">未选择时后端会尝试授予普通员工默认角色。</p>
+                  <div class="option-picker__grid">
+                    <label v-for="role in initialAssignableRoles" :key="role.id" class="option-card">
+                      <input
+                        type="checkbox"
+                        :checked="userCreateForm.roleIds.includes(role.id)"
+                        @change="toggleCreateRole(role.id, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>{{ formatRoleLabel(role) }}</span>
+                    </label>
+                  </div>
+                </div>
+                <label class="confirm confirm--inline modal-confirm">
+                  <input v-model="userCreateForm.confirmedHighRisk" type="checkbox" />
+                  <span>确认授予高风险角色</span>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeUserModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canCreateAdminUser">
+                {{ userAdminBusy.creating ? "创建中..." : "创建用户" }}
+              </button>
+            </footer>
+          </form>
+
+          <form v-else-if="userModalMode === 'edit' && selectedAdminUser" @submit.prevent="submitPatchSelectedAdminUser">
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>登录名</dt>
+                  <dd>{{ selectedAdminUser.username }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>当前角色</dt>
+                  <dd>{{ formatRoleList(selectedAdminUser.roles) }}</dd>
+                </div>
+              </dl>
+              <div v-if="userAdminFeedback" :class="['feedback feedback--wide', `feedback--${userAdminFeedback.tone}`]">
+                {{ userAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">显示名</span>
+                  <p class="field__hint">用于页面展示、操作记录归属和审计事件摘要。</p>
+                  <input v-model.trim="userEditForm.name" class="control" type="text" />
+                </label>
+                <label class="field">
+                  <span class="field__label">账号状态</span>
+                  <p class="field__hint">disabled 会吊销用户会话；locked 状态通常由登录失败策略触发。</p>
+                  <select v-model="userEditForm.status" class="control">
+                    <option value="active">active</option>
+                    <option value="disabled">disabled</option>
+                    <option value="locked">locked</option>
+                  </select>
+                </label>
+                <label
+                  v-if="userEditForm.status === 'disabled' && selectedAdminUserIsSystemAdmin"
+                  class="confirm confirm--inline modal-confirm"
+                >
+                  <input v-model="userEditForm.confirmedDisableAdmin" type="checkbox" />
+                  <span>确认禁用系统管理员账号</span>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeUserModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canUpdateSelectedAdminUser">
+                {{ userAdminBusy.updating ? "保存中..." : "保存修改" }}
+              </button>
+            </footer>
+          </form>
+
+          <div v-else-if="userModalMode === 'departments' && selectedAdminUser">
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>用户</dt>
+                  <dd>{{ selectedAdminUser.name || selectedAdminUser.username }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>当前部门</dt>
+                  <dd>{{ formatDepartmentList(selectedUserDepartmentsForDisplay) }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>主部门</dt>
+                  <dd>
+                    {{
+                      formatDepartmentLabel(
+                        selectedUserDepartmentsForDisplay.find((department) => department.is_primary) ??
+                          selectedUserDepartmentsForDisplay[0],
+                      )
+                    }}
+                  </dd>
+                </div>
+              </dl>
+              <div v-if="userAdminFeedback" :class="['feedback feedback--wide', `feedback--${userAdminFeedback.tone}`]">
+                {{ userAdminFeedback.message }}
+              </div>
+              <div class="option-picker">
+                <span class="field__label">调整归属部门</span>
+                <p class="field__hint">至少选择一个部门；保存时第一个被选中的部门会作为主部门。</p>
+                <div class="option-picker__grid">
+                  <label v-for="department in activeDepartments" :key="department.id" class="option-card">
+                    <input
+                      type="checkbox"
+                      :checked="selectedUserDepartmentIds.has(department.id)"
+                      :disabled="!canManageDepartments || userAdminBusy.updatingDepartments"
+                      @change="toggleSelectedUserDepartment(department.id, ($event.target as HTMLInputElement).checked)"
+                    />
+                    <span>
+                      {{ formatDepartmentLabel(department) }}
+                      <small v-if="userDepartmentForm.departmentIds[0] === department.id">主部门</small>
+                    </span>
+                  </label>
+                </div>
+                <p v-if="!activeDepartments.length" class="empty-state empty-state--plain">当前没有可用的 active 部门。</p>
+              </div>
+              <label v-if="selectedUserPrimaryDepartmentWillChange" class="confirm confirm--inline modal-confirm">
+                <input v-model="userDepartmentForm.confirmedReplacePrimary" type="checkbox" />
+                <span>确认更换该用户的主部门</span>
+              </label>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeUserModal">
+                取消
+              </button>
+              <button
+                class="button"
+                type="button"
+                @click="saveSelectedUserDepartments"
+                :disabled="!canSaveSelectedUserDepartments"
+              >
+                {{ userAdminBusy.updatingDepartments ? "保存中..." : "保存部门归属" }}
+              </button>
+            </footer>
+          </div>
+
+          <div v-else-if="userModalMode === 'roles' && selectedAdminUser">
+            <div class="modal__body modal__body--split">
+              <section class="modal-pane">
+                <h4>当前角色</h4>
+                <div v-if="selectedUserRoleBindings.length" class="role-binding-list">
+                  <article v-for="binding in selectedUserRoleBindings" :key="binding.id" class="role-binding-row">
+                    <div>
+                      <strong>{{ formatRoleCodeLabel(binding.role_code, binding.role_name ?? binding.role_id) }}</strong>
+                      <span>{{ formatRoleBindingScope(binding) }}</span>
+                    </div>
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      @click="revokeSelectedUserRoleBinding(binding)"
+                      :disabled="!canManageRoles || userAdminBusy.updatingRoles"
+                    >
+                      撤销
+                    </button>
+                  </article>
+                </div>
+                <p v-else class="empty-state empty-state--plain">当前用户尚无可展示的角色绑定。</p>
+              </section>
+
+              <section class="modal-pane">
+                <h4>授予角色</h4>
+                <label class="field field--full modal-field">
+                  <span class="field__label">角色</span>
+                  <p class="field__hint">企业级角色作用于全企业；部门管理员和知识库管理员必须选择具体作用域。</p>
+                  <select
+                    class="control"
+                    :value="roleBindingForm.roleId"
+                    :disabled="!canManageRoles"
+                    @change="onRoleBindingRoleChange(($event.target as HTMLSelectElement).value)"
+                  >
+                    <option value="">请选择角色</option>
+                    <option v-for="role in assignableRoles" :key="role.id" :value="role.id">
+                      {{ formatRoleLabel(role) }} / {{ role.scope_type }}
+                    </option>
+                  </select>
+                </label>
+                <label
+                  v-if="selectedRoleBindingScopeType === 'department'"
+                  class="field field--full modal-field"
+                >
+                  <span class="field__label">部门作用域</span>
+                  <p class="field__hint">该用户只会在选定部门范围内获得部门管理员权限。</p>
+                  <select v-model="roleBindingForm.scopeId" class="control" :disabled="!canManageRoles">
+                    <option value="">请选择部门</option>
+                    <option v-for="department in activeDepartments" :key="department.id" :value="department.id">
+                      {{ formatDepartmentLabel(department) }}
+                    </option>
+                  </select>
+                </label>
+                <label
+                  v-else-if="selectedRoleBindingScopeType === 'knowledge_base'"
+                  class="field field--full modal-field"
+                >
+                  <span class="field__label">知识库作用域</span>
+                  <p class="field__hint">该用户只会在选定知识库范围内获得知识库、文档和导入管理权限。</p>
+                  <select v-model="roleBindingForm.scopeId" class="control" :disabled="!canManageRoles">
+                    <option value="">请选择知识库</option>
+                    <option
+                      v-for="knowledgeBase in activeKnowledgeBases"
+                      :key="knowledgeBase.id"
+                      :value="knowledgeBase.id"
+                    >
+                      {{ formatKnowledgeBaseLabel(knowledgeBase) }}
+                    </option>
+                  </select>
+                </label>
+                <p
+                  v-if="selectedRoleBindingScopeType === 'knowledge_base' && !canManageKnowledgeBases"
+                  class="empty-state empty-state--plain"
+                >
+                  当前账号缺少 knowledge_base:manage，无法读取可绑定的知识库列表。
+                </p>
+                <label class="confirm confirm--inline modal-confirm">
+                  <input v-model="roleBindingForm.confirmedHighRisk" type="checkbox" />
+                  <span>确认授予高风险角色</span>
+                </label>
+                <label class="confirm confirm--inline modal-confirm">
+                  <input v-model="roleBindingForm.confirmedRemoveAdmin" type="checkbox" />
+                  <span>确认撤销系统管理员角色</span>
+                </label>
+                <button
+                  class="button"
+                  type="button"
+                  @click="addSelectedUserRoleBinding"
+                  :disabled="!canAddSelectedUserRole"
+                >
+                  {{ userAdminBusy.updatingRoles ? "处理中..." : "授予角色" }}
+                </button>
+                <p v-if="roleBindingDisabledReason" class="empty-state empty-state--plain">
+                  {{ roleBindingDisabledReason }}
+                </p>
+              </section>
+              <div v-if="userAdminFeedback" :class="['feedback feedback--wide', `feedback--${userAdminFeedback.tone}`]">
+                {{ userAdminFeedback.message }}
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeUserModal">
+                完成
+              </button>
+            </footer>
+          </div>
+
+          <form v-else-if="userModalMode === 'password' && selectedAdminUser" @submit.prevent="submitPasswordReset">
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>用户</dt>
+                  <dd>{{ selectedAdminUser.name || selectedAdminUser.username }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>账号状态</dt>
+                  <dd>{{ selectedAdminUser.status }}</dd>
+                </div>
+              </dl>
+              <div v-if="userAdminFeedback" :class="['feedback feedback--wide', `feedback--${userAdminFeedback.tone}`]">
+                {{ userAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">新密码</span>
+                  <p class="field__hint">必须满足当前 active_config 中的密码策略。</p>
+                  <input v-model="passwordResetForm.newPassword" class="control" type="password" />
+                </label>
+                <label class="field">
+                  <span class="field__label">确认新密码</span>
+                  <p class="field__hint">用于避免误输入。</p>
+                  <input v-model="passwordResetForm.passwordConfirm" class="control" type="password" />
+                </label>
+                <label class="confirm confirm--inline modal-confirm">
+                  <input v-model="passwordResetForm.forceChangePassword" type="checkbox" />
+                  <span>强制下次登录修改密码</span>
+                </label>
+                <label class="confirm confirm--inline modal-confirm">
+                  <input v-model="passwordResetForm.confirmed" type="checkbox" />
+                  <span>确认重置密码并吊销会话</span>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeUserModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canResetSelectedUserPassword">
+                {{ userAdminBusy.resettingPassword ? "重置中..." : "重置密码" }}
+              </button>
+            </footer>
+          </form>
+
+          <div v-else-if="userModalMode === 'delete' && selectedAdminUser">
+            <div class="modal__body">
+              <div class="danger-panel">
+                <h4>确认删除用户</h4>
+                <p>
+                  将删除用户 {{ selectedAdminUser.name || selectedAdminUser.username }}，并由后端吊销相关会话。删除后该账号不能再登录。
+                </p>
+                <label class="confirm confirm--inline">
+                  <input v-model="userDangerForm.confirmedDelete" type="checkbox" />
+                  <span>确认删除该用户</span>
+                </label>
+              </div>
+              <div v-if="userAdminFeedback" :class="['feedback feedback--wide', `feedback--${userAdminFeedback.tone}`]">
+                {{ userAdminFeedback.message }}
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeUserModal">
+                取消
+              </button>
+              <button
+                class="button button--danger"
+                type="button"
+                @click="deleteSelectedAdminUser"
+                :disabled="!canDeleteSelectedAdminUser"
+              >
+                {{ userAdminBusy.updating ? "删除中..." : "删除用户" }}
+              </button>
+            </footer>
+          </div>
+        </section>
+      </div>
     </section>
   </main>
 
@@ -3559,96 +4699,218 @@ function isComposeDemoProvider(value: string): boolean {
   color: #9a2f2f !important;
 }
 
-.user-admin-console {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 300px;
-}
-
-.user-list,
-.role-admin {
-  min-width: 0;
+.form-grid--compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 16px;
+}
+
+.form-grid--modal {
+  padding: 0;
+}
+
+.admin-list-panel {
+  min-width: 0;
   display: grid;
-  align-content: start;
-  gap: 12px;
-  background: #fbfcfd;
+  gap: 16px;
+  padding: 18px;
 }
 
-.user-list {
-  border-right: 1px solid #e7ebf0;
-}
-
-.role-admin {
-  border-left: 1px solid #e7ebf0;
-}
-
-.user-filter {
+.list-filter {
+  min-width: 0;
   display: grid;
-  gap: 10px;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, 240px) auto;
+  gap: 14px;
+  align-items: end;
 }
 
-.user-list__item {
-  width: 100%;
+.list-filter .field {
+  grid-column: auto;
+}
+
+.entity-table {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.entity-table__row {
+  min-width: 0;
   border: 1px solid #d8dee6;
   border-radius: 8px;
   background: #ffffff;
-  color: #1d2935;
-  padding: 10px 12px;
+  padding: 12px 14px;
   display: grid;
-  gap: 4px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.user-list__item strong {
-  overflow-wrap: anywhere;
-}
-
-.user-list__item span {
-  color: #667182;
-  font-size: 12px;
-}
-
-.user-list__item--active {
-  border-color: #2f7d66;
-  background: #eff8f4;
-}
-
-.user-detail {
-  min-width: 0;
-  padding: 16px 18px 18px;
-  display: grid;
-  align-content: start;
-  gap: 16px;
-}
-
-.user-admin-section {
-  min-width: 0;
-  border: 1px solid #e7ebf0;
-  border-radius: 8px;
-  overflow: hidden;
-  background: #ffffff;
-}
-
-.subsection-header {
-  padding: 14px 16px;
-  border-bottom: 1px solid #e7ebf0;
-  background: #fbfcfd;
-  display: flex;
-  justify-content: space-between;
   gap: 12px;
   align-items: center;
 }
 
-.subsection-header h4 {
+.entity-table--departments .entity-table__row {
+  grid-template-columns: minmax(220px, 1.6fr) minmax(130px, 0.9fr) minmax(110px, 0.7fr) minmax(90px, 0.6fr) minmax(140px, 0.8fr);
+}
+
+.entity-table--users .entity-table__row {
+  grid-template-columns: minmax(180px, 1.1fr) minmax(105px, 0.55fr) minmax(190px, 1.25fr) minmax(190px, 1.2fr) minmax(240px, 1.35fr);
+}
+
+.entity-table__row--header {
+  border-color: transparent;
+  background: #eef2f5;
+  color: #516072;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.entity-main,
+.entity-cell {
+  min-width: 0;
+}
+
+.entity-main {
+  display: grid;
+  gap: 4px;
+}
+
+.entity-main strong,
+.entity-main span,
+.entity-cell {
+  overflow-wrap: anywhere;
+}
+
+.entity-main span,
+.entity-cell,
+.empty-inline {
+  color: #667182;
+  font-size: 12px;
+}
+
+.badge-list {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.badge {
+  max-width: 100%;
+  border: 1px solid #d8dee6;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #445163;
+  padding: 4px 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.row-actions {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.row-actions--dense {
+  justify-content: flex-start;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  background: rgba(24, 32, 42, 0.48);
+}
+
+.modal {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid #cdd5df;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 50px rgba(24, 32, 42, 0.22);
+}
+
+.modal--wide {
+  width: min(920px, 100%);
+}
+
+.modal__header,
+.modal__footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.modal__header {
+  border-bottom: 1px solid #e7ebf0;
+  background: #fbfcfd;
+}
+
+.modal__header h3 {
+  margin: 0;
+}
+
+.modal__body {
+  padding: 18px;
+  display: grid;
+  gap: 16px;
+}
+
+.modal__body--split {
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.9fr);
+  align-items: start;
+}
+
+.modal__footer {
+  border-top: 1px solid #e7ebf0;
+  background: #fbfcfd;
+}
+
+.modal-summary {
+  border: 1px solid #e7ebf0;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 12px 14px;
+}
+
+.modal-confirm {
+  grid-column: 1 / -1;
+}
+
+.modal-field {
+  padding: 0;
+}
+
+.modal-pane {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.modal-pane h4,
+.danger-panel h4 {
   margin: 0;
   color: #1d2935;
 }
 
-.form-grid--compact {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  padding: 16px;
+.danger-panel {
+  border: 1px solid #f0c6c6;
+  border-radius: 8px;
+  background: #fff8f8;
+  padding: 14px 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.danger-panel p {
+  margin: 0;
+  color: #6c4450;
+  overflow-wrap: anywhere;
 }
 
 .role-picker,
@@ -3689,28 +4951,29 @@ function isComposeDemoProvider(value: string): boolean {
   overflow-wrap: anywhere;
 }
 
+.option-card span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.option-card small {
+  color: #2f7d66;
+  font-size: 11px;
+}
+
 @media (max-width: 760px) {
   .option-picker__grid {
     grid-template-columns: 1fr;
   }
 }
 
-.danger-actions {
-  padding: 0 16px 16px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-}
-
-.role-binding-list,
-.role-list {
+.role-binding-list {
   display: grid;
   gap: 10px;
 }
 
-.role-binding-row,
-.role-row {
+.role-binding-row {
   min-width: 0;
   border: 1px solid #d8dee6;
   border-radius: 8px;
@@ -3725,21 +4988,17 @@ function isComposeDemoProvider(value: string): boolean {
   gap: 10px;
 }
 
-.role-binding-row > div,
-.role-row {
+.role-binding-row > div {
   min-width: 0;
   display: grid;
   gap: 4px;
 }
 
-.role-binding-row strong,
-.role-row strong {
+.role-binding-row strong {
   overflow-wrap: anywhere;
 }
 
-.role-binding-row span,
-.role-row span,
-.role-row p {
+.role-binding-row span {
   margin: 0;
   color: #667182;
   font-size: 12px;
@@ -4043,6 +5302,10 @@ function isComposeDemoProvider(value: string): boolean {
   padding: 16px 18px 18px;
 }
 
+.summary--compact {
+  padding: 0;
+}
+
 .summary__row {
   min-width: 0;
   display: grid;
@@ -4134,11 +5397,20 @@ function isComposeDemoProvider(value: string): boolean {
   color: #6c7788;
 }
 
+.empty-state--plain {
+  padding: 0;
+}
+
 .feedback {
   max-width: 420px;
   padding: 10px 12px;
   border-radius: 8px;
   font-size: 13px;
+}
+
+.feedback--wide {
+  width: 100%;
+  max-width: none;
 }
 
 .feedback--success {
@@ -4273,17 +5545,25 @@ function isComposeDemoProvider(value: string): boolean {
     grid-template-columns: 1fr;
   }
 
-  .user-admin-console {
-    grid-template-columns: 1fr;
-  }
-
   .config-list,
-  .config-versions,
-  .user-list,
-  .role-admin {
+  .config-versions {
     border-left: 0;
     border-right: 0;
     border-top: 1px solid #e7ebf0;
+  }
+
+  .entity-table__row--header {
+    display: none;
+  }
+
+  .entity-table--departments .entity-table__row,
+  .entity-table--users .entity-table__row {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .row-actions {
+    justify-content: flex-start;
   }
 
   .flow-strip {
@@ -4306,6 +5586,31 @@ function isComposeDemoProvider(value: string): boolean {
 
   .dashboard-grid {
     grid-template-columns: 1fr;
+  }
+
+  .panel__header,
+  .panel__actions,
+  .list-filter,
+  .modal__header,
+  .modal__footer,
+  .modal__body--split {
+    grid-template-columns: 1fr;
+  }
+
+  .panel__header,
+  .panel__actions,
+  .modal__header,
+  .modal__footer {
+    display: grid;
+    justify-items: stretch;
+  }
+
+  .modal-backdrop {
+    padding: 12px;
+  }
+
+  .modal {
+    max-height: calc(100vh - 24px);
   }
 
   .user-menu {

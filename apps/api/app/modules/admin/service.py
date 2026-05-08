@@ -15,6 +15,8 @@ from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminDepartment,
     AdminDepartmentList,
+    AdminKnowledgeBase,
+    AdminKnowledgeBaseList,
     AdminRole,
     AdminRoleBinding,
     AdminUser,
@@ -232,6 +234,72 @@ class AdminService:
             )
         return _department_from_mapping(row._mapping)
 
+    def list_knowledge_bases(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        page: int,
+        page_size: int,
+        keyword: str | None = None,
+        status: str | None = None,
+    ) -> AdminKnowledgeBaseList:
+        """读取知识库列表，供知识库级角色绑定选择作用域。"""
+
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        conditions = [
+            "enterprise_id = CAST(:enterprise_id AS uuid)",
+            "deleted_at IS NULL",
+            "status != 'deleted'",
+        ]
+        params: dict[str, Any] = {
+            "enterprise_id": enterprise_id,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        if keyword:
+            conditions.append("name ILIKE :keyword")
+            params["keyword"] = f"%{keyword.strip()}%"
+        if status:
+            conditions.append("status = :status")
+            params["status"] = status
+        where_sql = " AND ".join(conditions)
+
+        try:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT
+                        id::text AS kb_id,
+                        name,
+                        status,
+                        owner_department_id::text AS owner_department_id,
+                        default_visibility,
+                        config_scope_id
+                    FROM knowledge_bases
+                    WHERE {where_sql}
+                    ORDER BY updated_at DESC, name
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).all()
+            total_row = session.execute(
+                text(f"SELECT count(*) AS total FROM knowledge_bases WHERE {where_sql}"),
+                params,
+            ).one()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_KNOWLEDGE_BASES_UNAVAILABLE",
+                "knowledge bases cannot be read",
+                exc,
+            ) from exc
+        return AdminKnowledgeBaseList(
+            items=[_knowledge_base_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
+
     def get_user(
         self,
         session: Session,
@@ -261,6 +329,153 @@ class AdminService:
             roles=roles,
             scopes=_merge_scopes(roles),
         )
+
+    def list_user_departments(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        user_id: str,
+        actor_context: AdminActorContext | None = None,
+    ) -> list[AdminDepartment]:
+        """读取用户当前有效部门归属。"""
+
+        self._load_user_row(session, user_id, enterprise_id=enterprise_id)
+        self._ensure_actor_can_access_user(
+            session,
+            actor_context,
+            enterprise_id=enterprise_id,
+            user_id=user_id,
+        )
+        return list(self._load_user_departments(session, user_id, enterprise_id=enterprise_id))
+
+    def replace_user_departments(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        actor_user_id: str,
+        user_id: str,
+        department_ids: list[str],
+        confirmed_remove_primary: bool,
+        actor_context: AdminActorContext | None = None,
+    ) -> list[AdminDepartment]:
+        """整体替换用户部门归属；第一个部门固定为主部门。"""
+
+        self._ensure_actor_can_manage_departments(actor_context)
+        normalized_department_ids = _normalize_id_list(department_ids)
+        if not normalized_department_ids or len(normalized_department_ids) != len(department_ids):
+            raise AdminServiceError(
+                "ADMIN_USER_DEPARTMENTS_INVALID",
+                "at least one unique department is required",
+                status_code=400,
+            )
+        self._load_user_row(session, user_id, enterprise_id=enterprise_id)
+        self._ensure_actor_can_access_user(
+            session,
+            actor_context,
+            enterprise_id=enterprise_id,
+            user_id=user_id,
+        )
+
+        departments = self._resolve_departments(
+            session,
+            enterprise_id=enterprise_id,
+            department_ids=normalized_department_ids,
+        )
+        before = list(self._load_user_departments(session, user_id, enterprise_id=enterprise_id))
+        before_primary_id = next(
+            (department.id for department in before if department.is_primary),
+            None,
+        )
+        next_primary_id = departments[0].id
+        primary_changed_without_confirmation = (
+            before_primary_id
+            and before_primary_id != next_primary_id
+            and not confirmed_remove_primary
+        )
+        if primary_changed_without_confirmation:
+            raise AdminServiceError(
+                "ADMIN_CONFIRMATION_REQUIRED",
+                "replacing primary department requires confirmation",
+                status_code=428,
+                details={
+                    "previous_primary_department_id": before_primary_id,
+                    "next_primary_department_id": next_primary_id,
+                },
+            )
+
+        before_ids = {department.id for department in before}
+        next_ids = {department.id for department in departments}
+        if before_primary_id == next_primary_id and before_ids == next_ids:
+            return before
+
+        try:
+            org_version = self._bump_org_version(session, enterprise_id)
+            session.execute(
+                text(
+                    """
+                    UPDATE user_department_memberships
+                    SET status = 'deleted',
+                        deleted_at = now()
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND user_id = CAST(:user_id AS uuid)
+                      AND status = 'active'
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "user_id": user_id},
+            )
+            for index, department in enumerate(departments):
+                self._insert_department_membership(
+                    session,
+                    enterprise_id=enterprise_id,
+                    user_id=user_id,
+                    department_id=department.id,
+                    actor_user_id=actor_user_id,
+                    is_primary=index == 0,
+                )
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_USER_DEPARTMENTS_REPLACE_FAILED",
+                "user departments cannot be replaced",
+                exc,
+            ) from exc
+
+        permission_version = self._bump_permission_version(session, enterprise_id)
+        after = list(self._load_user_departments(session, user_id, enterprise_id=enterprise_id))
+        self._insert_audit_log(
+            session,
+            enterprise_id=enterprise_id,
+            actor_id=actor_user_id,
+            event_name="membership.replaced",
+            resource_type="user",
+            resource_id=user_id,
+            action="replace_membership",
+            result="success",
+            risk_level="high",
+            summary={
+                "user_id": user_id,
+                "before": [
+                    {
+                        "department_id": department.id,
+                        "department_code": department.code,
+                        "is_primary": department.is_primary,
+                    }
+                    for department in before
+                ],
+                "after": [
+                    {
+                        "department_id": department.id,
+                        "department_code": department.code,
+                        "is_primary": department.is_primary,
+                    }
+                    for department in after
+                ],
+                "org_version": org_version,
+                "permission_version": permission_version,
+            },
+        )
+        return after
 
     def create_user(
         self,
@@ -607,7 +822,11 @@ class AdminService:
                     "is_default": after.is_default,
                     "org_version": after.org_version,
                 },
-                "changed_fields": [field.split(" = ", 1)[0] for field in updates if field != "org_version = :org_version"],
+                "changed_fields": [
+                    field.split(" = ", 1)[0]
+                    for field in updates
+                    if field != "org_version = :org_version"
+                ],
                 "org_version": after.org_version,
                 "permission_version": permission_version,
             },
@@ -1521,6 +1740,13 @@ class AdminService:
                 )
             ]
 
+        normalized_department_ids = _normalize_id_list(department_ids)
+        if len(normalized_department_ids) != len(department_ids):
+            raise AdminServiceError(
+                "ADMIN_DEPARTMENT_INVALID",
+                "department ids must be unique and non-empty",
+                status_code=400,
+            )
         rows = session.execute(
             text(
                 """
@@ -1532,16 +1758,16 @@ class AdminService:
                 ORDER BY code
                 """
             ),
-            {"enterprise_id": enterprise_id, "department_ids": department_ids},
+            {"enterprise_id": enterprise_id, "department_ids": normalized_department_ids},
         ).all()
-        if len(rows) != len(set(department_ids)):
+        if len(rows) != len(normalized_department_ids):
             raise AdminServiceError(
                 "ADMIN_DEPARTMENT_NOT_FOUND",
                 "one or more departments do not exist",
                 status_code=404,
             )
-        return [
-            AdminDepartment(
+        departments_by_id = {
+            row._mapping["department_id"]: AdminDepartment(
                 id=row._mapping["department_id"],
                 code=row._mapping["code"],
                 name=row._mapping["name"],
@@ -1549,7 +1775,8 @@ class AdminService:
                 is_default=bool(row._mapping["is_default"]),
             )
             for row in rows
-        ]
+        }
+        return [departments_by_id[department_id] for department_id in normalized_department_ids]
 
     def _resolve_roles(
         self,
@@ -2161,6 +2388,18 @@ def _department_from_mapping(row: Any) -> AdminDepartment:
         name=row["name"],
         status=row["status"],
         is_default=bool(row["is_default"]),
+        org_version=int(row["org_version"]) if "org_version" in row else 0,
+    )
+
+
+def _knowledge_base_from_mapping(row: Any) -> AdminKnowledgeBase:
+    return AdminKnowledgeBase(
+        id=row["kb_id"],
+        name=row["name"],
+        status=row["status"],
+        owner_department_id=row["owner_department_id"],
+        default_visibility=row["default_visibility"],
+        config_scope_id=row["config_scope_id"],
     )
 
 
@@ -2240,6 +2479,18 @@ def _has_scope(scopes: tuple[str, ...], required_scope: str) -> bool:
         return True
     prefix = required_scope.split(":", maxsplit=1)[0]
     return f"{prefix}:*" in scopes
+
+
+def _normalize_id_list(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = value.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized
 
 
 def _actor_can_access_all_users(actor_context: AdminActorContext) -> bool:

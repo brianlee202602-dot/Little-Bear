@@ -189,6 +189,11 @@ export interface AdminDepartmentCreateRequest {
   name: string;
 }
 
+export interface AdminDepartmentPatchRequest {
+  name?: string;
+  status?: "active" | "disabled";
+}
+
 export interface AdminDepartmentListResponse {
   request_id: string;
   data: AdminDepartmentData[];
@@ -198,6 +203,30 @@ export interface AdminDepartmentListResponse {
 export interface AdminDepartmentResponse {
   request_id: string;
   data: AdminDepartmentData;
+}
+
+export interface AdminUserDepartmentsResponse {
+  request_id: string;
+  data: AdminDepartmentData[];
+}
+
+export interface AdminUserDepartmentsPutRequest {
+  department_ids: string[];
+}
+
+export interface AdminKnowledgeBaseData {
+  id: string;
+  name: string;
+  status: "active" | "disabled" | "archived";
+  owner_department_id: string;
+  default_visibility: "department" | "enterprise";
+  config_scope_id: string | null;
+}
+
+export interface AdminKnowledgeBaseListResponse {
+  request_id: string;
+  data: AdminKnowledgeBaseData[];
+  pagination: PaginationData;
 }
 
 export interface AdminRoleData {
@@ -533,6 +562,47 @@ export async function createAdminDepartment(
   );
 }
 
+export async function getAdminDepartment(
+  departmentId: string,
+  accessToken: string,
+): Promise<AdminDepartmentResponse> {
+  return requestJson<AdminDepartmentResponse>(
+    `/internal/v1/admin/departments/${encodeURIComponent(departmentId)}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function patchAdminDepartment(
+  departmentId: string,
+  payload: AdminDepartmentPatchRequest,
+  accessToken: string,
+): Promise<AdminDepartmentResponse> {
+  return requestJson<AdminDepartmentResponse>(
+    `/internal/v1/admin/departments/${encodeURIComponent(departmentId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+    accessToken,
+  );
+}
+
+export async function deleteAdminDepartment(
+  departmentId: string,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<void> {
+  await requestVoid(
+    `/internal/v1/admin/departments/${encodeURIComponent(departmentId)}`,
+    {
+      method: "DELETE",
+      headers: confirmed ? { "x-department-confirm": "delete" } : undefined,
+    },
+    accessToken,
+  );
+}
+
 export async function createAdminUser(
   payload: AdminUserCreateRequest,
   accessToken: string,
@@ -606,9 +676,60 @@ export async function unlockAdminUser(userId: string, accessToken: string): Prom
   );
 }
 
+export async function listAdminUserDepartments(
+  userId: string,
+  accessToken: string,
+): Promise<AdminUserDepartmentsResponse> {
+  return requestJson<AdminUserDepartmentsResponse>(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}/departments`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function replaceAdminUserDepartments(
+  userId: string,
+  payload: AdminUserDepartmentsPutRequest,
+  accessToken: string,
+  confirmedReplacePrimary: boolean,
+): Promise<AdminUserDepartmentsResponse> {
+  return requestJson<AdminUserDepartmentsResponse>(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}/departments`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      headers: confirmedReplacePrimary
+        ? { "x-department-confirm": "replace-primary" }
+        : undefined,
+    },
+    accessToken,
+  );
+}
+
 export async function listAdminRoles(accessToken: string): Promise<AdminRoleListResponse> {
   return requestJson<AdminRoleListResponse>(
     "/internal/v1/admin/roles",
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminKnowledgeBases(
+  accessToken: string,
+  filters: { keyword?: string; status?: string; page?: number; page_size?: number } = {},
+): Promise<AdminKnowledgeBaseListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  return requestJson<AdminKnowledgeBaseListResponse>(
+    `/internal/v1/admin/knowledge-bases?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );

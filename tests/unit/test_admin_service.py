@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from app.modules.admin.errors import AdminServiceError
-from app.modules.admin.schemas import AdminRole, AdminRoleBinding, AdminUser
+from app.modules.admin.schemas import AdminDepartment, AdminRole, AdminRoleBinding, AdminUser
 from app.modules.admin.service import (
     AdminActorContext,
     AdminService,
@@ -155,6 +155,47 @@ def test_list_departments_filters_enterprise_and_status() -> None:
     assert params["status"] == "active"
 
 
+def test_list_knowledge_bases_filters_enterprise_and_status() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "kb_id": "kb_1",
+                        "name": "制度知识库",
+                        "status": "active",
+                        "owner_department_id": "department_1",
+                        "default_visibility": "department",
+                        "config_scope_id": None,
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+
+    result = AdminService().list_knowledge_bases(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        page=1,
+        page_size=20,
+        keyword="制度",
+        status="active",
+    )
+
+    assert result.total == 1
+    assert result.items[0].name == "制度知识库"
+    sql, params = session.executed[0]
+    assert "FROM knowledge_bases" in sql
+    assert "enterprise_id = CAST(:enterprise_id AS uuid)" in sql
+    assert "deleted_at IS NULL" in sql
+    assert "name ILIKE :keyword" in sql
+    assert "status = :status" in sql
+    assert params["enterprise_id"] == _ENTERPRISE_ID
+    assert params["status"] == "active"
+
+
 def test_create_department_requires_org_manage_scope() -> None:
     actor = AdminActorContext(
         user_id=_ACTOR_USER_ID,
@@ -203,13 +244,217 @@ def test_create_department_bumps_versions_and_audits() -> None:
     sql_statements = [statement for statement, _params in session.executed]
     assert any("SET org_version = org_version + 1" in statement for statement in sql_statements)
     assert any("INSERT INTO departments" in statement for statement in sql_statements)
-    assert any("SET permission_version = permission_version + 1" in statement for statement in sql_statements)
+    assert any(
+        "SET permission_version = permission_version + 1" in statement
+        for statement in sql_statements
+    )
     assert any("department.created" in str(params) for _statement, params in session.executed)
     insert_params = next(
         params for statement, params in session.executed if "INSERT INTO departments" in statement
     )
     assert insert_params["org_version"] == 4
     assert insert_params["code"] == "engineering"
+
+
+def test_patch_department_bumps_versions_and_audits(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    current = AdminDepartment(
+        id="department_2",
+        code="engineering",
+        name="研发部",
+        status="active",
+        is_default=False,
+        org_version=3,
+    )
+    after = AdminDepartment(
+        id="department_2",
+        code="engineering",
+        name="研发平台部",
+        status="active",
+        is_default=False,
+        org_version=4,
+    )
+    reads = iter([current, after])
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(service, "get_department", lambda *_args, **_kwargs: next(reads))
+    monkeypatch.setattr(service, "_bump_org_version", lambda *_args: 4)
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 8)
+    monkeypatch.setattr(
+        service,
+        "_insert_audit_log",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
+
+    result = service.patch_department(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        department_id="department_2",
+        name="研发平台部",
+        actor_context=AdminActorContext(user_id=_ACTOR_USER_ID, scopes=("org:manage",)),
+    )
+
+    assert result.name == "研发平台部"
+    assert any("UPDATE departments" in statement for statement, _params in session.executed)
+    assert audits[0]["event_name"] == "department.updated"
+    assert audits[0]["summary"]["changed_fields"] == ["name"]
+    assert audits[0]["summary"]["permission_version"] == 8
+
+
+def test_delete_department_rejects_active_members(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    session.results = [_Result(one=_Row({"active_members": 1}))]
+    monkeypatch.setattr(
+        service,
+        "get_department",
+        lambda *_args, **_kwargs: AdminDepartment(
+            id="department_2",
+            code="engineering",
+            name="研发部",
+            status="active",
+            is_default=False,
+        ),
+    )
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        service.delete_department(
+            session,
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            department_id="department_2",
+            confirmed=True,
+            actor_context=AdminActorContext(user_id=_ACTOR_USER_ID, scopes=("org:manage",)),
+        )
+
+    assert exc_info.value.error_code == "ADMIN_DEPARTMENT_HAS_ACTIVE_MEMBERS"
+
+
+def test_replace_user_departments_requires_at_least_one_department() -> None:
+    actor = AdminActorContext(user_id=_ACTOR_USER_ID, scopes=("*",))
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        AdminService().replace_user_departments(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            user_id="44444444-4444-4444-4444-444444444444",
+            department_ids=[],
+            confirmed_remove_primary=False,
+            actor_context=actor,
+        )
+
+    assert exc_info.value.error_code == "ADMIN_USER_DEPARTMENTS_INVALID"
+
+
+def test_replace_user_departments_requires_confirmation_when_primary_changes(monkeypatch) -> None:
+    service = AdminService()
+    before = [
+        AdminDepartment(
+            id="department_old",
+            code="sales",
+            name="销售部",
+            status="active",
+            is_primary=True,
+        )
+    ]
+    next_departments = [
+        AdminDepartment(
+            id="department_new",
+            code="engineering",
+            name="研发部",
+            status="active",
+        )
+    ]
+    monkeypatch.setattr(service, "_load_user_row", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(service, "_load_user_departments", lambda *_args, **_kwargs: tuple(before))
+    monkeypatch.setattr(service, "_resolve_departments", lambda *_args, **_kwargs: next_departments)
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        service.replace_user_departments(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            user_id="44444444-4444-4444-4444-444444444444",
+            department_ids=["department_new"],
+            confirmed_remove_primary=False,
+            actor_context=AdminActorContext(user_id=_ACTOR_USER_ID, scopes=("*",)),
+        )
+
+    assert exc_info.value.error_code == "ADMIN_CONFIRMATION_REQUIRED"
+    assert exc_info.value.status_code == 428
+
+
+def test_replace_user_departments_bumps_versions_and_audits(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    before = [
+        AdminDepartment(
+            id="department_old",
+            code="sales",
+            name="销售部",
+            status="active",
+            is_primary=True,
+        )
+    ]
+    next_departments = [
+        AdminDepartment(
+            id="department_new",
+            code="engineering",
+            name="研发部",
+            status="active",
+        )
+    ]
+    after = [
+        AdminDepartment(
+            id="department_new",
+            code="engineering",
+            name="研发部",
+            status="active",
+            is_primary=True,
+        )
+    ]
+    reads = iter([tuple(before), tuple(after)])
+    inserted: list[tuple[str, bool]] = []
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(service, "_load_user_row", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(service, "_load_user_departments", lambda *_args, **_kwargs: next(reads))
+    monkeypatch.setattr(service, "_resolve_departments", lambda *_args, **_kwargs: next_departments)
+    monkeypatch.setattr(service, "_bump_org_version", lambda *_args: 5)
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 9)
+    monkeypatch.setattr(
+        service,
+        "_insert_department_membership",
+        lambda _session, **kwargs: inserted.append(
+            (kwargs["department_id"], kwargs["is_primary"])
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_insert_audit_log",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
+
+    result = service.replace_user_departments(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        user_id="44444444-4444-4444-4444-444444444444",
+        department_ids=["department_new"],
+        confirmed_remove_primary=True,
+        actor_context=AdminActorContext(user_id=_ACTOR_USER_ID, scopes=("*",)),
+    )
+
+    assert result == after
+    assert inserted == [("department_new", True)]
+    assert any(
+        "UPDATE user_department_memberships" in statement
+        for statement, _params in session.executed
+    )
+    assert audits[0]["event_name"] == "membership.replaced"
+    assert audits[0]["summary"]["org_version"] == 5
+    assert audits[0]["summary"]["permission_version"] == 9
 
 
 def test_create_role_binding_requires_confirmation_for_high_risk_role(monkeypatch) -> None:

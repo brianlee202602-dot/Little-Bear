@@ -3075,7 +3075,13 @@ components:
           type: string
         status:
           type: string
-          enum: [active, disabled]
+          enum: [active, disabled, deleted]
+        is_primary:
+          type: boolean
+          default: false
+        is_default:
+          type: boolean
+          default: false
     DepartmentCreateRequest:
       type: object
       required: [name, code]
@@ -3116,6 +3122,7 @@ components:
       properties:
         department_ids:
           type: array
+          minItems: 1
           items:
             type: string
     UserDepartmentsResponse:
