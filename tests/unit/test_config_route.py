@@ -196,3 +196,53 @@ def test_config_publish_route_invalidates_auth_runtime(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "active"
     assert invalidated["value"] is True
+
+
+def test_config_delete_draft_route_requires_confirmation(monkeypatch) -> None:
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.config.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.delete(
+        "/internal/v1/admin/config-versions/2",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 428
+    assert response.json()["error_code"] == "CONFIG_CONFIRMATION_REQUIRED"
+
+
+def test_config_delete_draft_route_discards_draft(monkeypatch) -> None:
+    seen: dict[str, int | str | None] = {}
+
+    def discard(_self, _session, *, version, actor_user_id):
+        seen["version"] = version
+        seen["actor_user_id"] = actor_user_id
+        return None
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.config.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.config.ConfigService.discard_config_draft", discard)
+
+    client = TestClient(_create_test_app())
+    response = client.delete(
+        "/internal/v1/admin/config-versions/2",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-config-confirm": "discard-draft",
+        },
+    )
+
+    assert response.status_code == 204
+    assert seen == {
+        "version": 2,
+        "actor_user_id": "11111111-1111-1111-1111-111111111111",
+    }

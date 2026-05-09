@@ -489,6 +489,17 @@ export async function publishConfigVersion(
   );
 }
 
+export async function discardConfigDraft(version: number, accessToken: string): Promise<void> {
+  await requestVoid(
+    `/internal/v1/admin/config-versions/${version}`,
+    {
+      method: "DELETE",
+      headers: { "x-config-confirm": "discard-draft" },
+    },
+    accessToken,
+  );
+}
+
 export async function listAuditLogs(
   accessToken: string,
   filters: { resource_type?: string; result?: string; risk_level?: string } = {},

@@ -85,9 +85,10 @@ class _FakeSession:
             self.config_hash = config_hash or stable_json_hash(self.config)
         else:
             self.value_hash = value_hash or "hash_from_string"
-            self.config_hash = config_hash or self.value_hash
+        self.config_hash = config_hash or self.value_hash
         self.execute_count = 0
         self.next_version = 2
+        self.config_version_status = "draft"
         self.statements: list[tuple[str, dict[str, Any]]] = []
 
     def execute(self, statement, *_args, **_kwargs):
@@ -140,20 +141,42 @@ class _FakeSession:
                 )
             )
 
+        if "FROM config_versions" in sql and "WHERE version = :version" in sql:
+            return _Result(
+                row=_Row(
+                    {
+                        "config_version_id": "cfg_2",
+                        "version": params.get("version", 2),
+                        "scope_type": "global",
+                        "scope_id": "global",
+                        "status": self.config_version_status,
+                        "config_hash": self.config_hash,
+                        "schema_version": 1,
+                        "validation_result_json": {"valid": True},
+                        "risk_level": "medium",
+                        "created_by": None,
+                        "created_at": None,
+                        "activated_at": None,
+                    }
+                )
+            )
+
         if "COALESCE(MAX(version)" in sql:
             return _Result(row=_Row({"version": self.next_version}))
 
         if "cv.status = 'draft'" in sql:
             return _Result(rows=[])
 
+        if "cv.status IN ('draft', 'validating')" in sql:
+            return _Result(rows=[])
+
         if "cv.config_hash = :config_hash" in sql:
             return _Result(row=None)
 
-        if (
-            "INSERT INTO config_versions" in sql
-            or "INSERT INTO system_configs" in sql
-            or "INSERT INTO audit_logs" in sql
-        ):
+        if "UPDATE config_versions" in sql or "UPDATE system_configs" in sql:
+            return _Result()
+
+        if "INSERT INTO config_versions" in sql or "INSERT INTO system_configs" in sql or "INSERT INTO audit_logs" in sql:
             return _Result()
 
         raise AssertionError(f"unexpected SQL: {sql}")
@@ -349,6 +372,36 @@ def test_config_service_rejects_non_editable_metadata_key() -> None:
         ConfigService(cache=ConfigCache()).get_config_item(_FakeSession(), "config_version")
 
     assert exc_info.value.error_code == "CONFIG_KEY_NOT_FOUND"
+
+
+def test_config_service_discards_draft_version() -> None:
+    session = _FakeSession()
+
+    version = ConfigService(cache=ConfigCache()).discard_config_draft(
+        session,
+        version=2,
+        actor_user_id=None,
+    )
+
+    assert version.version == 2
+    assert version.status == "archived"
+    assert any("UPDATE config_versions" in sql for sql, _params in session.statements)
+    assert any("UPDATE system_configs" in sql for sql, _params in session.statements)
+    assert any("config.draft_discarded" in params.get("event_name", "") for _sql, params in session.statements)
+
+
+def test_config_service_rejects_discarding_active_version() -> None:
+    session = _FakeSession()
+    session.config_version_status = "active"
+
+    with pytest.raises(ConfigServiceError) as exc_info:
+        ConfigService(cache=ConfigCache()).discard_config_draft(
+            session,
+            version=1,
+            actor_user_id=None,
+        )
+
+    assert exc_info.value.error_code == "CONFIG_VERSION_NOT_DISCARDABLE"
 
 
 def test_config_validation_reports_schema_errors_without_dependency_checks(monkeypatch) -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, Query
 from sqlalchemy.exc import SQLAlchemyError
 from starlette import status
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from app.api.schemas.config import (
     ConfigItemData,
@@ -201,6 +201,40 @@ async def patch_config_version(
     return ConfigVersionResponse(request_id=_request_id(), data=_version_data(published))
 
 
+@router.delete(
+    "/config-versions/{version}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
+)
+async def delete_config_version(
+    version: int,
+    authorization: str | None = Header(default=None),
+    x_config_confirm: str | None = Header(default=None),
+) -> Response:
+    token = _extract_bearer_token(authorization)
+    service = ConfigService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="config:manage")
+            if x_config_confirm != "discard-draft":
+                return _confirmation_error_response(
+                    stage="config_discard_draft",
+                    message="discarding config draft requires x-config-confirm: discard-draft",
+                )
+            service.discard_config_draft(
+                session,
+                version=version,
+                actor_user_id=auth_context.user.id,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="config_discard_draft")
+    except ConfigServiceError as exc:
+        return _config_error_response(exc, stage="config_discard_draft")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="config_discard_draft")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/config-validations", response_model=ConfigValidationResponse)
 async def create_config_validation(
     payload: ConfigValidationRequest,
@@ -338,6 +372,7 @@ def _config_status_code(exc: ConfigServiceError) -> int:
     if exc.error_code in {
         "CONFIG_VERSION_NOT_PUBLISHABLE",
         "CONFIG_VERSION_ARCHIVE_UNSUPPORTED",
+        "CONFIG_VERSION_NOT_DISCARDABLE",
     }:
         return 409
     if exc.error_code in {

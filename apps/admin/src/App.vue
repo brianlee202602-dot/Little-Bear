@@ -16,6 +16,7 @@ import {
   deleteAdminDepartment,
   deleteAdminUser,
   deleteCurrentSession,
+  discardConfigDraft,
   getCurrentUser,
   getAdminDepartment,
   getSetupState,
@@ -77,6 +78,7 @@ type Tone = "success" | "error" | "warning" | "neutral";
 type LocalIssueTone = "error" | "warning";
 type ActiveView = "loading" | "setup" | "login" | "dashboard";
 type ActiveAdminTab = "config" | "departments" | "users";
+type ConfigModalMode = "create" | "edit" | "delete" | null;
 type DepartmentModalMode = "create" | "edit" | "delete" | null;
 type UserModalMode = "create" | "edit" | "departments" | "roles" | "password" | "delete" | null;
 type RoleScopeType = AdminRoleData["scope_type"];
@@ -130,6 +132,13 @@ type FieldSection = {
   fields: FieldDefinition[];
 };
 
+type ConfigSectionFormDefinition = {
+  key: string;
+  label: string;
+  description: string;
+  fields: FieldDefinition[];
+};
+
 type AuthTokenState = {
   accessToken: string;
   refreshToken: string;
@@ -158,6 +167,7 @@ const configBusy = reactive({
   validating: false,
   saving: false,
   publishing: false,
+  deleting: false,
 });
 const userAdminBusy = reactive({
   loading: false,
@@ -219,6 +229,10 @@ const passwordResetForm = reactive({
   forceChangePassword: true,
   confirmed: false,
 });
+const configForm = reactive<SetupFormModel>(createDefaultSetupForm());
+const configDangerForm = reactive({
+  confirmedDelete: false,
+});
 const userDepartmentForm = reactive({
   departmentIds: [] as string[],
   confirmedReplacePrimary: false,
@@ -256,6 +270,7 @@ const configValidationResult = ref<SetupValidationData | null>(null);
 const selectedDraftVersion = ref<number | null>(null);
 const lastConfigValidatedText = ref<string | null>(null);
 const selectedAdminTab = ref<ActiveAdminTab>("config");
+const configModalMode = ref<ConfigModalMode>(null);
 const adminUsers = ref<AdminUserData[]>([]);
 const adminDepartments = ref<AdminDepartmentData[]>([]);
 const adminKnowledgeBases = ref<AdminKnowledgeBaseData[]>([]);
@@ -597,6 +612,168 @@ const sections = [
   cacheSection,
 ];
 
+const setupFieldByKey = new Map<keyof SetupFormModel, FieldDefinition>(
+  sections.flatMap((section) => section.fields.map((field) => [field.key, field] as const)),
+);
+
+const configSectionDefinitions: ConfigSectionFormDefinition[] = [
+  {
+    key: "secret_provider",
+    label: "密钥服务",
+    description: "Secret Store provider、地址和 Secret 引用策略。",
+    fields: setupFields("secretProviderEndpoint"),
+  },
+  {
+    key: "redis",
+    label: "Redis",
+    description: "缓存、限流、锁和配置通知使用的 Redis 连接。",
+    fields: setupFields("redisUrl"),
+  },
+  {
+    key: "storage",
+    label: "对象存储",
+    description: "MinIO/S3-compatible 存储地址、bucket 和 Secret 引用。",
+    fields: setupFields(
+      "minioEndpoint",
+      "minioBucket",
+      "minioRegion",
+      "objectKeyPrefix",
+      "minioAccessKeyRef",
+      "minioSecretKeyRef",
+    ),
+  },
+  {
+    key: "vector_store",
+    label: "向量库",
+    description: "Qdrant 地址、集合前缀、距离度量和可选 API Key 引用。",
+    fields: setupFields("qdrantBaseUrl", "qdrantApiKeyRef", "collectionPrefix", "vectorDistance"),
+  },
+  {
+    key: "keyword_search",
+    label: "关键词检索",
+    description: "全文检索语言、分词器和词典策略。",
+    fields: setupFields("keywordLanguage", "keywordAnalyzer"),
+  },
+  {
+    key: "model_gateway",
+    label: "模型网关",
+    description: "Embedding、Rerank 和 LLM provider 地址及模型路由。",
+    fields: setupFields(
+      "modelGatewayMode",
+      "embeddingProviderBaseUrl",
+      "rerankProviderBaseUrl",
+      "llmProviderBaseUrl",
+      "embeddingModel",
+      "rerankModel",
+      "llmModel",
+      "llmFallbackModel",
+    ),
+  },
+  {
+    key: "model",
+    label: "模型参数",
+    description: "默认模型名称、向量维度和模型版本相关配置。",
+    fields: setupFields("embeddingDimension", "embeddingModel", "rerankModel", "llmModel", "llmFallbackModel"),
+  },
+  {
+    key: "auth",
+    label: "认证策略",
+    description: "密码策略、Token 有效期和 JWT 签名配置。",
+    fields: setupFields(
+      "passwordMinLength",
+      "accessTokenTtlMinutes",
+      "refreshTokenTtlMinutes",
+      "jwtIssuer",
+      "jwtAudience",
+      "jwtSigningKeyRef",
+    ),
+  },
+  {
+    key: "retrieval",
+    label: "检索策略",
+    description: "向量/关键词召回、重排和最终上下文预算。",
+    fields: setupFields("vectorTopK", "keywordTopK", "rerankInputTopK", "finalContextTopK", "maxContextTokens"),
+  },
+  {
+    key: "chunk",
+    label: "文档切片",
+    description: "切片大小、重叠长度和结构保留策略。",
+    fields: setupFields(
+      "chunkDefaultSizeTokens",
+      "chunkOverlapTokens",
+      "chunkStrategyMode",
+      "chunkPreserveTables",
+      "chunkPreserveCodeBlocks",
+      "chunkPreserveContractClauses",
+    ),
+  },
+  {
+    key: "import",
+    label: "导入任务",
+    description: "文件大小、并发任务和索引批处理参数。",
+    fields: setupFields("maxFileMb", "maxConcurrentJobs", "embeddingBatchSize", "indexBatchSize"),
+  },
+  {
+    key: "cache",
+    label: "缓存策略",
+    description: "查询向量、召回结果和最终答案缓存开关。",
+    fields: setupFields(
+      "queryEmbeddingEnabled",
+      "retrievalResultEnabled",
+      "finalAnswerEnabled",
+      "crossUserFinalAnswerAllowed",
+    ),
+  },
+  {
+    key: "rate_limit",
+    label: "限流策略",
+    description: "用户、部门、知识库和模型池限流配置。",
+    fields: setupFields("queryQpsPerUser"),
+  },
+  {
+    key: "audit",
+    label: "审计策略",
+    description: "审计保留周期、查询文本记录方式和脱敏策略。",
+    fields: setupFields("auditRetentionDays", "auditQueryTextMode"),
+  },
+  {
+    key: "llm",
+    label: "LLM 运行参数",
+    description: "temperature、输出 token、超时和重试策略。",
+    fields: [],
+  },
+  {
+    key: "permission",
+    label: "权限策略",
+    description: "默认角色、默认可见性和权限收紧阻断策略。",
+    fields: [],
+  },
+  {
+    key: "security",
+    label: "安全策略",
+    description: "引用强制、Prompt 泄露防护和 PII 脱敏策略。",
+    fields: [],
+  },
+  {
+    key: "timeout",
+    label: "超时预算",
+    description: "查询链路各阶段的超时预算。",
+    fields: [],
+  },
+  {
+    key: "degrade",
+    label: "降级策略",
+    description: "模型、检索、导入等链路异常时的降级动作。",
+    fields: [],
+  },
+  {
+    key: "observability",
+    label: "可观测性",
+    description: "指标、Trace 和关键告警阈值。",
+    fields: [],
+  },
+];
+
 // payload 是真正提交给 setup-config-validations / setup-initialization 的请求体。
 const payload = computed(() => buildSetupPayload(form));
 const payloadSignature = computed(() => JSON.stringify(payload.value));
@@ -658,8 +835,23 @@ const canManageKnowledgeBases = computed(() =>
   hasScope(currentUser.value?.scopes ?? [], "knowledge_base:manage"),
 );
 const selectedConfigItem = computed(() =>
-  configItems.value.find((item) => item.key === selectedConfigKey.value) ?? null,
+  configItems.value.find(
+    (item) =>
+      item.key === selectedConfigKey.value &&
+      (selectedDraftVersion.value ? item.version === selectedDraftVersion.value : item.status === "active"),
+  ) ??
+  configItems.value.find((item) => item.key === selectedConfigKey.value) ??
+  null,
 );
+const activeConfigItems = computed(() => configItems.value.filter((item) => item.status === "active"));
+const configDraftItems = computed(() =>
+  configItems.value.filter((item) => item.status === "draft" || item.status === "validating"),
+);
+const editableConfigDefinitions = computed(() =>
+  configSectionDefinitions.filter((definition) => definition.fields.length > 0),
+);
+const selectedConfigDefinition = computed(() => configDefinitionForKey(selectedConfigKey.value));
+const selectedConfigFields = computed(() => selectedConfigDefinition.value?.fields ?? []);
 const selectedAdminUser = computed(
   () => adminUsers.value.find((user) => user.id === selectedAdminUserId.value) ?? null,
 );
@@ -864,20 +1056,10 @@ const activeConfigVersion = computed(() => {
   const activeVersion = configVersions.value.find((version) => version.status === "active");
   return activeVersion?.version ?? selectedConfigItem.value?.version ?? 1;
 });
-const configEditorParseError = computed(() => {
-  if (!configEditorText.value.trim()) {
-    return "配置内容不能为空。";
-  }
-  try {
-    const parsed = JSON.parse(configEditorText.value);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return "配置分组必须是 JSON object。";
-    }
-  } catch (error) {
-    return error instanceof Error ? error.message : "配置 JSON 无法解析。";
-  }
-  return null;
-});
+const newestConfigVersion = computed(() =>
+  configVersions.value.reduce((max, version) => Math.max(max, version.version), activeConfigVersion.value),
+);
+const configEditorParseError = computed(() => validateConfigForm());
 const configValidationFresh = computed(
   () =>
     configValidationResult.value?.valid === true &&
@@ -885,12 +1067,13 @@ const configValidationFresh = computed(
 );
 const canValidateSelectedConfig = computed(
   () =>
-    Boolean(selectedConfigItem.value) &&
+    Boolean(selectedConfigDefinition.value) &&
     canManageConfig.value &&
     !configBusy.loading &&
     !configBusy.validating &&
     !configBusy.saving &&
     !configBusy.publishing &&
+    !configBusy.deleting &&
     configEditorParseError.value === null,
 );
 const canSaveSelectedConfigDraft = computed(
@@ -906,7 +1089,17 @@ const canPublishSelectedDraft = computed(
     !configBusy.loading &&
     !configBusy.validating &&
     !configBusy.saving &&
-    !configBusy.publishing,
+    !configBusy.publishing &&
+    !configBusy.deleting,
+);
+const canDiscardSelectedDraft = computed(
+  () =>
+    Boolean(selectedDraftVersion.value) &&
+    canManageConfig.value &&
+    configDangerForm.confirmedDelete &&
+    !configBusy.loading &&
+    !configBusy.publishing &&
+    !configBusy.deleting,
 );
 const fieldIssueMap = computed(() => {
   const result = new Map<keyof SetupFormModel, LocalValidationIssue[]>();
@@ -1178,7 +1371,25 @@ async function refreshConfigAdminState(): Promise<void> {
       auditFeedback.value = null;
     }
     if (!selectedConfigKey.value && configItems.value.length > 0) {
-      selectConfigItem(configItems.value[0].key);
+      selectConfigItem(configItems.value.find((item) => item.status === "active") ?? configItems.value[0]);
+    } else if (
+      selectedConfigKey.value &&
+      !configItems.value.some(
+        (item) =>
+          item.key === selectedConfigKey.value &&
+          (!selectedDraftVersion.value || item.version === selectedDraftVersion.value),
+      )
+    ) {
+      const fallback = configItems.value.find((item) => item.status === "active") ?? configItems.value[0];
+      if (fallback) {
+        selectConfigItem(fallback);
+      } else {
+        selectedConfigKey.value = "";
+        selectedDraftVersion.value = null;
+        syncConfigFormFromActiveConfig();
+      }
+    } else if (selectedConfigKey.value) {
+      syncConfigFormFromActiveConfig();
     }
     configFeedback.value = {
       tone: "success",
@@ -2098,25 +2309,117 @@ function updateSelectedAdminUserDepartments(departments: AdminDepartmentData[]):
   };
 }
 
-function selectConfigItem(key: string): void {
-  const item = configItems.value.find((entry) => entry.key === key);
-  selectedConfigKey.value = key;
-  selectedDraftVersion.value = null;
+function selectConfigItem(itemOrKey: ConfigItemData | string): void {
+  const item =
+    typeof itemOrKey === "string"
+      ? (configItems.value.find((entry) => entry.key === itemOrKey && entry.status === "active") ??
+        configItems.value.find((entry) => entry.key === itemOrKey))
+      : itemOrKey;
+  selectedConfigKey.value = typeof itemOrKey === "string" ? itemOrKey : itemOrKey.key;
+  selectedDraftVersion.value =
+    item && (item.status === "draft" || item.status === "validating") ? item.version : null;
   configValidationResult.value = null;
   lastConfigValidatedText.value = null;
-  if (!item) {
-    configEditorText.value = "";
-    return;
-  }
-  configEditorText.value = prettyJson(item.value_json);
+  syncConfigFormFromActiveConfig(item ?? null);
 }
 
-function onConfigEditorInput(event: Event): void {
-  const target = event.target;
-  configEditorText.value = target instanceof HTMLTextAreaElement ? target.value : "";
+function openCreateConfigModal(): void {
+  const fallback =
+    editableConfigDefinitions.value.find((definition) =>
+      activeConfigItems.value.some((item) => item.key === definition.key),
+    ) ?? editableConfigDefinitions.value[0];
+  if (!fallback) {
+    configFeedback.value = {
+      tone: "error",
+      message: "当前没有可编辑的配置项。",
+    };
+    return;
+  }
+  selectedConfigKey.value = fallback.key;
+  selectedDraftVersion.value = null;
+  syncConfigFormFromActiveConfig();
+  resetConfigModalState();
+  configModalMode.value = "create";
+}
+
+function openEditConfigModal(item: ConfigItemData): void {
+  selectConfigItem(item);
+  resetConfigModalState();
+  configModalMode.value = "edit";
+}
+
+function openDeleteConfigModal(item: ConfigItemData): void {
+  selectConfigItem(item);
+  resetConfigModalState();
+  configDangerForm.confirmedDelete = false;
+  configModalMode.value = "delete";
+}
+
+function closeConfigModal(): void {
+  configModalMode.value = null;
+  configDangerForm.confirmedDelete = false;
+}
+
+function configModalTitle(): string {
+  if (configModalMode.value === "create") {
+    return "新增配置草稿";
+  }
+  if (configModalMode.value === "edit") {
+    return "编辑配置项";
+  }
+  return "删除配置草稿";
+}
+
+function resetConfigModalState(): void {
+  configFeedback.value = null;
   configValidationResult.value = null;
   lastConfigValidatedText.value = null;
+  configDangerForm.confirmedDelete = false;
+  configEditorText.value = configFormSignature();
+}
+
+function onConfigKeyChange(key: string): void {
+  selectedConfigKey.value = key;
   selectedDraftVersion.value = null;
+  syncConfigFormFromActiveConfig();
+  resetConfigModalState();
+}
+
+function updateConfigFieldFromInput(field: FieldDefinition, value: string): void {
+  if (field.input === "number") {
+    const parsed = Number(value);
+    setConfigFormValue(field.key, Number.isFinite(parsed) ? parsed : 0);
+    resetConfigValidationState();
+    return;
+  }
+  setConfigFormValue(field.key, value);
+  resetConfigValidationState();
+}
+
+function updateConfigFieldFromSelect(field: FieldDefinition, value: string): void {
+  setConfigFormValue(field.key, value);
+  resetConfigValidationState();
+}
+
+function updateConfigFieldFromCheckbox(field: FieldDefinition, value: boolean): void {
+  setConfigFormValue(field.key, value);
+  resetConfigValidationState();
+}
+
+function setConfigFormValue(key: keyof SetupFormModel, value: unknown): void {
+  (configForm as Record<keyof SetupFormModel, unknown>)[key] = value;
+}
+
+function resetConfigValidationState(): void {
+  configValidationResult.value = null;
+  lastConfigValidatedText.value = null;
+  if (configModalMode.value === "edit" || configModalMode.value === "create") {
+    selectedDraftVersion.value =
+      selectedConfigItem.value?.status === "draft" || selectedConfigItem.value?.status === "validating"
+        ? selectedConfigItem.value.version
+        : selectedDraftVersion.value;
+  }
+  configEditorText.value = configFormSignature();
 }
 
 async function validateSelectedConfig(): Promise<void> {
@@ -2137,6 +2440,7 @@ async function validateSelectedConfig(): Promise<void> {
   try {
     const response = await validateAdminConfig(configBundle, accessToken);
     configValidationResult.value = response.data;
+    configEditorText.value = configFormSignature();
     lastConfigValidatedText.value = response.data.valid ? configEditorText.value : null;
     configFeedback.value = {
       tone: response.data.valid ? "success" : "error",
@@ -2155,9 +2459,9 @@ async function validateSelectedConfig(): Promise<void> {
 }
 
 async function saveSelectedDraft(): Promise<void> {
-  const selected = selectedConfigItem.value;
-  const valueJson = parseConfigEditorValue();
-  if (!selected || !valueJson) {
+  const valueJson = buildSelectedConfigSectionValue();
+  const definition = selectedConfigDefinition.value;
+  if (!definition || !valueJson) {
     configFeedback.value = {
       tone: "error",
       message: configEditorParseError.value ?? "请选择需要保存的配置分组。",
@@ -2171,7 +2475,7 @@ async function saveSelectedDraft(): Promise<void> {
 
   configBusy.saving = true;
   try {
-    const response = await saveConfigDraft(selected.key, valueJson, accessToken);
+    const response = await saveConfigDraft(definition.key, valueJson, accessToken);
     selectedDraftVersion.value =
       response.data.status === "draft" ? response.data.version : selectedDraftVersion.value;
     configFeedback.value = {
@@ -2182,6 +2486,8 @@ async function saveSelectedDraft(): Promise<void> {
           : "配置内容与当前生效版本一致。",
     };
     await refreshConfigAdminState();
+    selectConfigItem(response.data);
+    closeConfigModal();
   } catch (error) {
     configFeedback.value = {
       tone: "error",
@@ -2221,6 +2527,7 @@ async function publishDraftVersion(version?: number | null): Promise<void> {
     if (currentKey && configItems.value.some((item) => item.key === currentKey)) {
       selectConfigItem(currentKey);
     }
+    closeConfigModal();
   } catch (error) {
     configFeedback.value = {
       tone: "error",
@@ -2228,6 +2535,41 @@ async function publishDraftVersion(version?: number | null): Promise<void> {
     };
   } finally {
     configBusy.publishing = false;
+  }
+}
+
+async function discardSelectedDraft(): Promise<void> {
+  const targetVersion = selectedDraftVersion.value;
+  if (!targetVersion || !configDangerForm.confirmedDelete) {
+    configFeedback.value = {
+      tone: "error",
+      message: "删除草稿前必须勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  configBusy.deleting = true;
+  try {
+    await discardConfigDraft(targetVersion, accessToken);
+    selectedDraftVersion.value = null;
+    configDangerForm.confirmedDelete = false;
+    configFeedback.value = {
+      tone: "success",
+      message: `已删除配置草稿 v${targetVersion}。`,
+    };
+    await refreshConfigAdminState();
+    closeConfigModal();
+  } catch (error) {
+    configFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "删除配置草稿失败"),
+    };
+  } finally {
+    configBusy.deleting = false;
   }
 }
 
@@ -2327,6 +2669,7 @@ function clearAuthSession(): void {
   configValidationResult.value = null;
   selectedDraftVersion.value = null;
   lastConfigValidatedText.value = null;
+  configModalMode.value = null;
   window.sessionStorage.removeItem(AUTH_STORAGE_KEY);
 }
 
@@ -2617,36 +2960,331 @@ function isHighRiskScope(scope: string): boolean {
   return ["config:*", "user:*", "role:*", "permission:*"].includes(scope);
 }
 
-function parseConfigEditorValue(): Record<string, unknown> | null {
-  if (configEditorParseError.value) {
-    return null;
-  }
-  const parsed = JSON.parse(configEditorText.value);
-  return parsed as Record<string, unknown>;
+function setupFields(...keys: Array<keyof SetupFormModel>): FieldDefinition[] {
+  return keys
+    .map((key) => setupFieldByKey.get(key))
+    .filter((field): field is FieldDefinition => Boolean(field));
 }
 
-function buildEditedActiveConfigBundle(): Record<string, unknown> | null {
-  const selected = selectedConfigItem.value;
-  const valueJson = parseConfigEditorValue();
-  if (!selected || !valueJson) {
-    return null;
-  }
+function configDefinitionForKey(key: string): ConfigSectionFormDefinition | null {
+  return configSectionDefinitions.find((definition) => definition.key === key) ?? null;
+}
+
+function syncConfigFormFromActiveConfig(preferredItem: ConfigItemData | null = null): void {
+  const defaults = createDefaultSetupForm();
+  Object.assign(configForm, defaults);
+  const configBundle = buildCurrentConfigBundle(preferredItem);
+  hydrateConfigForm(configForm, configBundle);
+  configEditorText.value = configFormSignature();
+}
+
+function hydrateConfigForm(target: SetupFormModel, config: Record<string, unknown>): void {
+  const secretProvider = asRecord(config.secret_provider);
+  const redis = asRecord(config.redis);
+  const storage = asRecord(config.storage);
+  const vectorStore = asRecord(config.vector_store);
+  const keywordSearch = asRecord(config.keyword_search);
+  const modelGateway = asRecord(config.model_gateway);
+  const providers = asRecord(modelGateway?.providers);
+  const embeddingProvider = asRecord(providers?.embedding);
+  const rerankProvider = asRecord(providers?.rerank);
+  const llmProvider = asRecord(providers?.llm);
+  const model = asRecord(config.model);
+  const auth = asRecord(config.auth);
+  const retrieval = asRecord(config.retrieval);
+  const chunk = asRecord(config.chunk);
+  const chunkStrategy = asRecord(chunk?.strategy);
+  const importConfig = asRecord(config.import);
+  const cache = asRecord(config.cache);
+  const rateLimit = asRecord(config.rate_limit);
+  const audit = asRecord(config.audit);
+
+  target.secretProviderEndpoint = asString(secretProvider?.endpoint, target.secretProviderEndpoint);
+  target.redisUrl = asString(redis?.url, target.redisUrl);
+  target.minioEndpoint = asString(storage?.minio_endpoint, target.minioEndpoint);
+  target.minioBucket = asString(storage?.bucket, target.minioBucket);
+  target.minioRegion = asString(storage?.region, target.minioRegion);
+  target.objectKeyPrefix = asString(storage?.object_key_prefix, target.objectKeyPrefix);
+  target.minioAccessKeyRef = asString(storage?.access_key_ref, target.minioAccessKeyRef);
+  target.minioSecretKeyRef = asString(storage?.secret_key_ref, target.minioSecretKeyRef);
+  target.qdrantBaseUrl = asString(vectorStore?.qdrant_base_url, target.qdrantBaseUrl);
+  target.qdrantApiKeyRef = asString(vectorStore?.api_key_ref, target.qdrantApiKeyRef);
+  target.collectionPrefix = asString(vectorStore?.collection_prefix, target.collectionPrefix);
+  target.vectorDistance = asVectorDistance(vectorStore?.distance, target.vectorDistance);
+  target.keywordLanguage = asString(keywordSearch?.language, target.keywordLanguage);
+  target.keywordAnalyzer = asString(keywordSearch?.keyword_analyzer, target.keywordAnalyzer);
+  target.modelGatewayMode = asModelGatewayMode(modelGateway?.mode, target.modelGatewayMode);
+  target.embeddingProviderBaseUrl = asString(embeddingProvider?.base_url, target.embeddingProviderBaseUrl);
+  target.rerankProviderBaseUrl = asString(rerankProvider?.base_url, target.rerankProviderBaseUrl);
+  target.llmProviderBaseUrl = asString(llmProvider?.base_url, target.llmProviderBaseUrl);
+  target.embeddingDimension = asNumber(model?.embedding_dimension, target.embeddingDimension);
+  target.embeddingModel = asString(model?.embedding_model, target.embeddingModel);
+  target.rerankModel = asString(model?.rerank_model, target.rerankModel);
+  target.llmModel = asString(model?.llm_model, target.llmModel);
+  target.llmFallbackModel = asString(model?.llm_fallback_model, target.llmFallbackModel);
+  target.passwordMinLength = asNumber(auth?.password_min_length, target.passwordMinLength);
+  target.accessTokenTtlMinutes = asNumber(auth?.access_token_ttl_minutes, target.accessTokenTtlMinutes);
+  target.refreshTokenTtlMinutes = asNumber(auth?.refresh_token_ttl_minutes, target.refreshTokenTtlMinutes);
+  target.jwtIssuer = asString(auth?.jwt_issuer, target.jwtIssuer);
+  target.jwtAudience = asString(auth?.jwt_audience, target.jwtAudience);
+  target.jwtSigningKeyRef = asString(auth?.jwt_signing_key_ref, target.jwtSigningKeyRef);
+  target.vectorTopK = asNumber(retrieval?.vector_top_k, target.vectorTopK);
+  target.keywordTopK = asNumber(retrieval?.keyword_top_k, target.keywordTopK);
+  target.rerankInputTopK = asNumber(retrieval?.rerank_input_top_k, target.rerankInputTopK);
+  target.finalContextTopK = asNumber(retrieval?.final_context_top_k, target.finalContextTopK);
+  target.maxContextTokens = asNumber(retrieval?.max_context_tokens, target.maxContextTokens);
+  target.chunkDefaultSizeTokens = asNumber(chunk?.default_size_tokens, target.chunkDefaultSizeTokens);
+  target.chunkOverlapTokens = asNumber(chunk?.overlap_tokens, target.chunkOverlapTokens);
+  target.chunkStrategyMode = asChunkStrategyMode(chunkStrategy?.mode, target.chunkStrategyMode);
+  target.chunkPreserveTables = asBoolean(chunkStrategy?.preserve_tables, target.chunkPreserveTables);
+  target.chunkPreserveCodeBlocks = asBoolean(chunkStrategy?.preserve_code_blocks, target.chunkPreserveCodeBlocks);
+  target.chunkPreserveContractClauses = asBoolean(
+    chunkStrategy?.preserve_contract_clauses,
+    target.chunkPreserveContractClauses,
+  );
+  target.maxFileMb = asNumber(importConfig?.max_file_mb, target.maxFileMb);
+  target.maxConcurrentJobs = asNumber(importConfig?.max_concurrent_jobs, target.maxConcurrentJobs);
+  target.embeddingBatchSize = asNumber(importConfig?.embedding_batch_size, target.embeddingBatchSize);
+  target.indexBatchSize = asNumber(importConfig?.index_batch_size, target.indexBatchSize);
+  target.queryEmbeddingEnabled = asBoolean(cache?.query_embedding_enabled, target.queryEmbeddingEnabled);
+  target.retrievalResultEnabled = asBoolean(cache?.retrieval_result_enabled, target.retrievalResultEnabled);
+  target.finalAnswerEnabled = asBoolean(cache?.final_answer_enabled, target.finalAnswerEnabled);
+  target.crossUserFinalAnswerAllowed = asBoolean(
+    cache?.cross_user_final_answer_allowed,
+    target.crossUserFinalAnswerAllowed,
+  );
+  target.queryQpsPerUser = asNumber(rateLimit?.query_qps_per_user, target.queryQpsPerUser);
+  target.auditRetentionDays = asNumber(audit?.retention_days, target.auditRetentionDays);
+  target.auditQueryTextMode = asAuditQueryTextMode(audit?.query_text_mode, target.auditQueryTextMode);
+}
+
+function buildCurrentConfigBundle(preferredItem: ConfigItemData | null = null): Record<string, unknown> {
   const config: Record<string, unknown> = {
     schema_version: 1,
     config_version: activeConfigVersion.value,
     scope: {
-      type: selected.scope_type || "global",
+      type: "global",
       id: "global",
     },
   };
-  for (const item of configItems.value) {
-    config[item.key] = item.key === selected.key ? valueJson : item.value_json;
+  for (const item of activeConfigItems.value) {
+    config[item.key] = item.value_json;
+  }
+  if (preferredItem) {
+    config[preferredItem.key] = preferredItem.value_json;
   }
   return config;
 }
 
-function prettyJson(value: unknown): string {
-  return JSON.stringify(value, null, 2);
+function buildEditedActiveConfigBundle(): Record<string, unknown> | null {
+  const valueJson = buildSelectedConfigSectionValue();
+  const definition = selectedConfigDefinition.value;
+  if (!definition || !valueJson) {
+    return null;
+  }
+  const config = buildCurrentConfigBundle();
+  config.config_version = newestConfigVersion.value + 1;
+  config[definition.key] = valueJson;
+  return config;
+}
+
+function buildSelectedConfigSectionValue(): Record<string, unknown> | null {
+  const key = selectedConfigDefinition.value?.key;
+  if (!key) {
+    return null;
+  }
+  const baseValue = selectedConfigItem.value?.value_json ?? activeConfigItems.value.find((item) => item.key === key)?.value_json;
+  const bundle = buildSetupPayload(configForm).config;
+  const value = bundle[key];
+  if (!isRecord(value)) {
+    return null;
+  }
+  return mergeConfigSectionValue(key, baseValue, value);
+}
+
+function mergeConfigSectionValue(
+  key: string,
+  baseValue: Record<string, unknown> | undefined,
+  formValue: Record<string, unknown>,
+): Record<string, unknown> {
+  const base = baseValue ? structuredClone(baseValue) : {};
+  if (key === "model_gateway") {
+    return mergeModelGatewayConfig(base, formValue);
+  }
+  if (key === "model") {
+    return mergeModelConfig(base, formValue);
+  }
+  if (key === "cache") {
+    return mergeCacheConfig(base, formValue);
+  }
+  return deepMerge(base, formValue);
+}
+
+function mergeModelGatewayConfig(
+  base: Record<string, unknown>,
+  formValue: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = deepMerge(base, formValue);
+  const formProviders = asRecord(formValue.providers);
+  const providers = asRecord(merged.providers);
+  for (const key of ["embedding", "rerank", "llm"]) {
+    const provider = asRecord(providers?.[key]);
+    const formProvider = asRecord(formProviders?.[key]);
+    if (provider && formProvider) {
+      provider.base_url = formProvider.base_url;
+    }
+  }
+  const routes = asRecord(merged.routes);
+  const formRoutes = asRecord(formValue.routes);
+  const embeddingRoute = asRecord(routes?.embedding);
+  const formEmbeddingRoute = asRecord(formRoutes?.embedding);
+  if (embeddingRoute && formEmbeddingRoute) {
+    embeddingRoute.online_default = formEmbeddingRoute.online_default;
+    embeddingRoute.batch_default = formEmbeddingRoute.batch_default;
+  }
+  const rerankRoute = asRecord(routes?.rerank);
+  const formRerankRoute = asRecord(formRoutes?.rerank);
+  if (rerankRoute && formRerankRoute) {
+    rerankRoute.default = formRerankRoute.default;
+  }
+  const llmRoute = asRecord(routes?.llm);
+  const formLlmRoute = asRecord(formRoutes?.llm);
+  if (llmRoute && formLlmRoute) {
+    llmRoute.default = formLlmRoute.default;
+    llmRoute.fallback = formLlmRoute.fallback;
+  }
+  return merged;
+}
+
+function mergeModelConfig(
+  base: Record<string, unknown>,
+  formValue: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = deepMerge(base, formValue);
+  for (const key of [
+    "embedding_model",
+    "embedding_dimension",
+    "rerank_model",
+    "llm_model",
+    "llm_fallback_model",
+  ]) {
+    merged[key] = formValue[key];
+  }
+  return merged;
+}
+
+function mergeCacheConfig(
+  base: Record<string, unknown>,
+  formValue: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = deepMerge(base, formValue);
+  merged.final_answer_ttl_seconds = formValue.final_answer_enabled === true ? 300 : 0;
+  return merged;
+}
+
+function deepMerge(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = structuredClone(base);
+  for (const [key, value] of Object.entries(patch)) {
+    const baseChild = asRecord(result[key]);
+    if (baseChild && isRecord(value) && !Array.isArray(value)) {
+      result[key] = deepMerge(baseChild, value);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+function validateConfigForm(): string | null {
+  const definition = selectedConfigDefinition.value;
+  if (!definition) {
+    return "请选择需要编辑的配置项。";
+  }
+  if (definition.fields.length === 0) {
+    return "该配置项暂未提供结构化表单，请通过初始化配置契约扩展后再编辑。";
+  }
+  const value = buildSelectedConfigSectionValue();
+  if (!value) {
+    return "配置项内容不能为空。";
+  }
+  const localIssues = validateLocalForm(configForm, null);
+  const fieldKeys = new Set(definition.fields.map((field) => field.key));
+  const blockingIssue = localIssues.find(
+    (issue) => issue.tone === "error" && issue.field && fieldKeys.has(issue.field),
+  );
+  return blockingIssue?.message ?? null;
+}
+
+function configFormSignature(): string {
+  const value = buildSelectedConfigSectionValue();
+  return JSON.stringify(
+    {
+      key: selectedConfigDefinition.value?.key ?? "",
+      value,
+    },
+    null,
+    2,
+  );
+}
+
+function configValuePreview(value: Record<string, unknown>): string {
+  const entries = Object.entries(value)
+    .filter(([, entryValue]) => typeof entryValue !== "object" || entryValue === null)
+    .slice(0, 3)
+    .map(([key, entryValue]) => `${key}: ${String(entryValue)}`);
+  return entries.join(" / ") || `${Object.keys(value).length} 个子项`;
+}
+
+function configSectionLabel(key: string): string {
+  return configDefinitionForKey(key)?.label ?? key;
+}
+
+function configSectionDescription(key: string): string {
+  return configDefinitionForKey(key)?.description ?? "当前配置项来自 active_config 顶层分组。";
+}
+
+function configStatusTone(status: string): Tone {
+  if (status === "active") {
+    return "success";
+  }
+  if (status === "failed") {
+    return "error";
+  }
+  if (status === "draft" || status === "validating") {
+    return "warning";
+  }
+  return "neutral";
+}
+
+function asString(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function asNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function asVectorDistance(value: unknown, fallback: SetupFormModel["vectorDistance"]): SetupFormModel["vectorDistance"] {
+  return value === "cosine" || value === "dot" || value === "euclidean" ? value : fallback;
+}
+
+function asModelGatewayMode(value: unknown, fallback: SetupFormModel["modelGatewayMode"]): SetupFormModel["modelGatewayMode"] {
+  return value === "external" ? value : fallback;
+}
+
+function asChunkStrategyMode(value: unknown, fallback: SetupFormModel["chunkStrategyMode"]): SetupFormModel["chunkStrategyMode"] {
+  return value === "heading_paragraph" || value === "fixed_tokens" ? value : fallback;
+}
+
+function asAuditQueryTextMode(value: unknown, fallback: SetupFormModel["auditQueryTextMode"]): SetupFormModel["auditQueryTextMode"] {
+  return value === "none" || value === "hash" || value === "plain" ? value : fallback;
 }
 
 function formatAuditTime(value: string | null): string {
@@ -3359,44 +3997,227 @@ function isComposeDemoProvider(value: string): boolean {
               >
                 {{ configBusy.loading ? "刷新中" : "刷新配置" }}
               </button>
+              <button class="button" type="button" @click="openCreateConfigModal" :disabled="!canManageConfig">
+                新增配置
+              </button>
             </div>
           </header>
-          <div class="config-console">
-            <aside class="config-list" aria-label="配置分组">
-              <button
-                v-for="item in configItems"
-                :key="item.key"
-                :class="['config-list__item', { 'config-list__item--active': item.key === selectedConfigKey }]"
-                type="button"
-                @click="selectConfigItem(item.key)"
-              >
-                <strong>{{ item.key }}</strong>
-                <span>v{{ item.version }} / {{ item.status }}</span>
-              </button>
-              <p v-if="!configItems.length" class="empty-state">当前尚未读取到可展示的配置分组。</p>
-            </aside>
+          <div class="admin-list-panel">
+            <div v-if="configFeedback" :class="['feedback feedback--wide', `feedback--${configFeedback.tone}`]">
+              {{ configFeedback.message }}
+            </div>
 
-            <section class="config-editor">
-              <div v-if="selectedConfigItem" class="config-meta">
-                <span>分组 {{ selectedConfigItem.key }}</span>
-                <span>版本 v{{ selectedConfigItem.version }}</span>
-                <span>{{ selectedConfigItem.scope_type }}</span>
+            <section class="config-version-strip">
+              <article class="config-version-card">
+                <span>当前配置版本</span>
+                <strong>v{{ activeConfigVersion }}</strong>
+              </article>
+              <article class="config-version-card">
+                <span>配置项</span>
+                <strong>{{ activeConfigItems.length }}</strong>
+              </article>
+              <article class="config-version-card">
+                <span>待发布草稿</span>
+                <strong>{{ configDraftItems.length }}</strong>
+              </article>
+            </section>
+
+            <div v-if="configItems.length" class="entity-table entity-table--configs">
+              <div class="entity-table__row entity-table__row--header">
+                <span>配置项</span>
+                <span>版本</span>
+                <span>状态</span>
+                <span>内容摘要</span>
+                <span>操作</span>
               </div>
-              <label class="field field--full config-editor__field">
-                <span class="field__label">配置 JSON</span>
-                <p class="field__hint">保存草稿前会校验 JSON 结构；发布版本前会重新执行依赖检查。</p>
-                <textarea
-                  class="control control--textarea"
-                  :value="configEditorText"
-                  :disabled="!selectedConfigItem || !canManageConfig"
-                  spellcheck="false"
-                  @input="onConfigEditorInput"
-                />
-                <ul v-if="configEditorParseError" class="field-issues">
-                  <li class="field-issue field-issue--error">{{ configEditorParseError }}</li>
-                </ul>
-              </label>
+              <article
+                v-for="item in configItems"
+                :key="`${item.key}-${item.version}-${item.status}`"
+                class="entity-table__row"
+              >
+                <div class="entity-main">
+                  <strong>{{ configSectionLabel(item.key) }}</strong>
+                  <span>{{ item.key }} · {{ configSectionDescription(item.key) }}</span>
+                </div>
+                <div class="entity-cell">v{{ item.version }}</div>
+                <div class="entity-cell">
+                  <span :class="toneClass(configStatusTone(item.status))">{{ item.status }}</span>
+                </div>
+                <div class="entity-cell">{{ configValuePreview(item.value_json) }}</div>
+                <div class="row-actions">
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="openEditConfigModal(item)"
+                    :disabled="!canManageConfig || !configDefinitionForKey(item.key)?.fields.length"
+                  >
+                    编辑
+                  </button>
+                  <button
+                    v-if="item.status === 'draft' || item.status === 'validating'"
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="publishDraftVersion(item.version)"
+                    :disabled="!canManageConfig || configBusy.publishing"
+                  >
+                    发布
+                  </button>
+                  <button
+                    class="button button--danger button--small"
+                    type="button"
+                    @click="openDeleteConfigModal(item)"
+                    :disabled="!canManageConfig || item.status === 'active'"
+                  >
+                    删除
+                  </button>
+                </div>
+              </article>
+            </div>
+            <p v-else class="empty-state empty-state--plain">当前尚未读取到配置项。</p>
 
+            <section class="config-secondary-grid">
+              <div class="config-versions" aria-label="配置版本">
+                <h4 class="config-versions__title">配置版本</h4>
+                <div v-if="configVersions.length" class="version-list">
+                  <div v-for="version in configVersions" :key="version.version" class="version-row">
+                    <div>
+                      <strong>v{{ version.version }}</strong>
+                      <span>{{ version.status }} / {{ version.risk_level }}</span>
+                    </div>
+                    <button
+                      v-if="version.status === 'draft' || version.status === 'validating'"
+                      class="button button--secondary button--small"
+                      type="button"
+                      @click="publishDraftVersion(version.version)"
+                      :disabled="!canManageConfig || configBusy.publishing"
+                    >
+                      发布
+                    </button>
+                  </div>
+                </div>
+                <p v-else class="empty-state">当前尚未读取到配置版本。</p>
+              </div>
+
+              <div class="config-versions" aria-label="配置审计">
+                <h4 class="config-versions__title">配置审计</h4>
+                <p v-if="auditFeedback" :class="toneClass(auditFeedback.tone)">
+                  {{ auditFeedback.message }}
+                </p>
+                <div v-if="auditLogs.length" class="audit-list">
+                  <article v-for="log in auditLogs" :key="log.id" class="audit-row">
+                    <header>
+                      <strong>{{ log.event_name }}</strong>
+                      <span :class="toneClass(log.result === 'success' ? 'success' : 'error')">
+                        {{ log.result }}
+                      </span>
+                    </header>
+                    <p>{{ formatAuditTime(log.created_at) }}</p>
+                    <p>{{ auditSummaryPreview(log) }}</p>
+                    <p v-if="log.error_code" class="audit-row__error">{{ log.error_code }}</p>
+                  </article>
+                </div>
+                <p v-else-if="canReadAudit" class="empty-state">当前尚未读取到配置审计记录。</p>
+                <p v-else class="empty-state">当前账号缺少审计读取权限。</p>
+              </div>
+            </section>
+          </div>
+        </section>
+      </section>
+
+      <div v-if="configModalMode" class="modal-backdrop" role="presentation" @click.self="closeConfigModal">
+        <section class="modal modal--wide" role="dialog" aria-modal="true" aria-labelledby="config-modal-title">
+          <header class="modal__header">
+            <div>
+              <p class="eyebrow">配置管理</p>
+              <h3 id="config-modal-title">{{ configModalTitle() }}</h3>
+            </div>
+            <button class="button button--secondary button--small" type="button" @click="closeConfigModal">
+              关闭
+            </button>
+          </header>
+
+          <form v-if="configModalMode === 'create' || configModalMode === 'edit'" @submit.prevent="saveSelectedDraft">
+            <div class="modal__body">
+              <div v-if="configFeedback" :class="['feedback feedback--wide', `feedback--${configFeedback.tone}`]">
+                {{ configFeedback.message }}
+              </div>
+              <label class="field field--full modal-field">
+                <span class="field__label">配置项</span>
+                <p class="field__hint">新增会从当前 active_config 复制基线并生成新的草稿版本。</p>
+                <select
+                  class="control"
+                  :value="selectedConfigKey"
+                  :disabled="configModalMode === 'edit'"
+                  @change="onConfigKeyChange(($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="definition in editableConfigDefinitions" :key="definition.key" :value="definition.key">
+                    {{ definition.label }} / {{ definition.key }}
+                  </option>
+                </select>
+              </label>
+              <dl v-if="selectedConfigDefinition" class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>当前 active 版本</dt>
+                  <dd>v{{ activeConfigVersion }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>配置说明</dt>
+                  <dd>{{ selectedConfigDefinition.description }}</dd>
+                </div>
+              </dl>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label
+                  v-for="field in selectedConfigFields"
+                  :key="String(field.key)"
+                  class="field"
+                  :class="{ 'field--full': field.span === 'full', 'field--checkbox': field.input === 'checkbox' }"
+                >
+                  <template v-if="field.input === 'checkbox'">
+                    <input
+                      class="checkbox"
+                      type="checkbox"
+                      :checked="Boolean(configForm[field.key])"
+                      @change="updateConfigFieldFromCheckbox(field, ($event.target as HTMLInputElement).checked)"
+                    />
+                    <span>{{ field.label }}</span>
+                    <p class="field__hint" :class="{ 'field__hint--empty': !field.hint }" :aria-hidden="!field.hint">
+                      {{ field.hint }}
+                    </p>
+                  </template>
+                  <template v-else>
+                    <span class="field__label">
+                      {{ field.label }}
+                      <span v-if="field.required" class="required-mark">必填</span>
+                    </span>
+                    <p class="field__hint" :class="{ 'field__hint--empty': !field.hint }" :aria-hidden="!field.hint">
+                      {{ field.hint }}
+                    </p>
+                    <select
+                      v-if="field.input === 'select'"
+                      class="control"
+                      :value="String(configForm[field.key])"
+                      @change="updateConfigFieldFromSelect(field, ($event.target as HTMLSelectElement).value)"
+                    >
+                      <option v-for="option in field.options" :key="option.value" :value="option.value">
+                        {{ option.label }}
+                      </option>
+                    </select>
+                    <input
+                      v-else
+                      class="control"
+                      :type="field.input"
+                      :min="field.min"
+                      :step="field.step"
+                      :placeholder="field.placeholder"
+                      :value="String(configForm[field.key] ?? '')"
+                      @input="updateConfigFieldFromInput(field, ($event.target as HTMLInputElement).value)"
+                    />
+                  </template>
+                </label>
+              </div>
+              <p v-if="configEditorParseError" class="field-issue field-issue--error">
+                {{ configEditorParseError }}
+              </p>
               <div class="config-actions">
                 <button
                   class="button button--secondary"
@@ -3406,100 +4227,78 @@ function isComposeDemoProvider(value: string): boolean {
                 >
                   {{ configBusy.validating ? "校验中..." : "校验配置" }}
                 </button>
-                <button
-                  class="button button--secondary"
-                  type="button"
-                  @click="saveSelectedDraft"
-                  :disabled="!canSaveSelectedConfigDraft"
-                >
+                <button class="button" type="submit" :disabled="!canSaveSelectedConfigDraft">
                   {{ configBusy.saving ? "保存中..." : "保存草稿" }}
                 </button>
-                <button
-                  class="button"
-                  type="button"
-                  @click="publishDraftVersion()"
-                  :disabled="!canPublishSelectedDraft"
-                >
-                  {{ configBusy.publishing ? "发布中..." : "发布草稿" }}
-                </button>
               </div>
-
-              <div v-if="configFeedback || configValidationResult" class="result-block result-block--compact">
-                <p v-if="configFeedback" :class="toneClass(configFeedback.tone)">
-                  {{ configFeedback.message }}
+              <div v-if="configValidationResult" class="result-block result-block--compact">
+                <p :class="toneClass(configValidationResult.valid ? 'success' : 'error')">
+                  {{ configValidationResult.valid ? "后端校验通过" : "后端校验未通过" }}
                 </p>
-                <template v-if="configValidationResult">
-                  <p :class="toneClass(configValidationResult.valid ? 'success' : 'error')">
-                    {{ configValidationResult.valid ? "后端校验通过" : "后端校验未通过" }}
-                  </p>
-                  <ul v-if="configValidationResult.errors.length" class="issue-list">
-                    <li
-                      v-for="issue in configValidationResult.errors"
-                      :key="`${issue.error_code ?? issue.code}-${issue.path}`"
-                    >
-                      <strong>{{ normalizeIssueCode(issue) }}</strong>
-                      <span>{{ issue.path }}</span>
-                      <p>{{ issue.message }}</p>
-                    </li>
-                  </ul>
-                  <ul v-if="configValidationResult.warnings.length" class="issue-list issue-list--warning">
-                    <li
-                      v-for="issue in configValidationResult.warnings"
-                      :key="`${issue.error_code ?? issue.code}-${issue.path}`"
-                    >
-                      <strong>{{ normalizeIssueCode(issue) }}</strong>
-                      <span>{{ issue.path }}</span>
-                      <p>{{ issue.message }}</p>
-                    </li>
-                  </ul>
-                </template>
-              </div>
-            </section>
-
-            <aside class="config-versions" aria-label="配置版本">
-              <h4 class="config-versions__title">配置版本</h4>
-              <div v-if="configVersions.length" class="version-list">
-                <div v-for="version in configVersions" :key="version.version" class="version-row">
-                  <div>
-                    <strong>v{{ version.version }}</strong>
-                    <span>{{ version.status }} / {{ version.risk_level }}</span>
-                  </div>
-                  <button
-                    v-if="version.status === 'draft' || version.status === 'validating'"
-                    class="button button--secondary button--small"
-                    type="button"
-                    @click="publishDraftVersion(version.version)"
-                    :disabled="!canManageConfig || configBusy.publishing"
+                <ul v-if="configValidationResult.errors.length" class="issue-list">
+                  <li
+                    v-for="issue in configValidationResult.errors"
+                    :key="`${issue.error_code ?? issue.code}-${issue.path}`"
                   >
-                    发布
-                  </button>
-                </div>
+                    <strong>{{ normalizeIssueCode(issue) }}</strong>
+                    <span>{{ issue.path }}</span>
+                    <p>{{ issue.message }}</p>
+                  </li>
+                </ul>
+                <ul v-if="configValidationResult.warnings.length" class="issue-list issue-list--warning">
+                  <li
+                    v-for="issue in configValidationResult.warnings"
+                    :key="`${issue.error_code ?? issue.code}-${issue.path}`"
+                  >
+                    <strong>{{ normalizeIssueCode(issue) }}</strong>
+                    <span>{{ issue.path }}</span>
+                    <p>{{ issue.message }}</p>
+                  </li>
+                </ul>
               </div>
-              <p v-else class="empty-state">当前尚未读取到配置版本。</p>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeConfigModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canSaveSelectedConfigDraft">
+                {{ configBusy.saving ? "保存中..." : "保存草稿" }}
+              </button>
+            </footer>
+          </form>
 
-              <h4 class="config-versions__title">配置审计</h4>
-              <p v-if="auditFeedback" :class="toneClass(auditFeedback.tone)">
-                {{ auditFeedback.message }}
-              </p>
-              <div v-if="auditLogs.length" class="audit-list">
-                <article v-for="log in auditLogs" :key="log.id" class="audit-row">
-                  <header>
-                    <strong>{{ log.event_name }}</strong>
-                    <span :class="toneClass(log.result === 'success' ? 'success' : 'error')">
-                      {{ log.result }}
-                    </span>
-                  </header>
-                  <p>{{ formatAuditTime(log.created_at) }}</p>
-                  <p>{{ auditSummaryPreview(log) }}</p>
-                  <p v-if="log.error_code" class="audit-row__error">{{ log.error_code }}</p>
-                </article>
+          <div v-else-if="configModalMode === 'delete' && selectedConfigItem">
+            <div class="modal__body">
+              <div class="danger-panel">
+                <h4>确认删除配置草稿</h4>
+                <p>
+                  将删除 {{ configSectionLabel(selectedConfigItem.key) }} 的草稿版本 v{{ selectedConfigItem.version }}。active 配置不会被删除。
+                </p>
+                <label class="confirm confirm--inline">
+                  <input v-model="configDangerForm.confirmedDelete" type="checkbox" />
+                  <span>确认删除该配置草稿</span>
+                </label>
               </div>
-              <p v-else-if="canReadAudit" class="empty-state">当前尚未读取到配置审计记录。</p>
-              <p v-else class="empty-state">当前账号缺少审计读取权限。</p>
-            </aside>
+              <div v-if="configFeedback" :class="['feedback feedback--wide', `feedback--${configFeedback.tone}`]">
+                {{ configFeedback.message }}
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeConfigModal">
+                取消
+              </button>
+              <button
+                class="button button--danger"
+                type="button"
+                @click="discardSelectedDraft"
+                :disabled="!canDiscardSelectedDraft"
+              >
+                {{ configBusy.deleting ? "删除中..." : "删除草稿" }}
+              </button>
+            </footer>
           </div>
         </section>
-      </section>
+      </div>
 
       <div
         v-if="departmentModalMode"
@@ -4534,92 +5333,58 @@ function isComposeDemoProvider(value: string): boolean {
   gap: 10px;
 }
 
-.config-console {
+.config-version-strip {
   min-width: 0;
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) 260px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 }
 
-.config-list,
-.config-versions {
+.config-version-card {
   min-width: 0;
-  padding: 16px;
-  display: grid;
-  align-content: start;
-  gap: 10px;
-  background: #fbfcfd;
-}
-
-.config-list {
-  border-right: 1px solid #e7ebf0;
-}
-
-.config-versions {
-  border-left: 1px solid #e7ebf0;
-}
-
-.config-list__item {
-  width: 100%;
   border: 1px solid #d8dee6;
   border-radius: 8px;
-  background: #ffffff;
-  color: #1d2935;
-  padding: 10px 12px;
+  background: #fbfcfd;
+  padding: 14px 16px;
   display: grid;
   gap: 4px;
-  text-align: left;
-  cursor: pointer;
 }
 
-.config-list__item strong,
-.version-row strong {
-  overflow-wrap: anywhere;
-}
-
-.config-list__item span,
-.version-row span {
+.config-version-card span {
   color: #667182;
   font-size: 12px;
 }
 
-.config-list__item--active {
-  border-color: #2f7d66;
-  background: #eff8f4;
+.config-version-card strong {
+  color: #1d2935;
+  font-size: 24px;
 }
 
-.config-editor {
+.config-secondary-grid {
   min-width: 0;
-  padding: 16px 18px 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 16px;
+}
+
+.config-versions {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 16px;
   display: grid;
   align-content: start;
-  gap: 14px;
+  gap: 10px;
 }
 
-.config-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.version-row strong {
+  overflow-wrap: anywhere;
 }
 
-.config-meta span {
-  border: 1px solid #d8dee6;
-  border-radius: 999px;
-  color: #516072;
-  padding: 5px 9px;
+.version-row span {
+  color: #667182;
   font-size: 12px;
-}
-
-.config-editor__field {
-  padding: 0;
-}
-
-.control--textarea {
-  min-height: 420px;
-  resize: vertical;
-  line-height: 1.5;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 13px;
-  white-space: pre;
 }
 
 .config-actions {
@@ -4750,6 +5515,10 @@ function isComposeDemoProvider(value: string): boolean {
 
 .entity-table--users .entity-table__row {
   grid-template-columns: minmax(180px, 1.1fr) minmax(105px, 0.55fr) minmax(190px, 1.25fr) minmax(190px, 1.2fr) minmax(240px, 1.35fr);
+}
+
+.entity-table--configs .entity-table__row {
+  grid-template-columns: minmax(220px, 1.3fr) minmax(90px, 0.45fr) minmax(110px, 0.5fr) minmax(220px, 1.2fr) minmax(210px, 1fr);
 }
 
 .entity-table__row--header {
@@ -5541,15 +6310,13 @@ function isComposeDemoProvider(value: string): boolean {
     grid-template-columns: 1fr;
   }
 
-  .config-console {
+  .config-secondary-grid,
+  .config-version-strip {
     grid-template-columns: 1fr;
   }
 
-  .config-list,
   .config-versions {
-    border-left: 0;
-    border-right: 0;
-    border-top: 1px solid #e7ebf0;
+    padding: 14px;
   }
 
   .entity-table__row--header {
@@ -5557,7 +6324,8 @@ function isComposeDemoProvider(value: string): boolean {
   }
 
   .entity-table--departments .entity-table__row,
-  .entity-table--users .entity-table__row {
+  .entity-table--users .entity-table__row,
+  .entity-table--configs .entity-table__row {
     grid-template-columns: 1fr;
     align-items: start;
   }

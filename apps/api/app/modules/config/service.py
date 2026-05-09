@@ -145,7 +145,7 @@ class ConfigService:
 
     def list_config_items(self, session: Session) -> list[ConfigItem]:
         snapshot = self.load_active_config(session)
-        return [
+        active_items = [
             ConfigItem(
                 key=key,
                 value_json=copy.deepcopy(value),
@@ -156,6 +156,24 @@ class ConfigService:
             for key, value in sorted(snapshot.config.items())
             if _is_editable_config_section(key, value)
         ]
+        draft_items: list[ConfigItem] = []
+        for draft in self._list_draft_config_payloads(session):
+            draft_config = _parse_config_value(draft["value_json"], version=int(draft["version"]))
+            for key, value in sorted(draft_config.items()):
+                if not _is_editable_config_section(key, value):
+                    continue
+                if snapshot.config.get(key) == value:
+                    continue
+                draft_items.append(
+                    ConfigItem(
+                        key=key,
+                        value_json=copy.deepcopy(value),
+                        scope_type=str(draft["scope_type"]),
+                        status=str(draft["status"]),
+                        version=int(draft["version"]),
+                    )
+                )
+        return active_items + draft_items
 
     def get_config_item(self, session: Session, key: str) -> ConfigItem:
         snapshot = self.load_active_config(session)
@@ -426,6 +444,45 @@ class ConfigService:
             created_by=str(row["created_by"]) if row.get("created_by") else None,
         )
 
+    def discard_config_draft(
+        self,
+        session: Session,
+        *,
+        version: int,
+        actor_user_id: str | None,
+    ) -> ConfigVersion:
+        row = self._load_config_version_row(session, version, for_update=True)
+        status = str(row["status"])
+        if status != "draft":
+            raise ConfigServiceError(
+                "CONFIG_VERSION_NOT_DISCARDABLE",
+                "only draft config versions can be discarded",
+                details={"version": version, "status": status},
+            )
+
+        self._mark_version_status(session, version, "archived")
+        self._mark_system_config_status(session, version, "archived")
+        self._insert_audit_log(
+            session,
+            event_name="config.draft_discarded",
+            action="discard_draft",
+            result="success",
+            actor_id=actor_user_id,
+            resource_id=str(version),
+            risk_level=str(row["risk_level"]),
+            config_version=version,
+            summary={
+                "config_hash": row["config_hash"],
+                "risk_level": row["risk_level"],
+            },
+        )
+        return ConfigVersion(
+            version=version,
+            status="archived",
+            risk_level=str(row["risk_level"]),
+            created_by=str(row["created_by"]) if row.get("created_by") else None,
+        )
+
     def _load_active_config_version(self, session: Session) -> int | None:
         values = self._load_system_state_values(session)
         self._assert_initialized_values(values)
@@ -679,6 +736,35 @@ class ConfigService:
                     version=version,
                 )
         return None
+
+    def _list_draft_config_payloads(self, session: Session, *, limit: int = 20) -> list[dict[str, Any]]:
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        cv.version,
+                        cv.scope_type,
+                        cv.status,
+                        sc.value_json
+                    FROM config_versions cv
+                    JOIN system_configs sc ON sc.config_version_id = cv.id
+                    WHERE cv.status IN ('draft', 'validating')
+                      AND sc.key = 'active_config'
+                    ORDER BY cv.version DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": limit},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise ConfigServiceError(
+                "CONFIG_VERSION_UNAVAILABLE",
+                "config drafts cannot be read",
+                retryable=True,
+                details={"error_type": exc.__class__.__name__},
+            ) from exc
+        return [dict(row._mapping) for row in rows]
 
     def _next_config_version(self, session: Session) -> int:
         row = session.execute(
