@@ -82,13 +82,18 @@ python3 apps/worker/app/main.py
 
 ## 当前状态
 
-- 设计文档已收敛。
-- 工程骨架已建立。
-- 业务模块仍待按设计顺序逐步实现。
+- 设计文档和工程契约已收敛，包含 MVP、OpenAPI、数据库 Schema、权限矩阵、状态机、审计事件字典和测试计划。
+- 后端控制面已初步落地：初始化、setup token、active config、Secret Store、认证会话、配置管理、用户/部门/角色绑定管理、审计查询和健康检查。
+- 数据库迁移已覆盖 P0 大部分核心表：配置、认证、组织、权限、知识库、文档、索引、导入任务、审计、查询日志和模型调用日志。
+- 管理后台已接入 setup、登录、配置、用户、部门、角色绑定和审计查询。
+- RAG 数据面仍待补齐：Permission Service 核心已落地但尚未接入业务 API；知识库/文档完整管理、导入 Worker、索引发布、查询检索、答案生成和 citation 校验仍待实现。
+- 当前开发进度详见根目录 `开发进度追踪.md`。
 
-建议先进入：
+建议下一步按以下顺序推进：
 
-1. FastAPI 错误结构和设置校验补齐。
-2. SQLAlchemy / Alembic 初始化。
-3. Setup Service 与 active config 流程。
-4. Auth / Org / Permission 基础实现。
+1. 持续保持实际 FastAPI routes 与 `docs/contracts/openapi.yaml` 的契约对齐。
+2. 将 `Permission Service` 接入后续知识库、文档、导入和查询 API。
+3. 补齐知识库、文件夹、文档和权限变更 API。
+4. 实现 Import Service 与 Worker claim loop。
+5. 实现 Indexing Service 和 active index 发布。
+6. 实现非流式查询闭环，再补流式查询和普通用户前端。

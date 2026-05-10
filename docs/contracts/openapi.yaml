@@ -1694,6 +1694,23 @@ paths:
                 $ref: "#/components/schemas/ConfigVersionResponse"
         default:
           $ref: "#/components/responses/Error"
+    delete:
+      tags: [AdminConfig]
+      summary: Admin discard draft config version
+      operationId: adminDeleteConfigVersion
+      x-token-type: access
+      x-required-scope: config:manage
+      x-audit-required: true
+      x-risk-level: high
+      x-confirmation-required: true
+      x-confirmation-condition: always
+      parameters:
+        - $ref: "#/components/parameters/ConfigVersion"
+      responses:
+        "204":
+          description: Draft config discarded
+        default:
+          $ref: "#/components/responses/Error"
 
   /internal/v1/admin/config-validations:
     post:
