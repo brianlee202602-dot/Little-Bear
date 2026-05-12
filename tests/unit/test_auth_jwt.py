@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import jwt as pyjwt
 import pytest
 from app.shared.jwt import JwtError, decode_hs256, encode_hs256
+
+SECRET = "s" * 32
+OTHER_SECRET = "o" * 32
+HS384_SECRET = "h" * 48
 
 
 def test_hs256_jwt_round_trips_with_issuer_audience_and_type() -> None:
@@ -16,12 +21,12 @@ def test_hs256_jwt_round_trips_with_issuer_audience_and_type() -> None:
             "aud": "little-bear-internal",
             "exp": int((datetime.now(UTC) + timedelta(minutes=5)).timestamp()),
         },
-        "secret",
+        SECRET,
     )
 
     claims = decode_hs256(
         token,
-        "secret",
+        SECRET,
         issuer="little-bear-rag",
         audience="little-bear-internal",
         token_type="access",
@@ -39,13 +44,39 @@ def test_hs256_jwt_rejects_invalid_signature() -> None:
             "token_type": "access",
             "exp": int((datetime.now(UTC) + timedelta(minutes=5)).timestamp()),
         },
-        "secret",
+        SECRET,
     )
 
     with pytest.raises(JwtError) as exc_info:
-        decode_hs256(token, "other-secret")
+        decode_hs256(token, OTHER_SECRET)
 
     assert exc_info.value.error_code == "JWT_SIGNATURE_INVALID"
+
+
+def test_hs256_jwt_rejects_missing_exp() -> None:
+    token = encode_hs256({"sub": "user_1", "jti": "access_1"}, SECRET)
+
+    with pytest.raises(JwtError) as exc_info:
+        decode_hs256(token, SECRET)
+
+    assert exc_info.value.error_code == "JWT_EXP_MISSING"
+
+
+def test_hs256_jwt_rejects_unsupported_algorithm() -> None:
+    token = pyjwt.encode(
+        {
+            "sub": "user_1",
+            "jti": "access_1",
+            "exp": int((datetime.now(UTC) + timedelta(minutes=5)).timestamp()),
+        },
+        HS384_SECRET,
+        algorithm="HS384",
+    )
+
+    with pytest.raises(JwtError) as exc_info:
+        decode_hs256(token, HS384_SECRET)
+
+    assert exc_info.value.error_code == "JWT_ALGORITHM_UNSUPPORTED"
 
 
 def test_hs256_jwt_rejects_expired_token() -> None:
@@ -56,10 +87,10 @@ def test_hs256_jwt_rejects_expired_token() -> None:
             "token_type": "access",
             "exp": int((datetime.now(UTC) - timedelta(minutes=1)).timestamp()),
         },
-        "secret",
+        SECRET,
     )
 
     with pytest.raises(JwtError) as exc_info:
-        decode_hs256(token, "secret")
+        decode_hs256(token, SECRET)
 
     assert exc_info.value.error_code == "JWT_EXPIRED"

@@ -1,18 +1,26 @@
-"""轻量 HS256 JWT 工具。
+"""HS256 JWT 工具。
 
-项目当前不额外引入 PyJWT，P0 只需要 HMAC-SHA256 签发和校验 access/refresh/setup
-形态的 JWT。这里集中处理 base64url、签名、exp/iat/aud/iss 校验，避免各模块各自拼接
-JWT 字符串。
+对外保留项目内的 JwtError 和 encode/decode API，内部使用 PyJWT 完成 JWT
+结构解析、算法约束和签名校验，避免维护手写 JOSE 细节。
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
-from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import UTC, datetime
 from typing import Any
+
+import jwt as pyjwt
+from jwt import (
+    DecodeError,
+    ExpiredSignatureError,
+    InvalidAlgorithmError,
+    InvalidAudienceError,
+    InvalidIssuerError,
+    InvalidSignatureError,
+    InvalidTokenError,
+    MissingRequiredClaimError,
+    PyJWTError,
+)
 
 
 class JwtError(Exception):
@@ -27,9 +35,10 @@ class JwtError(Exception):
 def encode_hs256(claims: dict[str, Any], secret: str) -> str:
     if not secret:
         raise JwtError("JWT_SIGNING_SECRET_MISSING", "jwt signing secret is missing")
-    header = {"alg": "HS256", "typ": "JWT"}
-    signing_input = ".".join((_b64_json(header), _b64_json(claims)))
-    return f"{signing_input}.{_sign(signing_input, secret)}"
+    try:
+        return pyjwt.encode(claims, secret, algorithm="HS256", headers={"typ": "JWT"})
+    except PyJWTError as exc:
+        raise JwtError("JWT_MALFORMED", "jwt claims cannot be encoded") from exc
 
 
 def decode_hs256(
@@ -46,19 +55,37 @@ def decode_hs256(
     if not secret:
         raise JwtError("JWT_SIGNING_SECRET_MISSING", "jwt signing secret is missing")
 
-    signing_input, _, signature = token.rpartition(".")
-    if not hmac.compare_digest(signature, _sign(signing_input, secret)):
-        raise JwtError("JWT_SIGNATURE_INVALID", "jwt signature is invalid")
-
     try:
-        header_segment, payload_segment = signing_input.split(".", maxsplit=1)
-        header = json.loads(_b64_decode(header_segment))
-        claims = json.loads(_b64_decode(payload_segment))
-    except (ValueError, json.JSONDecodeError) as exc:
+        claims = pyjwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            options={
+                "require": ["exp"],
+                "verify_exp": False,
+                "verify_iat": False,
+                "verify_nbf": False,
+                "verify_aud": False,
+                "verify_iss": False,
+            },
+        )
+    except MissingRequiredClaimError as exc:
+        raise JwtError("JWT_EXP_MISSING", "jwt exp claim is missing") from exc
+    except ExpiredSignatureError as exc:
+        raise JwtError("JWT_EXPIRED", "jwt has expired") from exc
+    except InvalidSignatureError as exc:
+        raise JwtError("JWT_SIGNATURE_INVALID", "jwt signature is invalid") from exc
+    except InvalidAlgorithmError as exc:
+        raise JwtError("JWT_ALGORITHM_UNSUPPORTED", "jwt algorithm is not supported") from exc
+    except InvalidIssuerError as exc:
+        raise JwtError("JWT_ISSUER_INVALID", "jwt issuer is invalid") from exc
+    except InvalidAudienceError as exc:
+        raise JwtError("JWT_AUDIENCE_INVALID", "jwt audience is invalid") from exc
+    except DecodeError as exc:
         raise JwtError("JWT_MALFORMED", "jwt payload is malformed") from exc
+    except InvalidTokenError as exc:
+        raise JwtError("JWT_MALFORMED", "jwt token is invalid") from exc
 
-    if header.get("alg") != "HS256":
-        raise JwtError("JWT_ALGORITHM_UNSUPPORTED", "jwt algorithm is not supported")
     if not isinstance(claims, dict):
         raise JwtError("JWT_MALFORMED", "jwt claims must be an object")
 
@@ -99,25 +126,3 @@ def _validate_registered_claims(
 
     if token_type is not None and claims.get("token_type") != token_type:
         raise JwtError("JWT_TOKEN_TYPE_INVALID", "jwt token_type is invalid")
-
-
-def _b64_json(value: dict[str, Any]) -> str:
-    return _b64_encode(json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8"))
-
-
-def _sign(signing_input: str, secret: str) -> str:
-    digest = hmac.new(
-        secret.encode("utf-8"),
-        signing_input.encode("ascii"),
-        hashlib.sha256,
-    ).digest()
-    return _b64_encode(digest)
-
-
-def _b64_encode(value: bytes) -> str:
-    return urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-
-def _b64_decode(value: str) -> str:
-    padding = "=" * (-len(value) % 4)
-    return urlsafe_b64decode(f"{value}{padding}").decode("utf-8")

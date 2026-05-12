@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import admin, audit, auth, config, health, setup
+from app.api.routes import admin, audit, auth, config, health, import_pipeline, query, setup
 from app.modules.setup.startup_service import SetupStartupService
 from app.shared.logging import configure_logging
 from app.shared.middleware import RequestContextMiddleware, SetupGuardMiddleware
@@ -46,6 +46,8 @@ def create_app(*, run_startup_checks: bool = True) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(config.router)
     app.include_router(health.router)
+    app.include_router(import_pipeline.router)
+    app.include_router(query.router)
     app.include_router(setup.router)
     return app
 

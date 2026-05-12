@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+# ruff: noqa: E402, I001
+
 import logging
 import os
 import signal
+import sys
 import time
+from pathlib import Path
+
+API_PATH = Path(__file__).resolve().parents[2] / "api"
+if str(API_PATH) not in sys.path:
+    sys.path.insert(0, str(API_PATH))
+
+from app.db.session import session_scope  # noqa: E402
+from app.modules.import_pipeline.errors import ImportServiceError  # noqa: E402
+from app.modules.import_pipeline.service import ImportService  # noqa: E402
 
 
 LOGGER = logging.getLogger("little_bear.worker")
@@ -33,11 +45,64 @@ def main() -> None:
     if not database_url:
         raise RuntimeError("DATABASE_URL is required")
 
-    LOGGER.info("worker started")
+    service = ImportService()
+    worker_id = os.getenv("WORKER_ID") or f"worker-{os.getpid()}"
+    poll_interval_seconds = float(os.getenv("WORKER_POLL_INTERVAL_SECONDS", "2"))
+    lock_seconds = int(os.getenv("WORKER_LOCK_SECONDS", "60"))
+    stage_interval_seconds = float(os.getenv("WORKER_STAGE_INTERVAL_SECONDS", "0"))
+
+    LOGGER.info("worker started", extra={"worker_id": worker_id})
     while not stop:
-        # 任务领取和阶段推进逻辑后续由 Import Service 实现。
-        time.sleep(2)
-    LOGGER.info("worker stopped")
+        try:
+            with session_scope() as session:
+                job = service.claim_next_job(
+                    session,
+                    worker_id=worker_id,
+                    lock_seconds=lock_seconds,
+                )
+            if job is None:
+                time.sleep(poll_interval_seconds)
+                continue
+
+            while not stop and job.status == "running":
+                with session_scope() as session:
+                    service.heartbeat_claimed_job(
+                        session,
+                        job_id=job.id,
+                        worker_id=worker_id,
+                        lock_seconds=lock_seconds,
+                    )
+                    advanced = service.advance_claimed_job(
+                        session,
+                        job_id=job.id,
+                        worker_id=worker_id,
+                    )
+                LOGGER.info(
+                    "import job advanced",
+                    extra={
+                        "worker_id": worker_id,
+                        "job_id": advanced.id,
+                        "status": advanced.status,
+                        "stage": advanced.stage,
+                    },
+                )
+                job = advanced
+                if job.status == "running" and stage_interval_seconds > 0:
+                    time.sleep(stage_interval_seconds)
+        except ImportServiceError as exc:
+            LOGGER.warning(
+                "import job step failed",
+                extra={
+                    "worker_id": worker_id,
+                    "error_code": exc.error_code,
+                    "retryable": exc.retryable,
+                },
+            )
+            time.sleep(poll_interval_seconds)
+        except Exception:
+            LOGGER.exception("worker loop crashed", extra={"worker_id": worker_id})
+            time.sleep(poll_interval_seconds)
+    LOGGER.info("worker stopped", extra={"worker_id": worker_id})
 
 
 if __name__ == "__main__":

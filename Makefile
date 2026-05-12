@@ -9,7 +9,7 @@ define env_shell
 set -a; [ ! -f "./.env" ] || . "./.env"; set +a;
 endef
 
-.PHONY: env up down restart ps logs clean reset db-upgrade db-current api web admin test
+.PHONY: env up down restart ps logs clean reset db-upgrade db-current api web admin test test-integration-qdrant
 
 env:
 	@if [ ! -f "$(ENV_FILE)" ]; then cp .env.example "$(ENV_FILE)"; fi
@@ -51,3 +51,6 @@ admin:
 
 test:
 	$(env_shell)
+
+test-integration-qdrant:
+	$(env_shell) LITTLE_BEAR_RUN_QDRANT_INTEGRATION=1 PYTHONPATH=apps/api $(PYTHON) -m pytest -q tests/integration/test_qdrant_indexing_flow.py

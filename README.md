@@ -72,6 +72,18 @@ make PYTHON=python3 db-upgrade
 python3 apps/worker/app/main.py
 ```
 
+Qdrant 与 embedding provider 的真实写入/召回联调测试默认不随单元测试运行。启动本地 `qdrant` 和 `tei-embedding` 后，可执行：
+
+```bash
+make test-integration-qdrant
+```
+
+如果当前 shell 使用项目虚拟环境，可显式指定解释器：
+
+```bash
+make PYTHON=.venv/bin/python test-integration-qdrant
+```
+
 数据库迁移完成后再启动 API。空库完成迁移但尚未执行业务初始化时，`GET /internal/v1/setup-state` 应返回未初始化状态，随后才能进入 `setup-config-validations` 和 `setup-initialization` 流程。
 
 ## 开发约定
@@ -86,14 +98,17 @@ python3 apps/worker/app/main.py
 - 后端控制面已初步落地：初始化、setup token、active config、Secret Store、认证会话、配置管理、用户/部门/角色绑定管理、审计查询和健康检查。
 - 数据库迁移已覆盖 P0 大部分核心表：配置、认证、组织、权限、知识库、文档、索引、导入任务、审计、查询日志和模型调用日志。
 - 管理后台已接入 setup、登录、配置、用户、部门、角色绑定和审计查询。
-- RAG 数据面仍待补齐：Permission Service 核心已落地但尚未接入业务 API；知识库/文档完整管理、导入 Worker、索引发布、查询检索、答案生成和 citation 校验仍待实现。
+- Permission Service 核心已落地；管理端知识库、文件夹和文档元数据管理已接入权限边界。
+- Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、阶段推进、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入和 active index 发布。
+- Query Service 非流式链路已起步：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、Permission Service filter、候选 gate、citation 返回和 query_logs 写入；answer 模式当前以结构化降级返回检索来源。
+- RAG 数据面仍待补齐：对象存储、复杂格式解析、真实 Qdrant / embedding provider 端到端联调、Context Builder、答案生成和严格 citation 校验仍待实现。
 - 当前开发进度详见根目录 `开发进度追踪.md`。
 
 建议下一步按以下顺序推进：
 
 1. 持续保持实际 FastAPI routes 与 `docs/contracts/openapi.yaml` 的契约对齐。
-2. 将 `Permission Service` 接入后续知识库、文档、导入和查询 API。
-3. 补齐知识库、文件夹、文档和权限变更 API。
-4. 实现 Import Service 与 Worker claim loop。
-5. 实现 Indexing Service 和 active index 发布。
-6. 实现非流式查询闭环，再补流式查询和普通用户前端。
+2. 接入对象存储和更完整的 parse / clean / chunk 执行器。
+3. 补齐文档版本、chunk、预览和独立权限变更 API。
+4. 做真实 Qdrant / embedding provider 联调，并补失败注入和回归数据集验证。
+5. 扩展非流式查询：Context Builder、LLM provider、model_call_logs 和 citation 校验。
+6. 实现流式查询和普通用户前端查询工作区。
