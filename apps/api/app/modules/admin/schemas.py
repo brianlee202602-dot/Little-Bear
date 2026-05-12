@@ -61,11 +61,57 @@ class AdminKnowledgeBase:
     owner_department_id: str
     default_visibility: str
     config_scope_id: str | None = None
+    policy_version: int = 1
 
 
 @dataclass(frozen=True)
 class AdminKnowledgeBaseList:
     items: list[AdminKnowledgeBase]
+    total: int
+
+
+@dataclass(frozen=True)
+class AdminAcceptedResult:
+    accepted: bool
+    job_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AdminFolder:
+    id: str
+    kb_id: str
+    name: str
+    status: str
+    parent_id: str | None = None
+    path: str = ""
+
+
+@dataclass(frozen=True)
+class AdminFolderList:
+    items: list[AdminFolder]
+    total: int
+
+
+@dataclass(frozen=True)
+class AdminDocument:
+    id: str
+    kb_id: str
+    title: str
+    lifecycle_status: str
+    index_status: str
+    owner_department_id: str
+    visibility: str
+    folder_id: str | None = None
+    current_version_id: str | None = None
+    tags: tuple[str, ...] = field(default_factory=tuple)
+    permission_snapshot_id: str | None = None
+    content_hash: str | None = None
+    policy_version: int = 1
+
+
+@dataclass(frozen=True)
+class AdminDocumentList:
+    items: list[AdminDocument]
     total: int
 
 

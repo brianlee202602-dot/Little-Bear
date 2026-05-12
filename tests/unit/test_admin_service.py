@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import pytest
 from app.modules.admin.errors import AdminServiceError
-from app.modules.admin.schemas import AdminDepartment, AdminRole, AdminRoleBinding, AdminUser
+from app.modules.admin.schemas import (
+    AdminDepartment,
+    AdminDocument,
+    AdminFolder,
+    AdminKnowledgeBase,
+    AdminRole,
+    AdminRoleBinding,
+    AdminUser,
+)
 from app.modules.admin.service import (
     AdminActorContext,
     AdminService,
@@ -168,6 +176,7 @@ def test_list_knowledge_bases_filters_enterprise_and_status() -> None:
                         "owner_department_id": "department_1",
                         "default_visibility": "department",
                         "config_scope_id": None,
+                        "policy_version": 1,
                     }
                 )
             ]
@@ -194,6 +203,755 @@ def test_list_knowledge_bases_filters_enterprise_and_status() -> None:
     assert "status = :status" in sql
     assert params["enterprise_id"] == _ENTERPRISE_ID
     assert params["status"] == "active"
+
+
+def test_list_knowledge_bases_scopes_resource_limited_actor() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(all_rows=[]),
+        _Result(one=_Row({"total": 0})),
+    ]
+    actor = AdminActorContext(
+        user_id=_ACTOR_USER_ID,
+        scopes=("knowledge_base:manage",),
+        department_ids=("22222222-2222-2222-2222-222222222222",),
+        knowledge_base_ids=("55555555-5555-5555-5555-555555555555",),
+        can_manage_all_knowledge_bases=False,
+    )
+
+    result = AdminService().list_knowledge_bases(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        page=1,
+        page_size=20,
+        actor_context=actor,
+    )
+
+    assert result.total == 0
+    sql, params = session.executed[0]
+    assert "owner_department_id = ANY" in sql
+    assert "id = ANY" in sql
+    assert params["actor_department_ids"] == ["22222222-2222-2222-2222-222222222222"]
+    assert params["actor_kb_ids"] == ["55555555-5555-5555-5555-555555555555"]
+
+
+def test_create_knowledge_base_requires_confirmation_for_enterprise_visibility() -> None:
+    actor = AdminActorContext(
+        user_id=_ACTOR_USER_ID,
+        scopes=("knowledge_base:manage",),
+        can_manage_all_knowledge_bases=True,
+    )
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        AdminService().create_knowledge_base(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            name="制度知识库",
+            owner_department_id="22222222-2222-2222-2222-222222222222",
+            default_visibility="enterprise",
+            confirmed_enterprise_visibility=False,
+            actor_context=actor,
+        )
+
+    assert exc_info.value.error_code == "ADMIN_CONFIRMATION_REQUIRED"
+    assert exc_info.value.status_code == 428
+
+
+def test_create_knowledge_base_writes_policy_snapshot_and_audit(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "department_id": "22222222-2222-2222-2222-222222222222",
+                        "code": "engineering",
+                        "name": "研发部",
+                        "status": "active",
+                        "is_default": False,
+                    }
+                )
+            ]
+        ),
+        _Result(),
+        _Result(one=_Row({"permission_version": 7})),
+        _Result(),
+        _Result(),
+        _Result(),
+    ]
+    actor = AdminActorContext(
+        user_id=_ACTOR_USER_ID,
+        scopes=("knowledge_base:manage",),
+        can_manage_all_knowledge_bases=True,
+    )
+
+    knowledge_base = service.create_knowledge_base(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        name=" 制度知识库 ",
+        owner_department_id="22222222-2222-2222-2222-222222222222",
+        default_visibility="department",
+        confirmed_enterprise_visibility=False,
+        actor_context=actor,
+    )
+
+    assert knowledge_base.name == "制度知识库"
+    assert knowledge_base.policy_version == 1
+    statements = [statement for statement, _params in session.executed]
+    assert any("INSERT INTO knowledge_bases" in statement for statement in statements)
+    assert any("INSERT INTO resource_policies" in statement for statement in statements)
+    assert any("INSERT INTO permission_snapshots" in statement for statement in statements)
+    assert any("knowledge_base.created" in str(params) for _statement, params in session.executed)
+    snapshot_params = next(
+        params
+        for statement, params in session.executed
+        if "INSERT INTO permission_snapshots" in statement
+    )
+    assert snapshot_params["permission_version"] == 7
+    assert snapshot_params["visibility"] == "department"
+
+
+def test_patch_knowledge_base_requires_confirmation_when_visibility_expands(monkeypatch) -> None:
+    service = AdminService()
+    current = AdminKnowledgeBase(
+        id="kb_1",
+        name="制度知识库",
+        status="active",
+        owner_department_id="department_1",
+        default_visibility="department",
+        policy_version=2,
+    )
+    monkeypatch.setattr(service, "get_knowledge_base", lambda *_args, **_kwargs: current)
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        service.patch_knowledge_base(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            kb_id="kb_1",
+            default_visibility="enterprise",
+            confirmed_visibility_expand=False,
+            actor_context=AdminActorContext(
+                user_id=_ACTOR_USER_ID,
+                scopes=("knowledge_base:manage",),
+                can_manage_all_knowledge_bases=True,
+            ),
+        )
+
+    assert exc_info.value.error_code == "ADMIN_CONFIRMATION_REQUIRED"
+    assert exc_info.value.details["previous_visibility"] == "department"
+
+
+def test_patch_knowledge_base_visibility_writes_new_policy_and_snapshot(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    current = AdminKnowledgeBase(
+        id="kb_1",
+        name="制度知识库",
+        status="active",
+        owner_department_id="22222222-2222-2222-2222-222222222222",
+        default_visibility="department",
+        policy_version=2,
+    )
+    after = AdminKnowledgeBase(
+        id="kb_1",
+        name="制度知识库",
+        status="active",
+        owner_department_id="22222222-2222-2222-2222-222222222222",
+        default_visibility="enterprise",
+        policy_version=3,
+    )
+    monkeypatch.setattr(service, "get_knowledge_base", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(service, "_load_knowledge_base", lambda *_args, **_kwargs: after)
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 9)
+    monkeypatch.setattr(
+        service,
+        "_replace_resource_policy",
+        lambda *_args, **_kwargs: "55555555-5555-5555-5555-555555555555",
+    )
+    monkeypatch.setattr(
+        service,
+        "_insert_permission_snapshot",
+        lambda *_args, **_kwargs: {"snapshot_id": "snapshot_1", "payload_hash": "hash_1"},
+    )
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "_insert_audit_log",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
+
+    result = service.patch_knowledge_base(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        kb_id="kb_1",
+        default_visibility="enterprise",
+        confirmed_visibility_expand=True,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("knowledge_base:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.default_visibility == "enterprise"
+    update_params = next(
+        params for statement, params in session.executed if "UPDATE knowledge_bases" in statement
+    )
+    assert update_params["policy_version"] == 3
+    assert audits[0]["event_name"] == "knowledge_base.updated"
+    assert audits[0]["summary"]["permission_snapshot_id"] == "snapshot_1"
+
+
+def test_delete_knowledge_base_blocks_access_and_enqueues_cleanup(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    current = AdminKnowledgeBase(
+        id="kb_1",
+        name="制度知识库",
+        status="active",
+        owner_department_id="department_1",
+        default_visibility="department",
+        policy_version=1,
+    )
+    monkeypatch.setattr(service, "get_knowledge_base", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(service, "_insert_access_block", lambda *_args, **_kwargs: "block_1")
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 11)
+    monkeypatch.setattr(service, "_enqueue_index_delete_job", lambda *_args, **_kwargs: "job_1")
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "_insert_audit_log",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
+
+    result = service.delete_knowledge_base(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        kb_id="kb_1",
+        confirmed=True,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("knowledge_base:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.accepted is True
+    assert result.job_id == "job_1"
+    assert any("UPDATE knowledge_bases" in statement for statement, _params in session.executed)
+    assert any("UPDATE resource_policies" in statement for statement, _params in session.executed)
+    assert audits[0]["event_name"] == "knowledge_base.deleted"
+    assert audits[0]["summary"]["access_block_id"] == "block_1"
+
+
+def test_list_folders_requires_folder_manage_scope(monkeypatch) -> None:
+    service = AdminService()
+    monkeypatch.setattr(
+        service,
+        "get_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id="kb_1",
+            name="制度知识库",
+            status="active",
+            owner_department_id="department_1",
+            default_visibility="department",
+        ),
+    )
+    actor = AdminActorContext(
+        user_id=_ACTOR_USER_ID,
+        scopes=("knowledge_base:manage",),
+        can_manage_all_knowledge_bases=True,
+    )
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        service.list_folders(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            kb_id="kb_1",
+            page=1,
+            page_size=20,
+            actor_context=actor,
+        )
+
+    assert exc_info.value.error_code == "ADMIN_SCOPE_REQUIRED"
+    assert exc_info.value.details["required_scope"] == "folder:manage"
+
+
+def test_list_folders_filters_by_knowledge_base(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "folder_id": "folder_1",
+                        "kb_id": "kb_1",
+                        "parent_id": None,
+                        "name": "制度",
+                        "path": "/folder_1",
+                        "status": "active",
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+    monkeypatch.setattr(
+        service,
+        "get_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id="kb_1",
+            name="制度知识库",
+            status="active",
+            owner_department_id="department_1",
+            default_visibility="department",
+        ),
+    )
+
+    result = service.list_folders(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        kb_id="kb_1",
+        page=1,
+        page_size=20,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("folder:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.total == 1
+    assert result.items[0].name == "制度"
+    sql, params = session.executed[0]
+    assert "FROM folders" in sql
+    assert "kb_id = CAST(:kb_id AS uuid)" in sql
+    assert params["kb_id"] == "kb_1"
+
+
+def test_create_folder_writes_audit(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    monkeypatch.setattr(
+        service,
+        "get_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id="kb_1",
+            name="制度知识库",
+            status="active",
+            owner_department_id="department_1",
+            default_visibility="department",
+        ),
+    )
+    monkeypatch.setattr(service, "_resolve_parent_folder", lambda *_args, **_kwargs: None)
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "_insert_audit_log",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
+
+    folder = service.create_folder(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        kb_id="kb_1",
+        name=" 制度 ",
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("folder:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert folder.name == "制度"
+    assert any("INSERT INTO folders" in statement for statement, _params in session.executed)
+    assert audits[0]["event_name"] == "folder.created"
+    assert audits[0]["summary"]["kb_id"] == "kb_1"
+
+
+def test_patch_folder_rejects_moving_into_descendant(monkeypatch) -> None:
+    service = AdminService()
+    current = AdminFolder(
+        id="folder_parent",
+        kb_id="kb_1",
+        parent_id=None,
+        name="父文件夹",
+        status="active",
+        path="/folder_parent",
+    )
+    child = AdminFolder(
+        id="folder_child",
+        kb_id="kb_1",
+        parent_id="folder_parent",
+        name="子文件夹",
+        status="active",
+        path="/folder_parent/folder_child",
+    )
+    monkeypatch.setattr(service, "get_folder", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(service, "_resolve_parent_folder", lambda *_args, **_kwargs: child)
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        service.patch_folder(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            folder_id="folder_parent",
+            parent_id="folder_child",
+            actor_context=AdminActorContext(
+                user_id=_ACTOR_USER_ID,
+                scopes=("folder:manage",),
+                can_manage_all_knowledge_bases=True,
+            ),
+            parent_id_provided=True,
+        )
+
+    assert exc_info.value.error_code == "ADMIN_FOLDER_PARENT_INVALID"
+
+
+def test_delete_folder_blocks_access_and_enqueues_cleanup(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    current = AdminFolder(
+        id="folder_1",
+        kb_id="kb_1",
+        parent_id=None,
+        name="制度",
+        status="active",
+        path="/folder_1",
+    )
+    monkeypatch.setattr(service, "get_folder", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(service, "_count_folder_documents", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(service, "_insert_access_block", lambda *_args, **_kwargs: "block_1")
+    monkeypatch.setattr(service, "_enqueue_index_delete_job", lambda *_args, **_kwargs: "job_1")
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "_insert_audit_log",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
+
+    result = service.delete_folder(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        folder_id="folder_1",
+        confirmed=True,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("folder:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.accepted is True
+    assert result.job_id == "job_1"
+    assert any("UPDATE folders" in statement for statement, _params in session.executed)
+    assert audits[0]["event_name"] == "folder.deleted"
+    assert audits[0]["summary"]["document_impact_count"] == 3
+
+
+def _document(
+    *,
+    visibility: str = "department",
+    owner_department_id: str = "22222222-2222-2222-2222-222222222222",
+    lifecycle_status: str = "active",
+    policy_version: int = 1,
+) -> AdminDocument:
+    return AdminDocument(
+        id="44444444-4444-4444-4444-444444444444",
+        kb_id="55555555-5555-5555-5555-555555555555",
+        folder_id="66666666-6666-6666-6666-666666666666",
+        title="员工手册",
+        lifecycle_status=lifecycle_status,
+        index_status="indexed",
+        owner_department_id=owner_department_id,
+        visibility=visibility,
+        current_version_id="77777777-7777-7777-7777-777777777777",
+        tags=("制度",),
+        permission_snapshot_id="88888888-8888-8888-8888-888888888888",
+        content_hash="hash_1",
+        policy_version=policy_version,
+    )
+
+
+def test_list_documents_requires_document_manage_scope(monkeypatch) -> None:
+    service = AdminService()
+    monkeypatch.setattr(
+        service,
+        "get_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id="kb_1",
+            name="制度知识库",
+            status="active",
+            owner_department_id="department_1",
+            default_visibility="department",
+        ),
+    )
+    actor = AdminActorContext(
+        user_id=_ACTOR_USER_ID,
+        scopes=("document:read",),
+        can_manage_all_knowledge_bases=True,
+    )
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        service.list_documents(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            kb_id="kb_1",
+            page=1,
+            page_size=20,
+            actor_context=actor,
+        )
+
+    assert exc_info.value.error_code == "ADMIN_SCOPE_REQUIRED"
+    assert exc_info.value.details["required_scope"] == "document:manage"
+
+
+def test_list_documents_filters_by_knowledge_base_and_status(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "doc_id": "doc_1",
+                        "kb_id": "kb_1",
+                        "folder_id": "folder_1",
+                        "title": "员工手册",
+                        "lifecycle_status": "active",
+                        "index_status": "indexed",
+                        "owner_department_id": "department_1",
+                        "visibility": "department",
+                        "current_version_id": "version_1",
+                        "tags": ["制度"],
+                        "permission_snapshot_id": "snapshot_1",
+                        "content_hash": "hash_1",
+                        "policy_version": 1,
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+    monkeypatch.setattr(
+        service,
+        "get_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id="kb_1",
+            name="制度知识库",
+            status="active",
+            owner_department_id="department_1",
+            default_visibility="department",
+        ),
+    )
+
+    result = service.list_documents(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        kb_id="kb_1",
+        page=1,
+        page_size=20,
+        lifecycle_status="active",
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.total == 1
+    assert result.items[0].title == "员工手册"
+    sql, params = session.executed[0]
+    assert "FROM documents d" in sql
+    assert "d.kb_id = CAST(:kb_id AS uuid)" in sql
+    assert "d.lifecycle_status = :lifecycle_status" in sql
+    assert params["kb_id"] == "kb_1"
+
+
+def test_patch_document_requires_confirmation_when_visibility_expands(monkeypatch) -> None:
+    service = AdminService()
+    current = _document(visibility="department", policy_version=3)
+    monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: current)
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        service.patch_document(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            doc_id=current.id,
+            visibility="enterprise",
+            confirmed_visibility_expand=False,
+            actor_context=AdminActorContext(
+                user_id=_ACTOR_USER_ID,
+                scopes=("document:manage",),
+                can_manage_all_knowledge_bases=True,
+            ),
+        )
+
+    assert exc_info.value.error_code == "ADMIN_CONFIRMATION_REQUIRED"
+    assert exc_info.value.details["previous_visibility"] == "department"
+
+
+def test_patch_document_permission_change_writes_snapshot_and_refresh_job(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    current = _document(visibility="department", policy_version=3)
+    after = _document(visibility="enterprise", policy_version=4)
+    monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(service, "_load_document", lambda *_args, **_kwargs: after)
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 12)
+    monkeypatch.setattr(
+        service,
+        "_replace_resource_policy",
+        lambda *_args, **_kwargs: "99999999-9999-9999-9999-999999999999",
+    )
+    monkeypatch.setattr(
+        service,
+        "_insert_permission_snapshot",
+        lambda *_args, **_kwargs: {
+            "snapshot_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload_hash": "hash_2",
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_enqueue_permission_refresh_job",
+        lambda *_args, **_kwargs: "job_1",
+    )
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "_insert_audit_log",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
+
+    result = service.patch_document(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        doc_id=current.id,
+        title=" 员工手册 V2 ",
+        folder_id=None,
+        folder_id_provided=True,
+        tags=["制度", "制度", "HR"],
+        tags_provided=True,
+        visibility="enterprise",
+        confirmed_visibility_expand=True,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.visibility == "enterprise"
+    update_params = next(
+        params for statement, params in session.executed if "UPDATE documents" in statement
+    )
+    assert update_params["title"] == "员工手册 V2"
+    assert update_params["folder_id"] is None
+    assert update_params["tags"] == ["制度", "HR"]
+    assert update_params["permission_snapshot_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    assert audits[0]["event_name"] == "document.visibility_expanded"
+    assert audits[0]["summary"]["refresh_job_id"] == "job_1"
+
+
+def test_patch_document_tightening_inserts_access_block(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    current = _document(visibility="enterprise", policy_version=2)
+    after = _document(visibility="department", policy_version=3)
+    monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(service, "_load_document", lambda *_args, **_kwargs: after)
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 13)
+    monkeypatch.setattr(
+        service,
+        "_replace_resource_policy",
+        lambda *_args, **_kwargs: "99999999-9999-9999-9999-999999999999",
+    )
+    monkeypatch.setattr(
+        service,
+        "_insert_permission_snapshot",
+        lambda *_args, **_kwargs: {
+            "snapshot_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload_hash": "hash_2",
+        },
+    )
+    blocks: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "_insert_access_block",
+        lambda _session, **kwargs: blocks.append(kwargs) or "block_1",
+    )
+    monkeypatch.setattr(
+        service,
+        "_enqueue_permission_refresh_job",
+        lambda *_args, **_kwargs: "job_1",
+    )
+    monkeypatch.setattr(service, "_insert_audit_log", lambda *_args, **_kwargs: None)
+
+    service.patch_document(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        doc_id=current.id,
+        visibility="department",
+        confirmed_visibility_expand=False,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert blocks[0]["resource_type"] == "document"
+    assert blocks[0]["reason"] == "permission_tightened"
+    assert blocks[0]["block_level"] == "query"
+
+
+def test_delete_document_blocks_access_and_enqueues_cleanup(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    current = _document()
+    monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(service, "_insert_access_block", lambda *_args, **_kwargs: "block_1")
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 14)
+    monkeypatch.setattr(service, "_enqueue_index_delete_job", lambda *_args, **_kwargs: "job_1")
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service,
+        "_insert_audit_log",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
+
+    result = service.delete_document(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        doc_id=current.id,
+        confirmed=True,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.accepted is True
+    assert result.job_id == "job_1"
+    assert any("UPDATE documents" in statement for statement, _params in session.executed)
+    assert any("UPDATE resource_policies" in statement for statement, _params in session.executed)
+    assert audits[0]["event_name"] == "document.deleted"
+    assert audits[0]["summary"]["access_block_id"] == "block_1"
 
 
 def test_create_department_requires_org_manage_scope() -> None:

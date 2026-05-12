@@ -550,6 +550,7 @@ class AuthService:
                     r.code,
                     r.name,
                     r.scope_type,
+                    rb.scope_id::text AS scope_id,
                     r.is_builtin,
                     r.status,
                     r.scopes
@@ -569,6 +570,7 @@ class AuthService:
                 code=row._mapping["code"],
                 name=row._mapping["name"],
                 scope_type=row._mapping["scope_type"],
+                scope_id=row._mapping["scope_id"],
                 is_builtin=bool(row._mapping["is_builtin"]),
                 status=row._mapping["status"],
                 scopes=_normalize_scopes(row._mapping["scopes"]),

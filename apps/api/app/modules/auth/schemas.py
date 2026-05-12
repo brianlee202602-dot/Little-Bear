@@ -33,6 +33,7 @@ class AuthRole:
     scope_type: str
     is_builtin: bool
     status: str
+    scope_id: str | None = None
     scopes: tuple[str, ...] = field(default_factory=tuple)
 
     def to_response(self) -> dict[str, object]:

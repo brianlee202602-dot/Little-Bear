@@ -130,6 +130,32 @@ class KnowledgeBaseData(BaseModel):
     owner_department_id: str
     default_visibility: Literal["department", "enterprise"]
     config_scope_id: str | None = None
+    policy_version: int = 1
+
+
+class KnowledgeBaseCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    owner_department_id: str = Field(min_length=1)
+    default_visibility: Literal["department", "enterprise"]
+    config_scope_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class KnowledgeBasePatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    status: Literal["active", "disabled", "archived"] | None = None
+    default_visibility: Literal["department", "enterprise"] | None = None
+    config_scope_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class KnowledgeBaseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: KnowledgeBaseData
 
 
 class KnowledgeBaseListResponse(BaseModel):
@@ -137,6 +163,100 @@ class KnowledgeBaseListResponse(BaseModel):
 
     request_id: str
     data: list[KnowledgeBaseData]
+    pagination: PaginationData
+
+
+class AcceptedData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool
+    job_id: str | None = None
+
+
+class AcceptedResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: AcceptedData
+
+
+class FolderData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kb_id: str
+    parent_id: str | None = None
+    name: str
+    status: Literal["active", "disabled", "archived"]
+
+
+class FolderCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    parent_id: str | None = Field(default=None, min_length=1)
+
+
+class FolderPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    parent_id: str | None = Field(default=None, min_length=1)
+    status: Literal["active", "disabled", "archived"] | None = None
+
+
+class FolderResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: FolderData
+
+
+class FolderListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[FolderData]
+    pagination: PaginationData
+
+
+class DocumentData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kb_id: str
+    folder_id: str | None = None
+    title: str
+    lifecycle_status: Literal["draft", "active", "archived", "deleted"]
+    index_status: Literal["none", "indexing", "indexed", "index_failed", "blocked"]
+    owner_department_id: str
+    visibility: Literal["department", "enterprise"]
+    current_version_id: str | None = None
+
+
+class DocumentPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=256)
+    folder_id: str | None = Field(default=None, min_length=1)
+    tags: list[str] | None = None
+    owner_department_id: str | None = Field(default=None, min_length=1)
+    visibility: Literal["department", "enterprise"] | None = None
+    lifecycle_status: Literal["active", "archived", "deleted"] | None = None
+
+
+class DocumentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: DocumentData
+
+
+class DocumentListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[DocumentData]
     pagination: PaginationData
 
 

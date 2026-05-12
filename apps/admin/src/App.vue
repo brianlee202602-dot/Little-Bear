@@ -3068,10 +3068,10 @@ function buildCurrentConfigBundle(preferredItem: ConfigItemData | null = null): 
     },
   };
   for (const item of activeConfigItems.value) {
-    config[item.key] = item.value_json;
+    config[item.key] = cloneJsonRecord(item.value_json);
   }
   if (preferredItem) {
-    config[preferredItem.key] = preferredItem.value_json;
+    config[preferredItem.key] = cloneJsonRecord(preferredItem.value_json);
   }
   return config;
 }
@@ -3107,7 +3107,7 @@ function mergeConfigSectionValue(
   baseValue: Record<string, unknown> | undefined,
   formValue: Record<string, unknown>,
 ): Record<string, unknown> {
-  const base = baseValue ? structuredClone(baseValue) : {};
+  const base = baseValue ? cloneJsonRecord(baseValue) : {};
   if (key === "model_gateway") {
     return mergeModelGatewayConfig(base, formValue);
   }
@@ -3186,7 +3186,7 @@ function deepMerge(
   base: Record<string, unknown>,
   patch: Record<string, unknown>,
 ): Record<string, unknown> {
-  const result = structuredClone(base);
+  const result = cloneJsonRecord(base);
   for (const [key, value] of Object.entries(patch)) {
     const baseChild = asRecord(result[key]);
     if (baseChild && isRecord(value) && !Array.isArray(value)) {
@@ -3196,6 +3196,10 @@ function deepMerge(
     }
   }
   return result;
+}
+
+function cloneJsonRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
 function validateConfigForm(): string | null {

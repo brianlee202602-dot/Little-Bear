@@ -5,8 +5,12 @@ from datetime import UTC, datetime
 from app.main import create_app
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
+    AdminAcceptedResult,
     AdminDepartment,
     AdminDepartmentList,
+    AdminDocument,
+    AdminDocumentList,
+    AdminFolder,
     AdminKnowledgeBase,
     AdminKnowledgeBaseList,
     AdminRole,
@@ -156,6 +160,35 @@ def _knowledge_base() -> AdminKnowledgeBase:
         owner_department_id="department_1",
         default_visibility="department",
         config_scope_id=None,
+    )
+
+
+def _folder() -> AdminFolder:
+    return AdminFolder(
+        id="folder_1",
+        kb_id="kb_1",
+        parent_id=None,
+        name="制度",
+        status="active",
+        path="/folder_1",
+    )
+
+
+def _document() -> AdminDocument:
+    return AdminDocument(
+        id="doc_1",
+        kb_id="kb_1",
+        folder_id="folder_1",
+        title="员工手册",
+        lifecycle_status="active",
+        index_status="indexed",
+        owner_department_id="department_1",
+        visibility="department",
+        current_version_id="version_1",
+        tags=("制度",),
+        permission_snapshot_id="snapshot_1",
+        content_hash="hash_1",
+        policy_version=1,
     )
 
 
@@ -325,10 +358,467 @@ def test_knowledge_base_list_route_requires_manage_scope(monkeypatch) -> None:
     assert response.status_code == 200
     assert seen["required_scope"] == "knowledge_base:manage"
     assert seen["enterprise_id"] == "ent_1"
+    assert seen["actor_context"].user_id == "user_1"
     payload = response.json()
     assert payload["request_id"] == "req_kbs"
     assert payload["data"][0]["name"] == "制度知识库"
     assert payload["pagination"]["total"] == 1
+
+
+def test_knowledge_base_create_route_passes_confirmation_header(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def create_knowledge_base(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminKnowledgeBase(
+            id="kb_2",
+            name=kwargs["name"],
+            status="active",
+            owner_department_id=kwargs["owner_department_id"],
+            default_visibility=kwargs["default_visibility"],
+            config_scope_id=kwargs["config_scope_id"],
+            policy_version=1,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.create_knowledge_base",
+        create_knowledge_base,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.post(
+        "/internal/v1/admin/knowledge-bases",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-knowledge-base-confirm": "enterprise-visible",
+        },
+        json={
+            "name": "制度知识库",
+            "owner_department_id": "department_1",
+            "default_visibility": "enterprise",
+            "config_scope_id": "kb-default",
+        },
+    )
+
+    assert response.status_code == 201
+    assert seen["confirmed_enterprise_visibility"] is True
+    assert seen["actor_context"].user_id == "user_1"
+    assert seen["actor_context"].can_manage_all_knowledge_bases is True
+    assert response.json()["data"]["policy_version"] == 1
+
+
+def test_knowledge_base_get_route_requires_manage_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def get_knowledge_base(_self, _session, kb_id, **kwargs):
+        seen["kb_id"] = kb_id
+        seen.update(kwargs)
+        return _knowledge_base()
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.get_knowledge_base",
+        get_knowledge_base,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/knowledge-bases/kb_1",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "knowledge_base:manage"
+    assert seen["kb_id"] == "kb_1"
+    assert seen["enterprise_id"] == "ent_1"
+
+
+def test_knowledge_base_patch_route_passes_visibility_confirmation(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def patch_knowledge_base(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminKnowledgeBase(
+            id=kwargs["kb_id"],
+            name=kwargs["name"],
+            status=kwargs["status"],
+            owner_department_id="department_1",
+            default_visibility=kwargs["default_visibility"],
+            config_scope_id=None,
+            policy_version=2,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.patch_knowledge_base",
+        patch_knowledge_base,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.patch(
+        "/internal/v1/admin/knowledge-bases/kb_1",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-knowledge-base-confirm": "visibility-expand",
+        },
+        json={
+            "name": "制度知识库",
+            "status": "active",
+            "default_visibility": "enterprise",
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["confirmed_visibility_expand"] is True
+    assert seen["kb_id"] == "kb_1"
+    assert response.json()["data"]["policy_version"] == 2
+
+
+def test_knowledge_base_delete_route_returns_accepted_job(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def delete_knowledge_base(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminAcceptedResult(accepted=True, job_id="job_1")
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.delete_knowledge_base",
+        delete_knowledge_base,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.delete(
+        "/internal/v1/admin/knowledge-bases/kb_1",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-knowledge-base-confirm": "delete",
+        },
+    )
+
+    assert response.status_code == 202
+    assert seen["confirmed"] is True
+    assert seen["kb_id"] == "kb_1"
+    assert response.json()["data"] == {"accepted": True, "job_id": "job_1"}
+
+
+def test_folder_list_route_requires_folder_manage_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_folders(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return type("FolderList", (), {"items": [_folder()], "total": 1})()
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr("app.api.routes.admin.AdminService.list_folders", list_folders)
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/knowledge-bases/kb_1/folders",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "folder:manage"
+    assert seen["kb_id"] == "kb_1"
+    assert seen["actor_context"].user_id == "user_1"
+    assert response.json()["data"][0]["name"] == "制度"
+
+
+def test_folder_create_route_passes_parent_id(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def create_folder(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminFolder(
+            id="folder_2",
+            kb_id=kwargs["kb_id"],
+            parent_id=kwargs["parent_id"],
+            name=kwargs["name"],
+            status="active",
+            path="/folder_1/folder_2",
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.admin.AdminService.create_folder", create_folder)
+
+    client = TestClient(_create_test_app())
+    response = client.post(
+        "/internal/v1/admin/knowledge-bases/kb_1/folders",
+        headers={"authorization": "Bearer access.jwt"},
+        json={"name": "流程", "parent_id": "folder_1"},
+    )
+
+    assert response.status_code == 201
+    assert seen["kb_id"] == "kb_1"
+    assert seen["parent_id"] == "folder_1"
+    assert response.json()["data"]["parent_id"] == "folder_1"
+
+
+def test_folder_get_route_requires_folder_manage_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def get_folder(_self, _session, folder_id, **kwargs):
+        seen["folder_id"] = folder_id
+        seen.update(kwargs)
+        return _folder()
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr("app.api.routes.admin.AdminService.get_folder", get_folder)
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/folders/folder_1",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "folder:manage"
+    assert seen["folder_id"] == "folder_1"
+
+
+def test_folder_patch_route_passes_status(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def patch_folder(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminFolder(
+            id=kwargs["folder_id"],
+            kb_id="kb_1",
+            parent_id=kwargs["parent_id"],
+            name=kwargs["name"],
+            status=kwargs["status"],
+            path="/folder_2",
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.admin.AdminService.patch_folder", patch_folder)
+
+    client = TestClient(_create_test_app())
+    response = client.patch(
+        "/internal/v1/admin/folders/folder_1",
+        headers={"authorization": "Bearer access.jwt"},
+        json={"name": "流程", "parent_id": "folder_2", "status": "archived"},
+    )
+
+    assert response.status_code == 200
+    assert seen["folder_id"] == "folder_1"
+    assert seen["status"] == "archived"
+    assert response.json()["data"]["status"] == "archived"
+
+
+def test_folder_delete_route_returns_accepted_job(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def delete_folder(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminAcceptedResult(accepted=True, job_id="job_folder_1")
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.admin.AdminService.delete_folder", delete_folder)
+
+    client = TestClient(_create_test_app())
+    response = client.delete(
+        "/internal/v1/admin/folders/folder_1",
+        headers={"authorization": "Bearer access.jwt", "x-folder-confirm": "delete"},
+    )
+
+    assert response.status_code == 202
+    assert seen["confirmed"] is True
+    assert seen["folder_id"] == "folder_1"
+    assert response.json()["data"] == {"accepted": True, "job_id": "job_folder_1"}
+
+
+def test_document_list_route_requires_document_manage_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_documents(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminDocumentList(items=[_document()], total=1)
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr("app.api.routes.admin.AdminService.list_documents", list_documents)
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/knowledge-bases/kb_1/documents?status=active",
+        headers={"authorization": "Bearer access.jwt", "x-request-id": "req_documents"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "document:manage"
+    assert seen["kb_id"] == "kb_1"
+    assert seen["lifecycle_status"] == "active"
+    assert seen["actor_context"].user_id == "user_1"
+    payload = response.json()
+    assert payload["request_id"] == "req_documents"
+    assert payload["data"][0]["title"] == "员工手册"
+    assert payload["pagination"]["total"] == 1
+
+
+def test_document_get_route_requires_document_manage_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def get_document(_self, _session, doc_id, **kwargs):
+        seen["doc_id"] = doc_id
+        seen.update(kwargs)
+        return _document()
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr("app.api.routes.admin.AdminService.get_document", get_document)
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/documents/doc_1",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "document:manage"
+    assert seen["doc_id"] == "doc_1"
+    assert seen["enterprise_id"] == "ent_1"
+    assert response.json()["data"]["current_version_id"] == "version_1"
+
+
+def test_document_patch_route_passes_visibility_confirmation(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def patch_document(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminDocument(
+            id=kwargs["doc_id"],
+            kb_id="kb_1",
+            folder_id=kwargs["folder_id"],
+            title=kwargs["title"],
+            lifecycle_status=kwargs["lifecycle_status"],
+            index_status="indexed",
+            owner_department_id=kwargs["owner_department_id"],
+            visibility=kwargs["visibility"],
+            current_version_id="version_1",
+            tags=tuple(kwargs["tags"]),
+            permission_snapshot_id="snapshot_2",
+            policy_version=2,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.admin.AdminService.patch_document", patch_document)
+
+    client = TestClient(_create_test_app())
+    response = client.patch(
+        "/internal/v1/admin/documents/doc_1",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-document-confirm": "visibility-expand",
+        },
+        json={
+            "title": "员工手册 V2",
+            "folder_id": None,
+            "tags": ["制度", "HR"],
+            "owner_department_id": "department_1",
+            "visibility": "enterprise",
+            "lifecycle_status": "active",
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["confirmed_visibility_expand"] is True
+    assert seen["folder_id_provided"] is True
+    assert seen["tags_provided"] is True
+    assert seen["folder_id"] is None
+    assert response.json()["data"]["visibility"] == "enterprise"
+
+
+def test_document_delete_route_returns_accepted_job(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def delete_document(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminAcceptedResult(accepted=True, job_id="job_doc_1")
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.admin.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.admin.AdminService.delete_document", delete_document)
+
+    client = TestClient(_create_test_app())
+    response = client.delete(
+        "/internal/v1/admin/documents/doc_1",
+        headers={"authorization": "Bearer access.jwt", "x-document-confirm": "delete"},
+    )
+
+    assert response.status_code == 202
+    assert seen["confirmed"] is True
+    assert seen["doc_id"] == "doc_1"
+    assert response.json()["data"] == {"accepted": True, "job_id": "job_doc_1"}
 
 
 def test_department_get_route_requires_org_read_scope(monkeypatch) -> None:

@@ -2673,6 +2673,8 @@ components:
           $ref: "#/components/schemas/Visibility"
         config_scope_id:
           type: [string, "null"]
+        policy_version:
+          type: integer
     KnowledgeBaseCreateRequest:
       type: object
       required: [name, owner_department_id, default_visibility]

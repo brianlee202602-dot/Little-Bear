@@ -566,8 +566,12 @@ NOT EXISTS (
     SELECT 1
     FROM access_blocks ab
     WHERE ab.enterprise_id = CAST(:enterprise_id AS uuid)
-      AND ab.resource_type IN ('document', 'chunk')
-      AND ab.resource_id IN ({resource_expr}, c.id)
+      AND (
+          (ab.resource_type = 'knowledge_base' AND ab.resource_id = d.kb_id)
+          OR (ab.resource_type = 'folder' AND ab.resource_id = d.folder_id)
+          OR (ab.resource_type = 'document' AND ab.resource_id = {resource_expr})
+          OR (ab.resource_type = 'chunk' AND ab.resource_id = c.id)
+      )
       AND ab.status = 'active'
       AND (ab.expires_at IS NULL OR ab.expires_at > now())
 )

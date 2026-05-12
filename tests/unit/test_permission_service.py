@@ -126,6 +126,8 @@ def test_build_filter_generates_qdrant_and_sql_permission_conditions() -> None:
         permission_filter.keyword_where_sql
     )
     assert "owner_department_id = ANY" in permission_filter.keyword_where_sql
+    assert "ab.resource_type = 'knowledge_base'" in permission_filter.keyword_where_sql
+    assert "ab.resource_type = 'folder'" in permission_filter.keyword_where_sql
     assert permission_filter.qdrant_filter["must"][0] == {
         "key": "enterprise_id",
         "match": {"value": ENTERPRISE_ID},
