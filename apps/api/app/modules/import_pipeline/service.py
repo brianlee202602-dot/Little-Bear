@@ -22,6 +22,7 @@ from app.modules.indexing.errors import IndexingServiceError
 from app.modules.indexing.runtime import build_indexing_service
 from app.modules.permissions.errors import PermissionServiceError
 from app.modules.permissions.service import PermissionService
+from app.modules.storage.service import InMemoryObjectStorage, ObjectStorage
 from app.shared.context import get_request_context
 from app.shared.json_utils import stable_json_hash
 from sqlalchemy import text
@@ -44,6 +45,9 @@ TERMINAL_STATUSES = {"success", "partial_success", "failed", "cancelled"}
 
 class ImportService:
     """导入任务写模型和 Worker 任务状态机。"""
+
+    def __init__(self, *, object_storage: ObjectStorage | None = None) -> None:
+        self.object_storage = object_storage or InMemoryObjectStorage()
 
     def create_document_import(
         self,
@@ -159,12 +163,21 @@ class ImportService:
                 tags=_metadata_tags(item.metadata),
                 actor_user_id=actor_user_id,
             )
+            object_key = item.url
+            if job_type == "upload":
+                object_key = self._store_upload_object(
+                    enterprise_id=enterprise_id,
+                    kb_id=kb_id,
+                    document_id=document_id,
+                    actor_user_id=actor_user_id,
+                    item=item,
+                )
             self._insert_document_version(
                 session,
                 enterprise_id=enterprise_id,
                 document_id=document_id,
                 document_version_id=document_version_id,
-                object_key=item.url,
+                object_key=object_key,
                 content_hash=content_hash,
                 actor_user_id=actor_user_id,
             )
@@ -176,6 +189,7 @@ class ImportService:
                     "document_version_id": document_version_id,
                     "title": item.title,
                     "url": item.url,
+                    "object_key": object_key,
                     "metadata": item.metadata,
                     "content_hash": content_hash,
                 }
@@ -229,6 +243,49 @@ class ImportService:
             document_ids=tuple(document_ids),
             job_type=job_type,
         )
+
+    def _store_upload_object(
+        self,
+        *,
+        enterprise_id: str,
+        kb_id: str,
+        document_id: str,
+        actor_user_id: str,
+        item: DocumentImportItem,
+    ) -> str:
+        if item.object_content is None:
+            raise ImportServiceError(
+                "IMPORT_OBJECT_CONTENT_REQUIRED",
+                "upload import item requires raw object content",
+                status_code=400,
+                details={"title": item.title},
+            )
+        object_key = _build_upload_object_key(
+            enterprise_id=enterprise_id,
+            kb_id=kb_id,
+            document_id=document_id,
+            filename=_metadata_filename(item.metadata) or item.title,
+        )
+        try:
+            self.object_storage.put_object(
+                object_key=object_key,
+                content=item.object_content,
+                content_type=item.content_type,
+            )
+        except Exception as exc:
+            raise ImportServiceError(
+                "IMPORT_OBJECT_STORE_FAILED",
+                "upload source object cannot be stored",
+                status_code=503,
+                retryable=True,
+                details={
+                    "document_id": document_id,
+                    "kb_id": kb_id,
+                    "filename": _metadata_filename(item.metadata) or item.title,
+                    "actor_user_id": actor_user_id,
+                },
+            ) from exc
+        return object_key
 
     def get_import_job(
         self,
@@ -1600,6 +1657,8 @@ def _normalize_items(*, job_type: str, items: list[DocumentImportItem]) -> list[
             DocumentImportItem(
                 title=title,
                 url=item.url.strip() if item.url else None,
+                object_content=item.object_content,
+                content_type=item.content_type,
                 metadata=item.metadata,
             )
         )
@@ -1662,6 +1721,11 @@ def _metadata_source_uri(metadata: dict[str, Any]) -> str | None:
     return source_uri if isinstance(source_uri, str) and source_uri else None
 
 
+def _metadata_filename(metadata: dict[str, Any]) -> str | None:
+    filename = metadata.get("filename")
+    return filename if isinstance(filename, str) and filename else None
+
+
 def _metadata_text(metadata: dict[str, Any]) -> str | None:
     for key in ("content", "text", "markdown"):
         value = metadata.get(key)
@@ -1679,6 +1743,17 @@ def _item_text_content(item: dict[str, Any]) -> str:
     url = item.get("url")
     parts = [value for value in (title, url) if isinstance(value, str) and value.strip()]
     return "\n".join(parts) or "empty document"
+
+
+def _build_upload_object_key(
+    *,
+    enterprise_id: str,
+    kb_id: str,
+    document_id: str,
+    filename: str,
+) -> str:
+    safe_name = filename.strip().replace("/", "_") or "document.txt"
+    return f"uploads/{enterprise_id}/{kb_id}/{document_id}/{safe_name}"
 
 
 def _heading_path(item: dict[str, Any]) -> str | None:

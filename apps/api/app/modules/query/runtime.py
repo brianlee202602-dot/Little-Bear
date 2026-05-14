@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from app.adapters import QdrantVectorRetriever
+from app.modules.answer import AnswerService
 from app.modules.config.service import ConfigService
-from app.modules.models import ModelGatewayEmbeddingClient
+from app.modules.models import ModelGatewayChatClient, ModelGatewayEmbeddingClient
 from app.modules.query.service import QueryService
 from app.modules.retrieval import UnavailableVectorRetriever
 from app.modules.secrets.service import SecretStoreError, SecretStoreService
@@ -22,10 +23,23 @@ def build_query_service(session: Session) -> QueryService:
 
     try:
         snapshot = ConfigService().load_active_config(session, validate_schema=False)
-        vector_retriever = _build_vector_retriever(session, snapshot.config)
+        config = snapshot.config
+    except Exception:
+        return QueryService(
+            vector_retriever=UnavailableVectorRetriever(
+                reason="vector_runtime_config_unavailable"
+            ),
+            answer_service=AnswerService(),
+        )
+    try:
+        vector_retriever = _build_vector_retriever(session, config)
     except Exception:
         vector_retriever = UnavailableVectorRetriever(reason="vector_runtime_config_unavailable")
-    return QueryService(vector_retriever=vector_retriever)
+    try:
+        answer_service = _build_answer_service(session, config)
+    except Exception:
+        answer_service = AnswerService()
+    return QueryService(vector_retriever=vector_retriever, answer_service=answer_service)
 
 
 def _build_vector_retriever(session: Session, config: dict[str, Any]):
@@ -73,6 +87,41 @@ def _embedding_path(provider: dict[str, Any]) -> str:
     return "/embed" if provider_type == "tei" else "/v1/embeddings"
 
 
+def _build_answer_service(session: Session, config: dict[str, Any]) -> AnswerService:
+    model_gateway = as_dict(config.get("model_gateway"))
+    model_config = as_dict(config.get("model"))
+    llm_config = as_dict(config.get("llm"))
+    providers = as_dict(model_gateway.get("providers"))
+    llm_provider = as_dict(providers.get("llm"))
+
+    llm_base_url = json_str(llm_provider, "base_url")
+    llm_model = json_str(model_config, "llm_model")
+    if not llm_base_url or not llm_model:
+        return AnswerService()
+
+    gateway_auth_ref = json_str(model_gateway, "auth_token_ref")
+    provider_auth_ref = json_str(llm_provider, "auth_token_ref") or gateway_auth_ref
+    chat_client = ModelGatewayChatClient(
+        base_url=llm_base_url,
+        path=_chat_completions_path(llm_provider),
+        model=llm_model,
+        auth_token=_secret_value(session, provider_auth_ref),
+        timeout_seconds=_timeout_seconds(
+            json_int(llm_config, "total_timeout_ms"),
+            default_ms=20000,
+        ),
+    )
+    return AnswerService(
+        chat_client=chat_client,
+        temperature=_json_float(llm_config, "temperature", default=0.1),
+        max_tokens=json_int(llm_config, "max_tokens") or 800,
+    )
+
+
+def _chat_completions_path(provider: dict[str, Any]) -> str:
+    return json_str(provider, "chat_completions_path") or "/v1/chat/completions"
+
+
 def _secret_value(session: Session, secret_ref: str | None) -> str | None:
     if not secret_ref:
         return None
@@ -84,3 +133,12 @@ def _secret_value(session: Session, secret_ref: str | None) -> str | None:
 
 def _timeout_seconds(timeout_ms: int | None, *, default_ms: int) -> float:
     return max(timeout_ms or default_ms, 1) / 1000
+
+
+def _json_float(value_json: Any, key: str, *, default: float) -> float:
+    if not isinstance(value_json, dict):
+        return default
+    value = value_json.get(key)
+    if isinstance(value, int | float):
+        return float(value)
+    return default

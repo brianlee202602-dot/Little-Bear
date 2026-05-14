@@ -6,6 +6,7 @@ import pytest
 from app.modules.import_pipeline.errors import ImportServiceError
 from app.modules.import_pipeline.schemas import DocumentImportItem, ImportActorContext
 from app.modules.import_pipeline.service import ImportService
+from app.modules.storage.service import InMemoryObjectStorage
 
 
 class _Row:
@@ -46,6 +47,17 @@ class _FakeSession:
         if self.results:
             return self.results.pop(0)
         return _Result()
+
+
+class _FailingObjectStorage:
+    def put_object(self, **_kwargs) -> None:
+        raise OSError("storage unavailable")
+
+    def get_object(self, **_kwargs) -> bytes:
+        raise OSError("storage unavailable")
+
+    def delete_object(self, **_kwargs) -> None:
+        raise OSError("storage unavailable")
 
 
 _ENTERPRISE_ID = "33333333-3333-3333-3333-333333333333"
@@ -150,7 +162,135 @@ def test_create_document_import_writes_documents_versions_and_job(monkeypatch) -
     assert job_insert["job_type"] == "metadata_batch"
     request_json = json.loads(job_insert["request_json"])
     assert request_json["document_ids"] == list(job.document_ids)
+    assert request_json["items"][0]["object_key"] is None
     assert audits[0]["event_name"] == "import_job.created"
+
+
+def test_create_upload_import_stores_source_object_and_records_object_key(monkeypatch) -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_Row(
+                {
+                    "kb_id": _KB_ID,
+                    "owner_department_id": _DEPARTMENT_ID,
+                    "default_visibility": "department",
+                    "status": "active",
+                    "policy_version": 1,
+                }
+            )
+        ),
+        _Result(one_or_none=_Row({"department_id": _DEPARTMENT_ID, "status": "active"})),
+    ]
+    storage = InMemoryObjectStorage()
+    service = ImportService(object_storage=storage)
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 9)
+    monkeypatch.setattr(
+        service,
+        "_replace_resource_policy",
+        lambda *_args, **_kwargs: "66666666-6666-6666-6666-666666666666",
+    )
+    monkeypatch.setattr(
+        service,
+        "_insert_permission_snapshot",
+        lambda *_args, **_kwargs: {
+            "snapshot_id": "77777777-7777-7777-7777-777777777777",
+            "payload_hash": "hash_1",
+        },
+    )
+    monkeypatch.setattr(service, "_insert_audit_log", lambda *_args, **_kwargs: None)
+
+    job = service.create_document_import(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        kb_id=_KB_ID,
+        actor_user_id=_USER_ID,
+        job_type="upload",
+        items=[
+            DocumentImportItem(
+                title="员工手册.txt",
+                object_content=b"hello",
+                content_type="text/plain",
+                metadata={"filename": "员工/手册.txt", "content": "hello"},
+            )
+        ],
+        actor_context=_actor(),
+    )
+
+    assert len(job.document_ids) == 1
+    assert len(storage.objects) == 1
+    object_key = next(iter(storage.objects))
+    assert object_key.startswith(f"uploads/{_ENTERPRISE_ID}/{_KB_ID}/")
+    assert object_key.endswith("/员工_手册.txt")
+    assert storage.objects[object_key] == b"hello"
+    assert storage.content_types[object_key] == "text/plain"
+    version_insert = next(
+        params
+        for statement, params in session.executed
+        if "INSERT INTO document_versions" in statement
+    )
+    assert version_insert["object_key"] == object_key
+    job_insert = next(
+        params
+        for statement, params in session.executed
+        if "INSERT INTO import_jobs" in statement
+    )
+    request_json = json.loads(job_insert["request_json"])
+    assert request_json["items"][0]["object_key"] == object_key
+
+
+def test_create_document_import_retries_when_object_storage_fails(monkeypatch) -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_Row(
+                {
+                    "kb_id": _KB_ID,
+                    "owner_department_id": _DEPARTMENT_ID,
+                    "default_visibility": "department",
+                    "status": "active",
+                    "policy_version": 1,
+                }
+            )
+        ),
+        _Result(one_or_none=_Row({"department_id": _DEPARTMENT_ID, "status": "active"})),
+    ]
+    service = ImportService(object_storage=_FailingObjectStorage())
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 9)
+    monkeypatch.setattr(
+        service,
+        "_replace_resource_policy",
+        lambda *_args, **_kwargs: "66666666-6666-6666-6666-666666666666",
+    )
+    monkeypatch.setattr(
+        service,
+        "_insert_permission_snapshot",
+        lambda *_args, **_kwargs: {
+            "snapshot_id": "77777777-7777-7777-7777-777777777777",
+            "payload_hash": "hash_1",
+        },
+    )
+
+    with pytest.raises(ImportServiceError) as exc_info:
+        service.create_document_import(
+            session,
+            enterprise_id=_ENTERPRISE_ID,
+            kb_id=_KB_ID,
+            actor_user_id=_USER_ID,
+            job_type="upload",
+            items=[
+                DocumentImportItem(
+                    title="员工手册.txt",
+                    object_content=b"hello",
+                    content_type="text/plain",
+                    metadata={"filename": "员工手册.txt", "content": "hello"},
+                )
+            ],
+            actor_context=_actor(),
+        )
+
+    assert exc_info.value.error_code == "IMPORT_OBJECT_STORE_FAILED"
+    assert exc_info.value.retryable is True
 
 
 def test_create_document_import_returns_existing_idempotent_job() -> None:

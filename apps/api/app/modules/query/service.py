@@ -10,11 +10,15 @@ import time
 import uuid
 from typing import Any, Literal
 
+from app.modules.answer import AnswerService
+from app.modules.context.schemas import QueryContext
+from app.modules.context.service import ContextBuilder
 from app.modules.permissions import CandidateMetadata, PermissionService, PermissionServiceError
 from app.modules.permissions.schemas import PermissionContext, PermissionFilter
 from app.modules.query.errors import QueryServiceError
 from app.modules.query.schemas import (
     ActiveIndexVersion,
+    QueryAllowedCandidate,
     QueryCitation,
     QueryFilterClause,
     QueryResult,
@@ -43,10 +47,14 @@ class QueryService:
         permission_service: PermissionService | None = None,
         vector_retriever: VectorRetriever | None = None,
         fusion_service: ReciprocalRankFusion | None = None,
+        context_builder: ContextBuilder | None = None,
+        answer_service: AnswerService | None = None,
     ) -> None:
         self.permission_service = permission_service or PermissionService()
         self.vector_retriever = vector_retriever or UnavailableVectorRetriever()
         self.fusion_service = fusion_service or ReciprocalRankFusion()
+        self.context_builder = context_builder or ContextBuilder()
+        self.answer_service = answer_service or AnswerService()
 
     def create_query(
         self,
@@ -86,7 +94,9 @@ class QueryService:
             active_index_ids = tuple(index.id for index in active_indexes)
             collection_names = tuple(index.collection_name for index in active_indexes)
             index_version_hash = _index_version_hash(active_index_ids)
+            answer = ""
             citations: tuple[QueryCitation, ...] = ()
+            query_context: QueryContext | None = None
             degrade_reasons: list[str] = []
             if active_index_ids:
                 permission_filter = self.permission_service.build_filter(
@@ -116,14 +126,24 @@ class QueryService:
                     keyword_candidates + vector_result.candidates,
                     limit=normalized_top_k * 3,
                 )
-                citations = self._gate_candidates(
+                allowed_candidates = self._gate_candidates(
                     context,
                     candidates,
                     allowed_kb_ids=normalized_kb_ids,
                     active_index_version_ids=active_index_ids,
                     limit=normalized_top_k,
-                    include_sources=include_sources,
                 )
+                citations = (
+                    tuple(item.citation for item in allowed_candidates)
+                    if include_sources
+                    else ()
+                )
+                if mode == "answer":
+                    query_context = self.context_builder.build(
+                        session,
+                        query_text=normalized_query,
+                        allowed_candidates=allowed_candidates,
+                    )
                 candidate_count = len(candidates)
                 permission_filter_hash = permission_filter.permission_filter_hash
                 permission_version = permission_filter.permission_version
@@ -133,17 +153,21 @@ class QueryService:
                 permission_version = context.permission_version
 
             if mode == "answer":
-                degrade_reasons.append("llm_not_implemented_keyword_only")
+                answer_result = self.answer_service.generate(query_context=query_context)
+                answer = answer_result.answer
+                if answer_result.degraded:
+                    degrade_reasons.append(answer_result.degrade_reason or "llm_degraded")
             degraded = bool(degrade_reasons)
             degrade_reason = ";".join(degrade_reasons) if degrade_reasons else None
             result = QueryResult(
                 request_id=request_id,
-                answer="",
+                answer=answer,
                 citations=citations,
                 confidence=_confidence(citations),
                 degraded=degraded,
                 degrade_reason=degrade_reason,
                 trace_id=trace_id,
+                context=query_context,
             )
             self._insert_query_log(
                 session,
@@ -338,11 +362,8 @@ class QueryService:
         allowed_kb_ids: tuple[str, ...],
         active_index_version_ids: tuple[str, ...],
         limit: int,
-        include_sources: bool,
-    ) -> tuple[QueryCitation, ...]:
-        if not include_sources:
-            return ()
-        citations: list[QueryCitation] = []
+    ) -> tuple[QueryAllowedCandidate, ...]:
+        allowed: list[QueryAllowedCandidate] = []
         for candidate in candidates:
             gate_result = self.permission_service.gate_candidate(
                 context,
@@ -366,10 +387,15 @@ class QueryService:
             )
             if not gate_result.allowed:
                 continue
-            citations.append(_citation_from_candidate(candidate))
-            if len(citations) >= limit:
+            allowed.append(
+                QueryAllowedCandidate(
+                    candidate=candidate,
+                    citation=_citation_from_candidate(candidate),
+                )
+            )
+            if len(allowed) >= limit:
                 break
-        return tuple(citations)
+        return tuple(allowed)
 
     def _insert_denied_query_log(
         self,

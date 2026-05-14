@@ -71,6 +71,22 @@ class _FakeVectorIndexWriter:
         )
 
 
+class _FailingDraftVectorIndexWriter:
+    def upsert_draft_points(self, _points) -> None:
+        raise RuntimeError("qdrant upsert failed")
+
+    def activate_points(self, **_kwargs) -> None:
+        raise RuntimeError("unexpected activate")
+
+
+class _FailingActivateVectorIndexWriter:
+    def upsert_draft_points(self, _points) -> None:
+        return None
+
+    def activate_points(self, **_kwargs) -> None:
+        raise RuntimeError("qdrant activate failed")
+
+
 _ENTERPRISE_ID = "33333333-3333-3333-3333-333333333333"
 _KB_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _DOC_ID = "44444444-4444-4444-4444-444444444444"
@@ -112,6 +128,17 @@ def _preflight_mapping(
         "expected_chunk_count": expected_chunk_count,
         "draft_chunk_count": draft_chunk_count,
         "draft_vector_ref_count": draft_vector_ref_count,
+    }
+
+
+def _permission_payload_mapping(
+    *,
+    payload_count: int = 1,
+    valid_payload_count: int = 1,
+) -> dict[str, object]:
+    return {
+        "payload_count": payload_count,
+        "valid_payload_count": valid_payload_count,
     }
 
 
@@ -217,6 +244,7 @@ def test_publish_ready_indexes_activates_version_document_chunks_and_refs() -> N
             all_rows=[_Row(_ready_version_mapping())]
         ),
         _Result(one_or_none=_Row(_preflight_mapping())),
+        _Result(one=_Row(_permission_payload_mapping())),
         _Result(),
         _Result(),
         _Result(),
@@ -247,6 +275,7 @@ def test_publish_ready_indexes_activates_vector_points() -> None:
             all_rows=[_Row(_ready_version_mapping())]
         ),
         _Result(one_or_none=_Row(_preflight_mapping())),
+        _Result(one=_Row(_permission_payload_mapping())),
         _Result(all_rows=[_Row({"vector_id": vector_id})]),
     ]
     vector_writer = _FakeVectorIndexWriter()
@@ -333,4 +362,100 @@ def test_publish_ready_indexes_rejects_embedding_dimension_mismatch() -> None:
 
     assert exc_info.value.error_code == "INDEX_DIMENSION_MISMATCH"
     assert exc_info.value.details["index_dimension"] == 384
+    assert not any("UPDATE index_versions" in statement for statement, _ in session.executed)
+
+
+def test_write_draft_indexes_marks_failure_retryable_when_vector_write_fails() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "enterprise_id": _ENTERPRISE_ID,
+                        "kb_id": _KB_ID,
+                        "chunk_id": _CHUNK_ID,
+                        "document_id": _DOC_ID,
+                        "document_version_id": _DOC_VERSION_ID,
+                        "index_version_id": _INDEX_VERSION_ID,
+                        "title": "员工手册",
+                        "collection_name": "little_bear_p0",
+                        "text": "员工手册正文",
+                        "owner_department_id": _DEPARTMENT_ID,
+                        "visibility": "department",
+                        "permission_version": 7,
+                        "chunk_content_hash": "chunk_hash",
+                        "index_payload_hash": "index_hash",
+                        "page_start": 1,
+                        "page_end": 2,
+                    }
+                )
+            ]
+        ),
+        _Result(one_or_none=_Row({"keyword_id": "77777777-7777-7777-7777-777777777777"})),
+        _Result(),
+    ]
+
+    with pytest.raises(IndexingServiceError) as exc_info:
+        IndexingService(
+            vector_index_writer=_FailingDraftVectorIndexWriter()
+        ).write_draft_indexes(
+            session,
+            request_json=_request_json(),
+        )
+
+    assert exc_info.value.error_code == "INDEX_VECTOR_WRITE_FAILED"
+    assert exc_info.value.retryable is True
+    assert exc_info.value.details["point_count"] == 1
+    assert not any("SET status = 'ready'" in statement for statement, _ in session.executed)
+
+
+def test_publish_ready_indexes_marks_failure_retryable_when_vector_activation_fails() -> None:
+    session = _FakeSession()
+    vector_id = "11111111-1111-5111-8111-111111111111"
+    session.results = [
+        _Result(all_rows=[_Row(_ready_version_mapping())]),
+        _Result(one_or_none=_Row(_preflight_mapping())),
+        _Result(one=_Row(_permission_payload_mapping())),
+        _Result(all_rows=[_Row({"vector_id": vector_id})]),
+    ]
+
+    with pytest.raises(IndexingServiceError) as exc_info:
+        IndexingService(
+            vector_index_writer=_FailingActivateVectorIndexWriter()
+        ).publish_ready_indexes(
+            session,
+            request_json=_request_json(),
+        )
+
+    assert exc_info.value.error_code == "INDEX_VECTOR_PUBLISH_FAILED"
+    assert exc_info.value.retryable is True
+    assert exc_info.value.details["point_count"] == 1
+    assert not any("UPDATE documents" in statement for statement, _ in session.executed)
+
+
+def test_publish_ready_indexes_rejects_invalid_permission_payload() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(all_rows=[_Row(_ready_version_mapping(chunk_count=2))]),
+        _Result(
+            one_or_none=_Row(
+                _preflight_mapping(
+                    expected_chunk_count=2,
+                    draft_chunk_count=2,
+                    draft_vector_ref_count=2,
+                )
+            )
+        ),
+        _Result(one=_Row(_permission_payload_mapping(payload_count=2, valid_payload_count=1))),
+    ]
+
+    with pytest.raises(IndexingServiceError) as exc_info:
+        IndexingService(dimension=768).publish_ready_indexes(
+            session,
+            request_json=_request_json(),
+        )
+
+    assert exc_info.value.error_code == "INDEX_PERMISSION_PAYLOAD_INVALID"
+    assert exc_info.value.details["valid_payload_count"] == 1
     assert not any("UPDATE index_versions" in statement for statement, _ in session.executed)

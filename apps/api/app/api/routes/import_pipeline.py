@@ -348,6 +348,8 @@ async def _upload_items(files: list[UploadFile]) -> list[DocumentImportItem]:
         items.append(
             DocumentImportItem(
                 title=filename,
+                object_content=content,
+                content_type=upload.content_type,
                 metadata={
                     "filename": filename,
                     "content_type": upload.content_type,

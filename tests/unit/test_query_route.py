@@ -100,7 +100,7 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
             ),
             confidence="low",
             degraded=True,
-            degrade_reason="llm_not_implemented_keyword_only",
+            degrade_reason="llm_runtime_config_unavailable",
             trace_id=kwargs["trace_id"],
         )
 

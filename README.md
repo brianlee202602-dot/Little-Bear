@@ -100,8 +100,8 @@ make PYTHON=.venv/bin/python test-integration-qdrant
 - 管理后台已接入 setup、登录、配置、用户、部门、角色绑定和审计查询。
 - Permission Service 核心已落地；管理端知识库、文件夹和文档元数据管理已接入权限边界。
 - Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、阶段推进、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入和 active index 发布。
-- Query Service 非流式链路已起步：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、Permission Service filter、候选 gate、citation 返回和 query_logs 写入；answer 模式当前以结构化降级返回检索来源。
-- RAG 数据面仍待补齐：对象存储、复杂格式解析、真实 Qdrant / embedding provider 端到端联调、Context Builder、答案生成和严格 citation 校验仍待实现。
+- Query Service 非流式链路已起步：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、Permission Service filter、候选 gate、Context Builder、LLM provider、citation 返回和 query_logs 写入；LLM 不可用时以结构化降级返回检索来源。
+- RAG 数据面仍待补齐：复杂格式解析、严格 citation 校验、model_call_logs / audit_logs 和真实业务回归数据集验证仍待实现。
 - 当前开发进度详见根目录 `开发进度追踪.md`。
 
 建议下一步按以下顺序推进：
@@ -110,5 +110,5 @@ make PYTHON=.venv/bin/python test-integration-qdrant
 2. 接入对象存储和更完整的 parse / clean / chunk 执行器。
 3. 补齐文档版本、chunk、预览和独立权限变更 API。
 4. 做真实 Qdrant / embedding provider 联调，并补失败注入和回归数据集验证。
-5. 扩展非流式查询：Context Builder、LLM provider、model_call_logs 和 citation 校验。
+5. 扩展非流式查询：model_call_logs、audit_logs 和 citation 校验。
 6. 实现流式查询和普通用户前端查询工作区。

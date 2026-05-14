@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from app.modules.context.schemas import QueryContext
+from app.modules.retrieval.schemas import RetrievalCandidate
+
 
 @dataclass(frozen=True)
 class QueryCitation:
@@ -26,6 +29,7 @@ class QueryResult:
     degraded: bool
     degrade_reason: str | None
     trace_id: str
+    context: QueryContext | None = None
 
 
 @dataclass(frozen=True)
@@ -38,3 +42,9 @@ class QueryFilterClause:
 class ActiveIndexVersion:
     id: str
     collection_name: str
+
+
+@dataclass(frozen=True)
+class QueryAllowedCandidate:
+    candidate: RetrievalCandidate
+    citation: QueryCitation

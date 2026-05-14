@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+from urllib.error import URLError
 
+import pytest
 from app.adapters import QdrantVectorIndexWriter, QdrantVectorRetriever
+from app.adapters.qdrant import QdrantClientError
 from app.modules.indexing.schemas import DraftVectorPoint
+from app.modules.models import ModelClientError
 from app.modules.permissions.schemas import PermissionFilter
 
 ENTERPRISE_ID = "33333333-3333-3333-3333-333333333333"
@@ -22,6 +26,14 @@ class _EmbeddingClient:
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         return [[0.1, 0.2] for _text in texts]
+
+
+class _FailingEmbeddingClient:
+    def embed_query(self, _query_text: str) -> list[float]:
+        raise ModelClientError("EMBEDDING_UNAVAILABLE", "embedding unavailable")
+
+    def embed_texts(self, _texts: list[str]) -> list[list[float]]:
+        raise ModelClientError("EMBEDDING_UNAVAILABLE", "embedding unavailable")
 
 
 class _Response:
@@ -98,6 +110,48 @@ def test_qdrant_vector_retriever_searches_with_permission_filter(monkeypatch) ->
     assert captured["body"]["filter"]["must"][0]["key"] == "enterprise_id"
 
 
+def test_qdrant_vector_retriever_degrades_when_query_embedding_fails(monkeypatch) -> None:
+    def _urlopen(_request, timeout=None):
+        raise AssertionError("qdrant should not be called when query embedding fails")
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    result = QdrantVectorRetriever(
+        base_url="http://qdrant:6333",
+        embedding_client=_FailingEmbeddingClient(),
+    ).search(
+        query_text="员工手册",
+        permission_filter=_permission_filter(),
+        collection_names=("little_bear_p0",),
+        top_k=5,
+    )
+
+    assert result.degraded is True
+    assert result.degrade_reason == "query_embedding_failed"
+    assert result.candidates == ()
+
+
+def test_qdrant_vector_retriever_degrades_when_qdrant_request_fails(monkeypatch) -> None:
+    def _urlopen(_request, timeout=None):
+        raise URLError("connection refused")
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    result = QdrantVectorRetriever(
+        base_url="http://qdrant:6333",
+        embedding_client=_EmbeddingClient(),
+    ).search(
+        query_text="员工手册",
+        permission_filter=_permission_filter(),
+        collection_names=("little_bear_p0",),
+        top_k=5,
+    )
+
+    assert result.degraded is True
+    assert result.degrade_reason == "vector_search_failed"
+    assert result.candidates == ()
+
+
 def test_qdrant_vector_index_writer_upserts_draft_points(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -135,6 +189,32 @@ def test_qdrant_vector_index_writer_upserts_draft_points(monkeypatch) -> None:
     assert captured["body"]["points"][0]["payload"]["visibility_state"] == "draft"
 
 
+def test_qdrant_vector_index_writer_wraps_embedding_failure(monkeypatch) -> None:
+    def _urlopen(_request, timeout=None):
+        raise AssertionError("qdrant should not be called when embedding fails")
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    with pytest.raises(QdrantClientError):
+        QdrantVectorIndexWriter(
+            base_url="http://qdrant:6333",
+            embedding_client=_FailingEmbeddingClient(),
+        ).upsert_draft_points((_draft_point(),))
+
+
+def test_qdrant_vector_index_writer_wraps_qdrant_failure(monkeypatch) -> None:
+    def _urlopen(_request, timeout=None):
+        raise URLError("connection refused")
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    with pytest.raises(QdrantClientError):
+        QdrantVectorIndexWriter(
+            base_url="http://qdrant:6333",
+            embedding_client=_EmbeddingClient(),
+        ).upsert_draft_points((_draft_point(),))
+
+
 def test_qdrant_vector_index_writer_activates_points(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -164,6 +244,15 @@ def test_qdrant_vector_index_writer_activates_points(monkeypatch) -> None:
     assert captured["body"]["points"] == ["11111111-1111-5111-8111-111111111111"]
     assert captured["body"]["payload"]["visibility_state"] == "active"
     assert captured["body"]["payload"]["indexed_permission_version"] == 42
+
+
+def _draft_point() -> DraftVectorPoint:
+    return DraftVectorPoint(
+        collection_name="little_bear_p0",
+        vector_id="11111111-1111-5111-8111-111111111111",
+        text="员工手册正文",
+        payload={"chunk_id": CHUNK_ID, "visibility_state": "draft"},
+    )
 
 
 def _permission_filter() -> PermissionFilter:

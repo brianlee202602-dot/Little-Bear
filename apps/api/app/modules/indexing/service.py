@@ -645,6 +645,7 @@ class IndexingService:
                     "active_config_dimension": self.dimension,
                 },
             )
+        self._validate_permission_payload(session, version=version)
 
     def _load_publish_preflight(
         self,
@@ -695,6 +696,45 @@ class IndexingService:
             "draft_chunk_count": int(row._mapping["draft_chunk_count"]),
             "draft_vector_ref_count": int(row._mapping["draft_vector_ref_count"]),
         }
+
+    def _validate_permission_payload(self, session: Session, *, version: ReadyIndexVersion) -> None:
+        try:
+            row = session.execute(
+                text(
+                    """
+                    SELECT
+                        count(*)::integer AS payload_count,
+                        count(*) FILTER (
+                            WHERE owner_department_id IS NOT NULL
+                              AND visibility IN ('department', 'enterprise')
+                        )::integer AS valid_payload_count
+                    FROM keyword_index_entries
+                    WHERE index_version_id = CAST(:index_version_id AS uuid)
+                      AND visibility_state = 'draft'
+                    """
+                ),
+                {"index_version_id": version.index_version_id},
+            ).one()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "INDEX_PERMISSION_PAYLOAD_UNAVAILABLE",
+                "keyword index permission payload cannot be read",
+                exc,
+            ) from exc
+        payload_count = int(row._mapping["payload_count"])
+        valid_payload_count = int(row._mapping["valid_payload_count"])
+        if payload_count != version.chunk_count or valid_payload_count != payload_count:
+            raise IndexingServiceError(
+                "INDEX_PERMISSION_PAYLOAD_INVALID",
+                "draft keyword payload is missing permission fields",
+                status_code=409,
+                details={
+                    "index_version_id": version.index_version_id,
+                    "payload_count": payload_count,
+                    "valid_payload_count": valid_payload_count,
+                    "expected_chunk_count": version.chunk_count,
+                },
+            )
 
     def _activate_vector_points(self, session: Session, *, version: ReadyIndexVersion) -> None:
         if isinstance(self.vector_index_writer, NoopVectorIndexWriter):

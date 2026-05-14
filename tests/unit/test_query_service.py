@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+from app.modules.answer import AnswerService
+from app.modules.models import ChatCompletionResult, ChatMessage, ModelClientError
 from app.modules.query.errors import QueryServiceError
 from app.modules.query.service import QueryService
 from app.modules.retrieval import RetrievalCandidate, VectorSearchResult
@@ -78,6 +80,34 @@ class _FakeVectorRetriever:
             degraded=self.degraded,
             degrade_reason=self.degrade_reason,
         )
+
+
+class _FakeChatClient:
+    def __init__(
+        self,
+        *,
+        content: str = "员工年假需要提前申请。[source:66666666-6666-6666-6666-666666666666]",
+    ) -> None:
+        self.content = content
+        self.calls: list[dict[str, object]] = []
+
+    def complete(self, *, messages, temperature, max_tokens) -> ChatCompletionResult:
+        self.calls.append(
+            {
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+        )
+        return ChatCompletionResult(
+            content=self.content,
+            token_usage={"prompt_tokens": 20, "completion_tokens": 10},
+        )
+
+
+class _FailingChatClient:
+    def complete(self, *, messages, temperature, max_tokens) -> ChatCompletionResult:
+        raise ModelClientError("LLM_PROVIDER_UNAVAILABLE", "provider unavailable")
 
 
 def test_create_query_returns_fused_permission_gated_citations_and_logs() -> None:
@@ -268,8 +298,72 @@ def test_create_query_without_active_index_returns_empty_keyword_only_result() -
 
     assert result.citations == ()
     assert result.degraded is True
-    assert result.degrade_reason == "llm_not_implemented_keyword_only"
+    assert result.degrade_reason == "llm_context_empty"
     assert session.executed[-1][1]["candidate_count"] == 0
+
+
+def test_create_query_calls_llm_for_answer_mode() -> None:
+    chat_client = _FakeChatClient()
+    session = _session_with_one_keyword_candidate(context_chunks=True)
+
+    result = QueryService(
+        answer_service=AnswerService(
+            chat_client=chat_client,
+            temperature=0.2,
+            max_tokens=128,
+        )
+    ).create_query(
+        session,
+        user_id=USER_ID,
+        enterprise_id=ENTERPRISE_ID,
+        kb_ids=[KB_ID],
+        query_text="员工手册",
+        mode="answer",
+        filters={},
+        top_k=3,
+        include_sources=True,
+        request_id="req_query",
+        trace_id="trace_query",
+    )
+
+    assert result.degraded is True
+    assert result.degrade_reason == "vector_retriever_unavailable"
+    assert result.answer == "员工年假需要提前申请。[source:66666666-6666-6666-6666-666666666666]"
+    assert result.citations[0].source_id == CHUNK_ID
+    assert result.context is not None
+    assert result.context.chunks[0].content == "员工年假需要提前申请"
+    assert result.context.chunks[0].heading_path == "制度/请假"
+    assert chat_client.calls[0]["temperature"] == 0.2
+    assert chat_client.calls[0]["max_tokens"] == 128
+    messages = chat_client.calls[0]["messages"]
+    assert isinstance(messages[0], ChatMessage)
+    assert "只能基于用户可访问的资料回答" in messages[0].content
+    assert "[source:66666666-6666-6666-6666-666666666666]" in messages[1].content
+
+
+def test_create_query_degrades_when_llm_provider_fails() -> None:
+    session = _session_with_one_keyword_candidate(context_chunks=True)
+
+    result = QueryService(
+        answer_service=AnswerService(chat_client=_FailingChatClient())
+    ).create_query(
+        session,
+        user_id=USER_ID,
+        enterprise_id=ENTERPRISE_ID,
+        kb_ids=[KB_ID],
+        query_text="员工手册",
+        mode="answer",
+        filters={},
+        top_k=3,
+        include_sources=True,
+        request_id="req_query",
+        trace_id="trace_query",
+    )
+
+    assert result.answer == ""
+    assert result.degraded is True
+    assert result.degrade_reason == "vector_retriever_unavailable;LLM_PROVIDER_UNAVAILABLE"
+    assert result.citations[0].source_id == CHUNK_ID
 
 
 def test_create_query_rejects_unsupported_filter() -> None:
@@ -291,85 +385,105 @@ def test_create_query_rejects_unsupported_filter() -> None:
     assert exc_info.value.error_code == "QUERY_FILTER_UNSUPPORTED"
 
 
-def _session_with_one_keyword_candidate() -> _FakeSession:
-    return _FakeSession(
-        [
-            _Result(one_or_none=_Row({"value_json": {"version": 3}})),
-            _Result(
-                one_or_none=_Row(
+def _session_with_one_keyword_candidate(*, context_chunks: bool = False) -> _FakeSession:
+    results = [
+        _Result(one_or_none=_Row({"value_json": {"version": 3}})),
+        _Result(
+            one_or_none=_Row(
+                {
+                    "user_id": USER_ID,
+                    "enterprise_id": ENTERPRISE_ID,
+                    "username": "alice",
+                    "status": "active",
+                }
+            )
+        ),
+        _Result(one_or_none=_Row({"org_version": 7, "permission_version": 42})),
+        _Result(
+            all_rows=[
+                _Row(
                     {
-                        "user_id": USER_ID,
-                        "enterprise_id": ENTERPRISE_ID,
-                        "username": "alice",
-                        "status": "active",
+                        "department_id": DEPARTMENT_ID,
+                        "code": "sales",
+                        "name": "销售部",
+                        "is_primary": True,
                     }
                 )
-            ),
-            _Result(one_or_none=_Row({"org_version": 7, "permission_version": 42})),
+            ]
+        ),
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "role_id": "role_employee",
+                        "code": "employee",
+                        "name": "Employee",
+                        "scope_type": "enterprise",
+                        "scope_id": None,
+                        "scopes": ["rag:query"],
+                    }
+                )
+            ]
+        ),
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "index_version_id": INDEX_VERSION_ID,
+                        "collection_name": "little_bear_p0",
+                    }
+                )
+            ]
+        ),
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "enterprise_id": ENTERPRISE_ID,
+                        "kb_id": KB_ID,
+                        "document_id": DOC_ID,
+                        "document_version_id": DOC_VERSION_ID,
+                        "chunk_id": CHUNK_ID,
+                        "title": "员工手册",
+                        "owner_department_id": DEPARTMENT_ID,
+                        "visibility": "department",
+                        "document_lifecycle_status": "active",
+                        "document_index_status": "indexed",
+                        "chunk_status": "active",
+                        "visibility_state": "active",
+                        "index_version_id": INDEX_VERSION_ID,
+                        "indexed_permission_version": 42,
+                        "page_start": 1,
+                        "page_end": 2,
+                        "score": 0.9,
+                    }
+                )
+            ]
+        ),
+        _Result(),
+    ]
+    if context_chunks:
+        results.insert(
+            -1,
             _Result(
                 all_rows=[
                     _Row(
                         {
-                            "department_id": DEPARTMENT_ID,
-                            "code": "sales",
-                            "name": "销售部",
-                            "is_primary": True,
-                        }
-                    )
-                ]
-            ),
-            _Result(
-                all_rows=[
-                    _Row(
-                        {
-                            "role_id": "role_employee",
-                            "code": "employee",
-                            "name": "Employee",
-                            "scope_type": "enterprise",
-                            "scope_id": None,
-                            "scopes": ["rag:query"],
-                        }
-                    )
-                ]
-            ),
-            _Result(
-                all_rows=[
-                    _Row(
-                        {
-                            "index_version_id": INDEX_VERSION_ID,
-                            "collection_name": "little_bear_p0",
-                        }
-                    )
-                ]
-            ),
-            _Result(
-                all_rows=[
-                    _Row(
-                        {
-                            "enterprise_id": ENTERPRISE_ID,
-                            "kb_id": KB_ID,
+                            "chunk_id": CHUNK_ID,
                             "document_id": DOC_ID,
                             "document_version_id": DOC_VERSION_ID,
-                            "chunk_id": CHUNK_ID,
                             "title": "员工手册",
-                            "owner_department_id": DEPARTMENT_ID,
-                            "visibility": "department",
-                            "document_lifecycle_status": "active",
-                            "document_index_status": "indexed",
-                            "chunk_status": "active",
-                            "visibility_state": "active",
-                            "index_version_id": INDEX_VERSION_ID,
-                            "indexed_permission_version": 42,
+                            "text_preview": "员工年假需要提前申请",
+                            "heading_path": "制度/请假",
                             "page_start": 1,
                             "page_end": 2,
-                            "score": 0.9,
+                            "source_offsets": {"item_index": 0, "chunk_ordinal": 1},
                         }
                     )
                 ]
             ),
-            _Result(),
-        ]
-    )
+        )
+    return _FakeSession(results)
 
 
 def _vector_candidate() -> RetrievalCandidate:

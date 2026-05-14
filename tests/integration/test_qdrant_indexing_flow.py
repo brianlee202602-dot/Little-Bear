@@ -91,6 +91,37 @@ def test_qdrant_index_writer_and_retriever_round_trip_with_real_services() -> No
             api_key=qdrant_api_key,
             timeout_seconds=timeout_seconds,
         )
+        _wait_for_count(
+            qdrant_url,
+            collection_name=collection_name,
+            expected=2,
+            api_key=qdrant_api_key,
+            timeout_seconds=timeout_seconds,
+            qdrant_filter=_draft_payload_filter(),
+        )
+        _wait_for_count(
+            qdrant_url,
+            collection_name=collection_name,
+            expected=0,
+            api_key=qdrant_api_key,
+            timeout_seconds=timeout_seconds,
+            qdrant_filter=_active_filter(),
+        )
+
+        draft_result = QdrantVectorRetriever(
+            base_url=qdrant_url,
+            api_key=qdrant_api_key,
+            embedding_client=embedding_client,
+            timeout_seconds=timeout_seconds,
+        ).search(
+            query_text="员工如何申请年假",
+            permission_filter=_permission_filter(),
+            collection_names=(collection_name,),
+            top_k=2,
+        )
+
+        assert draft_result.degraded is False
+        assert draft_result.candidates == ()
 
         writer.activate_points(
             collection_name=collection_name,
@@ -200,6 +231,26 @@ def _active_filter() -> dict[str, Any]:
             {"key": "visibility", "match": {"value": "enterprise"}},
             {"key": "is_deleted", "match": {"value": False}},
             {"key": "permission_version", "range": {"gte": 42}},
+        ],
+        "should": [],
+        "must_not": [],
+    }
+
+
+def _draft_payload_filter() -> dict[str, Any]:
+    return {
+        "must": [
+            {"key": "enterprise_id", "match": {"value": ENTERPRISE_ID}},
+            {"key": "kb_id", "match": {"value": KB_ID}},
+            {"key": "index_version_id", "match": {"value": INDEX_VERSION_ID}},
+            {"key": "visibility_state", "match": {"value": "draft"}},
+            {"key": "document_status", "match": {"value": "draft"}},
+            {"key": "document_index_status", "match": {"value": "indexing"}},
+            {"key": "chunk_status", "match": {"value": "draft"}},
+            {"key": "owner_department_id", "match": {"value": DEPARTMENT_ID}},
+            {"key": "visibility", "match": {"value": "enterprise"}},
+            {"key": "indexed_permission_version", "range": {"gte": 7, "lte": 7}},
+            {"key": "is_deleted", "match": {"value": False}},
         ],
         "should": [],
         "must_not": [],

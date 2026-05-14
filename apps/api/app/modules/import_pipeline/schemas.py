@@ -19,6 +19,8 @@ class ImportActorContext:
 class DocumentImportItem:
     title: str
     url: str | None = None
+    object_content: bytes | None = None
+    content_type: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
