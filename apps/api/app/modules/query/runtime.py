@@ -7,9 +7,22 @@ from typing import Any
 from app.adapters import QdrantVectorRetriever
 from app.modules.answer import AnswerService
 from app.modules.config.service import ConfigService
-from app.modules.models import ModelGatewayChatClient, ModelGatewayEmbeddingClient
+from app.modules.context.service import (
+    DEFAULT_MAX_CONTEXT_CHARS,
+    DEFAULT_MAX_CONTEXT_CHUNKS,
+    ContextBuilder,
+)
+from app.modules.models import (
+    ModelGatewayChatClient,
+    ModelGatewayEmbeddingClient,
+    ModelGatewayRerankClient,
+)
 from app.modules.query.service import QueryService
-from app.modules.retrieval import UnavailableVectorRetriever
+from app.modules.retrieval import (
+    ModelCandidateReranker,
+    NoopCandidateReranker,
+    UnavailableVectorRetriever,
+)
 from app.modules.secrets.service import SecretStoreError, SecretStoreService
 from app.shared.json_utils import as_dict, json_bool, json_int, json_str
 from sqlalchemy.orm import Session
@@ -18,7 +31,7 @@ from sqlalchemy.orm import Session
 def build_query_service(session: Session) -> QueryService:
     """按 active_config 组装 QueryService。
 
-    配置、Secret 或 adapter 初始化失败时只降级向量召回，不阻断关键词检索闭环。
+    配置、Secret 或 adapter 初始化失败时降级可选模型能力，不阻断关键词检索闭环。
     """
 
     try:
@@ -39,7 +52,17 @@ def build_query_service(session: Session) -> QueryService:
         answer_service = _build_answer_service(session, config)
     except Exception:
         answer_service = AnswerService()
-    return QueryService(vector_retriever=vector_retriever, answer_service=answer_service)
+    try:
+        candidate_reranker = _build_candidate_reranker(session, config)
+    except Exception:
+        candidate_reranker = NoopCandidateReranker()
+    return QueryService(
+        vector_retriever=vector_retriever,
+        candidate_reranker=candidate_reranker,
+        rerank_input_top_k=_rerank_input_top_k(config),
+        context_builder=_build_context_builder(config),
+        answer_service=answer_service,
+    )
 
 
 def _build_vector_retriever(session: Session, config: dict[str, Any]):
@@ -110,6 +133,7 @@ def _build_answer_service(session: Session, config: dict[str, Any]) -> AnswerSer
             json_int(llm_config, "total_timeout_ms"),
             default_ms=20000,
         ),
+        extra_body=as_dict(llm_config.get("openai_extra_body")) or None,
     )
     return AnswerService(
         chat_client=chat_client,
@@ -118,8 +142,57 @@ def _build_answer_service(session: Session, config: dict[str, Any]) -> AnswerSer
     )
 
 
+def _build_candidate_reranker(session: Session, config: dict[str, Any]):
+    model_gateway = as_dict(config.get("model_gateway"))
+    model_config = as_dict(config.get("model"))
+    timeout_config = as_dict(config.get("timeout"))
+    providers = as_dict(model_gateway.get("providers"))
+    rerank_provider = as_dict(providers.get("rerank"))
+
+    rerank_base_url = json_str(rerank_provider, "base_url")
+    rerank_model = json_str(model_config, "rerank_model")
+    if not rerank_base_url or not rerank_model:
+        return NoopCandidateReranker()
+
+    gateway_auth_ref = json_str(model_gateway, "auth_token_ref")
+    provider_auth_ref = json_str(rerank_provider, "auth_token_ref") or gateway_auth_ref
+    rerank_client = ModelGatewayRerankClient(
+        base_url=rerank_base_url,
+        path=_rerank_path(rerank_provider),
+        provider_type=json_str(rerank_provider, "type", default="http") or "http",
+        model=rerank_model,
+        auth_token=_secret_value(session, provider_auth_ref),
+        timeout_seconds=_timeout_seconds(
+            json_int(timeout_config, "rerank_ms"),
+            default_ms=800,
+        ),
+    )
+    return ModelCandidateReranker(rerank_client=rerank_client)
+
+
 def _chat_completions_path(provider: dict[str, Any]) -> str:
     return json_str(provider, "chat_completions_path") or "/v1/chat/completions"
+
+
+def _rerank_path(provider: dict[str, Any]) -> str:
+    return json_str(provider, "rerank_path") or "/rerank"
+
+
+def _rerank_input_top_k(config: dict[str, Any]) -> int:
+    retrieval_config = as_dict(config.get("retrieval"))
+    return json_int(retrieval_config, "rerank_input_top_k") or 20
+
+
+def _build_context_builder(config: dict[str, Any]) -> ContextBuilder:
+    retrieval_config = as_dict(config.get("retrieval"))
+    max_chunks = json_int(retrieval_config, "final_context_top_k") or DEFAULT_MAX_CONTEXT_CHUNKS
+    max_context_tokens = json_int(retrieval_config, "max_context_tokens")
+    if max_context_tokens is None:
+        max_chars = DEFAULT_MAX_CONTEXT_CHARS
+    else:
+        # P0 没有接入各模型 tokenizer，这里用保守字符预算近似 token 预算。
+        max_chars = min(DEFAULT_MAX_CONTEXT_CHARS, max_context_tokens * 2)
+    return ContextBuilder(max_chunks=max_chunks, max_chars=max_chars)
 
 
 def _secret_value(session: Session, secret_ref: str | None) -> str | None:

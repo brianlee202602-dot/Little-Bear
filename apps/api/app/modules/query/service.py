@@ -1,16 +1,21 @@
-"""Query Service P0 非流式最小闭环。
+"""Query Service P0 非流式闭环。
 
-当前版本接入 PostgreSQL 关键词索引、向量召回端口和 RRF 融合排序。真实
-embedding / Qdrant adapter 尚未接入时，向量召回会显式降级，不影响关键词闭环。
+当前版本接入 PostgreSQL 关键词索引、向量召回端口、RRF 融合排序、上下文组装、
+LLM 答案生成、引用校验和查询审计。向量或 LLM 运行时不可用时会显式降级，
+不影响已通过权限 gate 的检索来源返回。
 """
 
 from __future__ import annotations
 
+import json
+import re
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.modules.answer import AnswerService
+from app.modules.answer.schemas import AnswerGenerationResult
 from app.modules.context.schemas import QueryContext
 from app.modules.context.service import ContextBuilder
 from app.modules.permissions import CandidateMetadata, PermissionService, PermissionServiceError
@@ -24,8 +29,12 @@ from app.modules.query.schemas import (
     QueryResult,
 )
 from app.modules.retrieval import (
+    CandidateReranker,
+    NoopCandidateReranker,
     ReciprocalRankFusion,
+    RerankResult,
     RetrievalCandidate,
+    RetrievalModelCall,
     UnavailableVectorRetriever,
     VectorRetriever,
 )
@@ -36,6 +45,34 @@ from sqlalchemy.orm import Session
 
 MAX_QUERY_LENGTH = 4000
 SUPPORTED_FILTERS = {"department_scope", "updated_after", "source_type", "tags"}
+SOURCE_REF_PATTERN = re.compile(r"\[source:([^\]\s]+)\]")
+
+
+@dataclass(frozen=True)
+class _CitationValidationResult:
+    valid: bool
+    degrade_reason: str
+    referenced_source_ids: tuple[str, ...]
+    invalid_source_ids: tuple[str, ...]
+    allowed_source_count: int
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "degrade_reason": self.degrade_reason,
+            "referenced_source_count": len(self.referenced_source_ids),
+            "invalid_source_ids": list(self.invalid_source_ids[:10]),
+            "invalid_source_count": len(self.invalid_source_ids),
+            "allowed_source_count": self.allowed_source_count,
+        }
+
+
+@dataclass(frozen=True)
+class _QueryAuditEvent:
+    event_name: str
+    result: Literal["failure", "denied"]
+    risk_level: Literal["medium", "high", "critical"]
+    error_code: str | None
+    summary: dict[str, object]
 
 
 class QueryService:
@@ -46,12 +83,16 @@ class QueryService:
         *,
         permission_service: PermissionService | None = None,
         vector_retriever: VectorRetriever | None = None,
+        candidate_reranker: CandidateReranker | None = None,
+        rerank_input_top_k: int = 20,
         fusion_service: ReciprocalRankFusion | None = None,
         context_builder: ContextBuilder | None = None,
         answer_service: AnswerService | None = None,
     ) -> None:
         self.permission_service = permission_service or PermissionService()
         self.vector_retriever = vector_retriever or UnavailableVectorRetriever()
+        self.candidate_reranker = candidate_reranker or NoopCandidateReranker()
+        self.rerank_input_top_k = max(rerank_input_top_k, 1)
         self.fusion_service = fusion_service or ReciprocalRankFusion()
         self.context_builder = context_builder or ContextBuilder()
         self.answer_service = answer_service or AnswerService()
@@ -97,6 +138,11 @@ class QueryService:
             answer = ""
             citations: tuple[QueryCitation, ...] = ()
             query_context: QueryContext | None = None
+            allowed_candidates: tuple[QueryAllowedCandidate, ...] = ()
+            answer_result: AnswerGenerationResult | None = None
+            rerank_model_call: RetrievalModelCall | None = None
+            model_route_hash: str | None = None
+            audit_events: list[_QueryAuditEvent] = []
             degrade_reasons: list[str] = []
             if active_index_ids:
                 permission_filter = self.permission_service.build_filter(
@@ -131,7 +177,36 @@ class QueryService:
                     candidates,
                     allowed_kb_ids=normalized_kb_ids,
                     active_index_version_ids=active_index_ids,
-                    limit=normalized_top_k,
+                    limit=max(normalized_top_k, self.rerank_input_top_k),
+                )
+                rerank_result = self._rerank_allowed_candidates(
+                    session,
+                    query_text=normalized_query,
+                    allowed_candidates=allowed_candidates,
+                    top_k=normalized_top_k,
+                )
+                if rerank_result.degraded:
+                    rerank_degrade_reason = (
+                        rerank_result.degrade_reason or "rerank_degraded"
+                    )
+                    degrade_reasons.append(rerank_degrade_reason)
+                    audit_events.append(
+                        _QueryAuditEvent(
+                            event_name="query.rerank_degraded",
+                            result="failure",
+                            risk_level="medium",
+                            error_code=rerank_degrade_reason,
+                            summary={
+                                "degrade_reason": rerank_degrade_reason,
+                                "candidate_count": len(allowed_candidates),
+                            },
+                        )
+                    )
+                rerank_model_call = rerank_result.model_call
+                if rerank_model_call is not None and model_route_hash is None:
+                    model_route_hash = rerank_model_call.model_route_hash
+                allowed_candidates = _allowed_candidates_from_retrieval(
+                    rerank_result.candidates
                 )
                 citations = (
                     tuple(item.citation for item in allowed_candidates)
@@ -154,9 +229,47 @@ class QueryService:
 
             if mode == "answer":
                 answer_result = self.answer_service.generate(query_context=query_context)
+                model_route_hash = answer_result.model_route_hash
                 answer = answer_result.answer
                 if answer_result.degraded:
                     degrade_reasons.append(answer_result.degrade_reason or "llm_degraded")
+                    if answer_result.model_call_attempted:
+                        summary: dict[str, object] = {
+                            "model_name": answer_result.model_name,
+                            "degrade_reason": answer_result.degrade_reason,
+                        }
+                        if answer_result.error_message:
+                            summary["error_message"] = _truncate_error_message(
+                                answer_result.error_message
+                            )
+                        audit_events.append(
+                            _QueryAuditEvent(
+                                event_name="query.llm_degraded",
+                                result="failure",
+                                risk_level="medium",
+                                error_code=answer_result.degrade_reason,
+                                summary=summary,
+                            )
+                        )
+                elif answer:
+                    citation_validation = _validate_answer_citations(
+                        answer,
+                        allowed_source_ids=tuple(
+                            allowed.candidate.chunk_id for allowed in allowed_candidates
+                        ),
+                    )
+                    if not citation_validation.valid:
+                        answer = ""
+                        degrade_reasons.append(citation_validation.degrade_reason)
+                        audit_events.append(
+                            _QueryAuditEvent(
+                                event_name="query.citation_validation_failed",
+                                result="failure",
+                                risk_level="high",
+                                error_code=citation_validation.degrade_reason,
+                                summary=citation_validation.summary(),
+                            )
+                        )
             degraded = bool(degrade_reasons)
             degrade_reason = ";".join(degrade_reasons) if degrade_reasons else None
             result = QueryResult(
@@ -169,6 +282,38 @@ class QueryService:
                 trace_id=trace_id,
                 context=query_context,
             )
+            if answer_result is not None and answer_result.model_call_attempted:
+                self._insert_model_call_log(
+                    session,
+                    request_id=request_id,
+                    trace_id=trace_id,
+                    enterprise_id=context.enterprise_id,
+                    config_version=config_version,
+                    caller="query.answer",
+                    answer_result=answer_result,
+                )
+            if rerank_model_call is not None:
+                self._insert_retrieval_model_call_log(
+                    session,
+                    request_id=request_id,
+                    trace_id=trace_id,
+                    enterprise_id=context.enterprise_id,
+                    config_version=config_version,
+                    caller="query.rerank",
+                    model_call=rerank_model_call,
+                )
+            for audit_event in audit_events:
+                self._insert_query_audit_log(
+                    session,
+                    request_id=request_id,
+                    trace_id=trace_id,
+                    enterprise_id=context.enterprise_id,
+                    user_id=context.user_id,
+                    config_version=config_version,
+                    permission_version=permission_version,
+                    index_version_hash=index_version_hash,
+                    event=audit_event,
+                )
             self._insert_query_log(
                 session,
                 request_id=request_id,
@@ -184,6 +329,7 @@ class QueryService:
                 permission_version=permission_version,
                 permission_filter_hash=permission_filter_hash,
                 index_version_hash=index_version_hash,
+                model_route_hash=model_route_hash,
                 latency_ms=_elapsed_ms(started_at),
                 candidate_count=candidate_count,
                 citation_count=len(citations),
@@ -202,6 +348,23 @@ class QueryService:
                 config_version=config_version,
                 latency_ms=_elapsed_ms(started_at),
                 error_code=exc.error_code,
+            )
+            self._insert_query_audit_log(
+                session,
+                request_id=request_id,
+                trace_id=trace_id,
+                enterprise_id=enterprise_id,
+                user_id=user_id,
+                config_version=config_version,
+                permission_version=0,
+                index_version_hash=None,
+                event=_QueryAuditEvent(
+                    event_name="query.denied",
+                    result="denied",
+                    risk_level="high",
+                    error_code=exc.error_code,
+                    summary={"kb_ids": list(normalized_kb_ids), "error_code": exc.error_code},
+                ),
             )
             raise QueryServiceError(
                 exc.error_code,
@@ -397,6 +560,77 @@ class QueryService:
                 break
         return tuple(allowed)
 
+    def _rerank_allowed_candidates(
+        self,
+        session: Session,
+        *,
+        query_text: str,
+        allowed_candidates: tuple[QueryAllowedCandidate, ...],
+        top_k: int,
+    ) -> RerankResult:
+        candidates = tuple(allowed.candidate for allowed in allowed_candidates)
+        if isinstance(self.candidate_reranker, NoopCandidateReranker):
+            return self.candidate_reranker.rerank(
+                query_text=query_text,
+                candidates=candidates,
+                texts=(),
+                top_k=top_k,
+            )
+        try:
+            texts_by_chunk_id = self._load_rerank_texts(
+                session,
+                chunk_ids=tuple(candidate.chunk_id for candidate in candidates),
+            )
+        except QueryServiceError as exc:
+            return RerankResult(
+                candidates=candidates[: max(top_k, 0)],
+                degraded=True,
+                degrade_reason=exc.error_code,
+            )
+        texts = tuple(
+            _candidate_rerank_text(candidate, texts_by_chunk_id.get(candidate.chunk_id))
+            for candidate in candidates
+        )
+        return self.candidate_reranker.rerank(
+            query_text=query_text,
+            candidates=candidates,
+            texts=texts,
+            top_k=top_k,
+        )
+
+    def _load_rerank_texts(
+        self,
+        session: Session,
+        *,
+        chunk_ids: tuple[str, ...],
+    ) -> dict[str, str]:
+        if not chunk_ids:
+            return {}
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text AS chunk_id,
+                        text_preview
+                    FROM chunks
+                    WHERE id = ANY(CAST(:chunk_ids AS uuid[]))
+                      AND deleted_at IS NULL
+                    """
+                ),
+                {"chunk_ids": list(chunk_ids)},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "QUERY_RERANK_INPUT_UNAVAILABLE",
+                "rerank input chunks cannot be loaded",
+                exc,
+            ) from exc
+        return {
+            str(row._mapping["chunk_id"]): str(row._mapping["text_preview"] or "")
+            for row in rows
+        }
+
     def _insert_denied_query_log(
         self,
         session: Session,
@@ -426,6 +660,7 @@ class QueryService:
             permission_version=0,
             permission_filter_hash="unavailable",
             index_version_hash=None,
+            model_route_hash=None,
             latency_ms=latency_ms,
             candidate_count=0,
             citation_count=0,
@@ -449,6 +684,7 @@ class QueryService:
         permission_version: int,
         permission_filter_hash: str,
         index_version_hash: str | None,
+        model_route_hash: str | None,
         latency_ms: int,
         candidate_count: int,
         citation_count: int,
@@ -470,7 +706,8 @@ class QueryService:
                         :trace_id, CAST(:user_id AS uuid), CAST(:kb_ids AS uuid[]),
                         :query_hash, :status, :degraded, :degrade_reason, :config_version,
                         :permission_version, :permission_filter_hash, :index_version_hash,
-                        NULL, :latency_ms, :candidate_count, :citation_count, :error_code
+                        :model_route_hash, :latency_ms, :candidate_count, :citation_count,
+                        :error_code
                     )
                     """
                 ),
@@ -489,6 +726,7 @@ class QueryService:
                     "permission_version": permission_version,
                     "permission_filter_hash": permission_filter_hash,
                     "index_version_hash": index_version_hash,
+                    "model_route_hash": model_route_hash,
                     "latency_ms": latency_ms,
                     "candidate_count": candidate_count,
                     "citation_count": citation_count,
@@ -499,6 +737,194 @@ class QueryService:
             raise _database_error(
                 "QUERY_LOG_WRITE_FAILED",
                 "query log cannot be written",
+                exc,
+            ) from exc
+
+    def _insert_model_call_log(
+        self,
+        session: Session,
+        *,
+        request_id: str,
+        trace_id: str,
+        enterprise_id: str,
+        config_version: int,
+        caller: str,
+        answer_result: AnswerGenerationResult,
+    ) -> None:
+        status = "success" if not answer_result.degraded else "failed"
+        try:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO model_call_logs(
+                        id, enterprise_id, request_id, trace_id, config_version,
+                        caller, model_type, model_name, model_version, model_route_hash,
+                        status, degraded, latency_ms, token_usage_json, prompt_hash,
+                        input_hash, output_hash, error_code
+                    )
+                    VALUES (
+                        CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :request_id,
+                        :trace_id, :config_version, :caller, :model_type, :model_name,
+                        :model_version, :model_route_hash, :status, :degraded, :latency_ms,
+                        CAST(:token_usage_json AS jsonb), :prompt_hash, :input_hash,
+                        :output_hash, :error_code
+                    )
+                    """
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "enterprise_id": enterprise_id,
+                    "request_id": request_id,
+                    "trace_id": trace_id,
+                    "config_version": config_version,
+                    "caller": caller,
+                    "model_type": answer_result.model_type,
+                    "model_name": answer_result.model_name or "unknown",
+                    "model_version": answer_result.model_version,
+                    "model_route_hash": answer_result.model_route_hash or "unknown",
+                    "status": status,
+                    "degraded": answer_result.degraded,
+                    "latency_ms": answer_result.latency_ms or 0,
+                    "token_usage_json": json.dumps(
+                        answer_result.token_usage,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    if answer_result.token_usage is not None
+                    else None,
+                    "prompt_hash": answer_result.prompt_hash,
+                    "input_hash": answer_result.input_hash,
+                    "output_hash": answer_result.output_hash,
+                    "error_code": answer_result.degrade_reason if answer_result.degraded else None,
+                },
+            )
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "QUERY_MODEL_CALL_LOG_WRITE_FAILED",
+                "model call log cannot be written",
+                exc,
+            ) from exc
+
+    def _insert_retrieval_model_call_log(
+        self,
+        session: Session,
+        *,
+        request_id: str,
+        trace_id: str,
+        enterprise_id: str,
+        config_version: int,
+        caller: str,
+        model_call: RetrievalModelCall,
+    ) -> None:
+        try:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO model_call_logs(
+                        id, enterprise_id, request_id, trace_id, config_version,
+                        caller, model_type, model_name, model_version, model_route_hash,
+                        status, degraded, latency_ms, token_usage_json, prompt_hash,
+                        input_hash, output_hash, error_code
+                    )
+                    VALUES (
+                        CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :request_id,
+                        :trace_id, :config_version, :caller, :model_type, :model_name,
+                        :model_version, :model_route_hash, :status, :degraded, :latency_ms,
+                        CAST(:token_usage_json AS jsonb), :prompt_hash, :input_hash,
+                        :output_hash, :error_code
+                    )
+                    """
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "enterprise_id": enterprise_id,
+                    "request_id": request_id,
+                    "trace_id": trace_id,
+                    "config_version": config_version,
+                    "caller": caller,
+                    "model_type": model_call.model_type,
+                    "model_name": model_call.model_name or "unknown",
+                    "model_version": model_call.model_version,
+                    "model_route_hash": model_call.model_route_hash or "unknown",
+                    "status": model_call.status,
+                    "degraded": model_call.degraded,
+                    "latency_ms": model_call.latency_ms,
+                    "token_usage_json": json.dumps(
+                        model_call.token_usage,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    if model_call.token_usage is not None
+                    else None,
+                    "prompt_hash": model_call.prompt_hash,
+                    "input_hash": model_call.input_hash,
+                    "output_hash": model_call.output_hash,
+                    "error_code": model_call.error_code,
+                },
+            )
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "QUERY_MODEL_CALL_LOG_WRITE_FAILED",
+                "model call log cannot be written",
+                exc,
+            ) from exc
+
+    def _insert_query_audit_log(
+        self,
+        session: Session,
+        *,
+        request_id: str,
+        trace_id: str,
+        enterprise_id: str,
+        user_id: str,
+        config_version: int,
+        permission_version: int,
+        index_version_hash: str | None,
+        event: _QueryAuditEvent,
+    ) -> None:
+        try:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO audit_logs(
+                        id, enterprise_id, request_id, trace_id, event_name, actor_type,
+                        actor_id, resource_type, resource_id, action, result, risk_level,
+                        config_version, permission_version, index_version_hash, summary_json,
+                        error_code
+                    )
+                    VALUES (
+                        CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :request_id,
+                        :trace_id, :event_name, 'user', :actor_id, 'query', :resource_id,
+                        'query', :result, :risk_level, :config_version, :permission_version,
+                        :index_version_hash, CAST(:summary_json AS jsonb), :error_code
+                    )
+                    """
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "enterprise_id": enterprise_id,
+                    "request_id": request_id,
+                    "trace_id": trace_id,
+                    "event_name": event.event_name,
+                    "actor_id": user_id,
+                    "resource_id": request_id,
+                    "result": event.result,
+                    "risk_level": event.risk_level,
+                    "config_version": config_version,
+                    "permission_version": permission_version,
+                    "index_version_hash": index_version_hash,
+                    "summary_json": json.dumps(
+                        event.summary,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    "error_code": event.error_code,
+                },
+            )
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "QUERY_AUDIT_LOG_WRITE_FAILED",
+                "query audit log cannot be written",
                 exc,
             ) from exc
 
@@ -615,6 +1041,61 @@ def _citation_from_candidate(candidate: RetrievalCandidate) -> QueryCitation:
         page_start=page_start,
         page_end=candidate.page_end or page_start,
         score=candidate.score,
+    )
+
+
+def _allowed_candidates_from_retrieval(
+    candidates: tuple[RetrievalCandidate, ...],
+) -> tuple[QueryAllowedCandidate, ...]:
+    return tuple(
+        QueryAllowedCandidate(candidate=candidate, citation=_citation_from_candidate(candidate))
+        for candidate in candidates
+    )
+
+
+def _candidate_rerank_text(candidate: RetrievalCandidate, text_preview: str | None) -> str:
+    if isinstance(text_preview, str) and text_preview.strip():
+        return text_preview.strip()
+    return candidate.title
+
+
+def _truncate_error_message(message: str, *, limit: int = 500) -> str:
+    compact = " ".join(message.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit].rstrip()}..."
+
+
+def _validate_answer_citations(
+    answer: str,
+    *,
+    allowed_source_ids: tuple[str, ...],
+) -> _CitationValidationResult:
+    referenced = tuple(dict.fromkeys(SOURCE_REF_PATTERN.findall(answer)))
+    allowed = set(allowed_source_ids)
+    if not referenced:
+        return _CitationValidationResult(
+            valid=False,
+            degrade_reason="citation_missing",
+            referenced_source_ids=(),
+            invalid_source_ids=(),
+            allowed_source_count=len(allowed),
+        )
+    invalid = tuple(source_id for source_id in referenced if source_id not in allowed)
+    if invalid:
+        return _CitationValidationResult(
+            valid=False,
+            degrade_reason="citation_unauthorized",
+            referenced_source_ids=referenced,
+            invalid_source_ids=invalid,
+            allowed_source_count=len(allowed),
+        )
+    return _CitationValidationResult(
+        valid=True,
+        degrade_reason="",
+        referenced_source_ids=referenced,
+        invalid_source_ids=(),
+        allowed_source_count=len(allowed),
     )
 
 

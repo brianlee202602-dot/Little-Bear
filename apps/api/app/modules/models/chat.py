@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 from app.modules.models.errors import ModelClientError
 
 ChatRole = Literal["system", "user", "assistant"]
+MAX_PROVIDER_ERROR_BODY_CHARS = 1000
 
 
 @dataclass(frozen=True)
@@ -47,12 +48,14 @@ class ModelGatewayChatClient:
         model: str,
         auth_token: str | None = None,
         timeout_seconds: float = 20.0,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.path = path if path.startswith("/") else f"/{path}"
         self.model = model
         self.auth_token = auth_token
         self.timeout_seconds = timeout_seconds
+        self.extra_body = dict(extra_body or {})
 
     def complete(
         self,
@@ -70,6 +73,9 @@ class ModelGatewayChatClient:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        for key, value in self.extra_body.items():
+            if key not in payload:
+                payload[key] = value
         response = _post_json(
             _join_url(self.base_url, self.path),
             payload,
@@ -99,9 +105,10 @@ def _post_json(
             status = getattr(response, "status", 200)
             response_body = response.read()
     except HTTPError as exc:
+        response_body = exc.read()
         raise ModelClientError(
             "LLM_PROVIDER_HTTP_ERROR",
-            f"LLM provider returned HTTP {exc.code}",
+            _http_error_message(exc.code, response_body),
         ) from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise ModelClientError(
@@ -111,7 +118,7 @@ def _post_json(
     if status < 200 or status >= 300:
         raise ModelClientError(
             "LLM_PROVIDER_HTTP_ERROR",
-            f"LLM provider returned HTTP {status}",
+            _http_error_message(status, response_body),
         )
     try:
         return json.loads(response_body.decode("utf-8"))
@@ -162,6 +169,25 @@ def _extract_token_usage(response: Any) -> dict[str, int] | None:
         if isinstance(key, str) and isinstance(value, int)
     }
     return normalized or None
+
+
+def _http_error_message(status: int, response_body: bytes | None) -> str:
+    snippet = _response_body_snippet(response_body)
+    if not snippet:
+        return f"LLM provider returned HTTP {status}"
+    return f"LLM provider returned HTTP {status}: {snippet}"
+
+
+def _response_body_snippet(response_body: bytes | None) -> str | None:
+    if not response_body:
+        return None
+    text = response_body.decode("utf-8", errors="replace").strip()
+    if not text:
+        return None
+    compact = " ".join(text.split())
+    if len(compact) <= MAX_PROVIDER_ERROR_BODY_CHARS:
+        return compact
+    return f"{compact[:MAX_PROVIDER_ERROR_BODY_CHARS].rstrip()}..."
 
 
 def _join_url(base_url: str, path: str) -> str:

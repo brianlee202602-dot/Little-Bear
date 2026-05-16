@@ -21,6 +21,7 @@ dependencies = [
   "python-json-logger>=2.0.7",
   "jsonschema>=4.23.0",
   "cryptography>=42.0.0",
+  "pypdf>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,9 @@ include = ["app*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"apps/api/migrations/versions/*.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

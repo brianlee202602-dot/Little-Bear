@@ -131,6 +131,67 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
     assert captured["required_scope"] == "rag:query"
 
 
+def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
+    app = _create_test_app()
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.query.session_scope", lambda: _FakeSession())
+    captured: dict[str, object] = {}
+
+    def _authenticate(*_args, **kwargs):
+        captured.update(kwargs)
+        return _auth_context()
+
+    def _create_query(_self, _session, **kwargs):
+        captured.update(kwargs)
+        return QueryResult(
+            request_id=kwargs["request_id"],
+            answer="员工年假需要提前申请。",
+            citations=(
+                QueryCitation(
+                    source_id="66666666-6666-6666-6666-666666666666",
+                    doc_id="44444444-4444-4444-4444-444444444444",
+                    document_version_id="55555555-5555-5555-5555-555555555555",
+                    title="员工手册",
+                    page_start=1,
+                    page_end=2,
+                    score=0.9,
+                ),
+            ),
+            confidence="low",
+            degraded=False,
+            degrade_reason=None,
+            trace_id=kwargs["trace_id"],
+        )
+
+    monkeypatch.setattr(
+        "app.api.routes.query.AuthService.authenticate_access_token",
+        _authenticate,
+    )
+    monkeypatch.setattr(
+        "app.api.routes.query.build_query_service",
+        lambda _session: _FakeQueryService(_create_query),
+    )
+
+    response = TestClient(app).post(
+        "/internal/v1/query-streams",
+        headers={"Authorization": "Bearer token", "x-request-id": "req_stream"},
+        json={
+            "kb_ids": ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            "query": "员工手册",
+            "mode": "answer",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: metadata" in response.text
+    assert 'data: {"delta":"员工年假需要提前申请。"}' in response.text
+    assert "event: citation" in response.text
+    assert "event: done" in response.text
+    assert "员工手册" in response.text
+    assert captured["required_scope"] == "rag:query"
+
+
 def test_create_query_route_returns_service_error(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)

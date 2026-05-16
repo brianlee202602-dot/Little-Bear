@@ -6,6 +6,7 @@ from app.main import create_app
 from app.modules.auth.schemas import AuthContext, AuthDepartment, AuthRole, AuthUser
 from app.modules.import_pipeline.errors import ImportServiceError
 from app.modules.import_pipeline.schemas import ImportJob, ImportJobList
+from app.modules.import_pipeline.service import ImportService
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
 
@@ -101,6 +102,10 @@ def test_create_document_import_route(monkeypatch) -> None:
         "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
         lambda *_args, **_kwargs: _auth_context(),
     )
+    monkeypatch.setattr(
+        "app.api.routes.import_pipeline.build_import_service",
+        lambda _session: ImportService(),
+    )
     captured: dict[str, object] = {}
 
     def _create_import(_self, _session, **kwargs):
@@ -134,6 +139,10 @@ def test_create_upload_document_import_route(monkeypatch) -> None:
         "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
         lambda *_args, **_kwargs: _auth_context(),
     )
+    monkeypatch.setattr(
+        "app.api.routes.import_pipeline.build_import_service",
+        lambda _session: ImportService(),
+    )
     captured: dict[str, object] = {}
 
     def _create_import(_self, _session, **kwargs):
@@ -156,7 +165,61 @@ def test_create_upload_document_import_route(monkeypatch) -> None:
     assert captured["job_type"] == "upload"
     item = captured["items"][0]
     assert item.title == "handbook.md"
-    assert item.metadata["content"] == "# Handbook\n\nHello"
+    assert item.object_content == b"# Handbook\n\nHello"
+    assert item.metadata["file_type"] == "md"
+    assert "content" not in item.metadata
+
+
+def test_create_upload_document_import_route_rejects_disallowed_file_type(
+    monkeypatch,
+) -> None:
+    app = _create_test_app()
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        lambda *_args, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.import_pipeline.build_import_service",
+        lambda _session: ImportService(allowed_file_types=("txt",)),
+    )
+
+    response = TestClient(app).post(
+        "/internal/v1/knowledge-bases/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/documents",
+        headers={"Authorization": "Bearer token"},
+        files={"files": ("handbook.pdf", b"%PDF", "application/pdf")},
+        data={"visibility": "department"},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["error_code"] == "IMPORT_FILE_TYPE_UNSUPPORTED"
+
+
+def test_create_upload_document_import_route_rejects_oversized_file(
+    monkeypatch,
+) -> None:
+    app = _create_test_app()
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        lambda *_args, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.import_pipeline.build_import_service",
+        lambda _session: ImportService(max_upload_bytes=4, allowed_file_types=("txt",)),
+    )
+
+    response = TestClient(app).post(
+        "/internal/v1/knowledge-bases/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/documents",
+        headers={"Authorization": "Bearer token"},
+        files={"files": ("handbook.txt", b"hello", "text/plain")},
+        data={"visibility": "department"},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["error_code"] == "IMPORT_FILE_TOO_LARGE"
 
 
 def test_import_job_get_route_requires_owner_scope(monkeypatch) -> None:
@@ -239,6 +302,10 @@ def test_import_route_returns_service_error(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
         lambda *_args, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.import_pipeline.build_import_service",
+        lambda _session: ImportService(),
     )
 
     def _raise_error(*_args, **_kwargs):

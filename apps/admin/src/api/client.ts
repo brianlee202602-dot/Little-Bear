@@ -221,11 +221,79 @@ export interface AdminKnowledgeBaseData {
   owner_department_id: string;
   default_visibility: "department" | "enterprise";
   config_scope_id: string | null;
+  policy_version: number;
+}
+
+export interface AdminKnowledgeBaseCreateRequest {
+  name: string;
+  owner_department_id: string;
+  default_visibility: "department" | "enterprise";
+  config_scope_id?: string | null;
+}
+
+export interface AdminKnowledgeBasePatchRequest {
+  name?: string;
+  status?: "active" | "disabled" | "archived";
+  default_visibility?: "department" | "enterprise";
+  config_scope_id?: string | null;
 }
 
 export interface AdminKnowledgeBaseListResponse {
   request_id: string;
   data: AdminKnowledgeBaseData[];
+  pagination: PaginationData;
+}
+
+export interface AdminKnowledgeBaseResponse {
+  request_id: string;
+  data: AdminKnowledgeBaseData;
+}
+
+export interface AcceptedResponse {
+  request_id: string;
+  data: {
+    accepted: boolean;
+    job_id: string | null;
+  };
+}
+
+export type ImportJobStatus =
+  | "queued"
+  | "running"
+  | "retrying"
+  | "partial_success"
+  | "success"
+  | "failed"
+  | "cancelled";
+
+export type ImportJobStage =
+  | "validate"
+  | "parse"
+  | "clean"
+  | "chunk"
+  | "embed"
+  | "index"
+  | "publish"
+  | "cleanup"
+  | "finished";
+
+export interface ImportJobData {
+  id: string;
+  kb_id: string | null;
+  status: ImportJobStatus;
+  stage: ImportJobStage;
+  document_ids: string[];
+  error_summary: string | null;
+}
+
+export interface ImportJobResponse {
+  request_id: string;
+  data: ImportJobData;
+}
+
+export interface ImportJobListResponse {
+  request_id: string;
+  data: ImportJobData[];
   pagination: PaginationData;
 }
 
@@ -746,6 +814,136 @@ export async function listAdminKnowledgeBases(
   );
 }
 
+export async function getAdminKnowledgeBase(
+  kbId: string,
+  accessToken: string,
+): Promise<AdminKnowledgeBaseResponse> {
+  return requestJson<AdminKnowledgeBaseResponse>(
+    `/internal/v1/admin/knowledge-bases/${encodeURIComponent(kbId)}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function createAdminKnowledgeBase(
+  payload: AdminKnowledgeBaseCreateRequest,
+  accessToken: string,
+  confirmedEnterpriseVisibility: boolean,
+): Promise<AdminKnowledgeBaseResponse> {
+  return requestJson<AdminKnowledgeBaseResponse>(
+    "/internal/v1/admin/knowledge-bases",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: confirmedEnterpriseVisibility
+        ? { "x-knowledge-base-confirm": "enterprise-visible" }
+        : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function patchAdminKnowledgeBase(
+  kbId: string,
+  payload: AdminKnowledgeBasePatchRequest,
+  accessToken: string,
+  confirmedVisibilityExpand: boolean,
+): Promise<AdminKnowledgeBaseResponse> {
+  return requestJson<AdminKnowledgeBaseResponse>(
+    `/internal/v1/admin/knowledge-bases/${encodeURIComponent(kbId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+      headers: confirmedVisibilityExpand
+        ? { "x-knowledge-base-confirm": "visibility-expand" }
+        : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function deleteAdminKnowledgeBase(
+  kbId: string,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<AcceptedResponse> {
+  return requestJson<AcceptedResponse>(
+    `/internal/v1/admin/knowledge-bases/${encodeURIComponent(kbId)}`,
+    {
+      method: "DELETE",
+      headers: confirmed ? { "x-knowledge-base-confirm": "delete" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function uploadKnowledgeBaseDocuments(
+  kbId: string,
+  payload: {
+    files: File[];
+    visibility?: "department" | "enterprise";
+    owner_department_id?: string;
+    folder_id?: string;
+    idempotency_key?: string;
+  },
+  accessToken: string,
+): Promise<ImportJobResponse> {
+  const form = new FormData();
+  for (const file of payload.files) {
+    form.append("files", file);
+  }
+  if (payload.visibility) {
+    form.append("visibility", payload.visibility);
+  }
+  if (payload.owner_department_id) {
+    form.append("owner_department_id", payload.owner_department_id);
+  }
+  if (payload.folder_id) {
+    form.append("folder_id", payload.folder_id);
+  }
+  if (payload.idempotency_key) {
+    form.append("idempotency_key", payload.idempotency_key);
+  }
+  return requestJson<ImportJobResponse>(
+    `/internal/v1/knowledge-bases/${encodeURIComponent(kbId)}/documents`,
+    {
+      method: "POST",
+      body: form,
+    },
+    accessToken,
+  );
+}
+
+export async function listAdminImportJobs(
+  accessToken: string,
+  filters: {
+    page?: number;
+    page_size?: number;
+    status?: string;
+    stage?: string;
+    kb_id?: string;
+  } = {},
+): Promise<ImportJobListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  if (filters.stage) {
+    params.set("stage", filters.stage);
+  }
+  if (filters.kb_id) {
+    params.set("kb_id", filters.kb_id);
+  }
+  return requestJson<ImportJobListResponse>(
+    `/internal/v1/admin/import-jobs?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
 export async function listAdminUserRoleBindings(
   userId: string,
   accessToken: string,
@@ -796,8 +994,8 @@ async function requestJson<T>(
   bearerToken?: string,
 ): Promise<T> {
   const headers = new Headers(init.headers);
-  // 所有写接口都发送 JSON；调用方显式传入 setup token 或普通 access/refresh token。
-  if (init.body && !headers.has("content-type")) {
+  // 默认写接口发送 JSON；FormData 由浏览器自动设置 multipart boundary。
+  if (init.body && !isFormDataBody(init.body) && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
   if (bearerToken) {
@@ -825,7 +1023,7 @@ async function requestVoid(
   bearerToken?: string,
 ): Promise<void> {
   const headers = new Headers(init.headers);
-  if (init.body && !headers.has("content-type")) {
+  if (init.body && !isFormDataBody(init.body) && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
   if (bearerToken) {
@@ -861,4 +1059,8 @@ function parseJson(text: string): unknown {
 
 function isApiErrorPayload(payload: unknown): payload is ApiErrorPayload {
   return Boolean(payload) && typeof payload === "object";
+}
+
+function isFormDataBody(body: BodyInit): body is FormData {
+  return typeof FormData !== "undefined" && body instanceof FormData;
 }

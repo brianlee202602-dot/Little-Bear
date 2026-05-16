@@ -75,7 +75,11 @@ def _build_indexing_service(session: Session, config: dict[str, Any]) -> Indexin
         provider_type=json_str(embedding_provider, "type", default="http") or "http",
         model=embedding_model,
         auth_token=_secret_value(session, provider_auth_ref),
-        timeout_seconds=_timeout_seconds(json_int(timeout_config, "embedding_ms"), default_ms=3000),
+        timeout_seconds=_timeout_seconds(
+            json_int(timeout_config, "embedding_ms"),
+            default_ms=3000,
+            min_ms=3000,
+        ),
         expected_dimension=dimension,
         normalize=json_bool(model_config, "embedding_normalize", default=False),
     )
@@ -86,6 +90,7 @@ def _build_indexing_service(session: Session, config: dict[str, Any]) -> Indexin
         timeout_seconds=_timeout_seconds(
             json_int(timeout_config, "vector_search_ms"),
             default_ms=3000,
+            min_ms=3000,
         ),
     )
     return IndexingService(
@@ -126,5 +131,5 @@ def _secret_value(session: Session, secret_ref: str | None) -> str | None:
         ) from exc
 
 
-def _timeout_seconds(timeout_ms: int | None, *, default_ms: int) -> float:
-    return max(timeout_ms or default_ms, 1) / 1000
+def _timeout_seconds(timeout_ms: int | None, *, default_ms: int, min_ms: int = 1) -> float:
+    return max(timeout_ms or default_ms, min_ms) / 1000

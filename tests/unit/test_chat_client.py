@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
+from urllib.error import HTTPError
 
 import pytest
 from app.modules.models import ChatMessage, ModelClientError, ModelGatewayChatClient
@@ -90,3 +92,58 @@ def test_chat_client_rejects_invalid_response(monkeypatch) -> None:
         )
 
     assert exc_info.value.error_code == "LLM_PROVIDER_RESPONSE_INVALID"
+
+
+def test_chat_client_merges_extra_body_without_overriding_core_fields(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _urlopen(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response({"choices": [{"message": {"content": "答案"}}]})
+
+    monkeypatch.setattr("app.modules.models.chat.urlopen", _urlopen)
+
+    ModelGatewayChatClient(
+        base_url="https://model.example",
+        path="/v1/chat/completions",
+        model="qwen3-4b",
+        extra_body={
+            "chat_template_kwargs": {"enable_thinking": False},
+            "max_tokens": 999,
+        },
+    ).complete(
+        messages=(ChatMessage(role="user", content="员工年假怎么申请？"),),
+        temperature=0.1,
+        max_tokens=128,
+    )
+
+    assert captured["body"]["max_tokens"] == 128
+    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_chat_client_includes_http_error_body(monkeypatch) -> None:
+    def _urlopen(request, timeout):
+        raise HTTPError(
+            request.full_url,
+            400,
+            "Bad Request",
+            hdrs={},
+            fp=BytesIO(b'{"error":{"message":"context length exceeded"}}'),
+        )
+
+    monkeypatch.setattr("app.modules.models.chat.urlopen", _urlopen)
+
+    with pytest.raises(ModelClientError) as exc_info:
+        ModelGatewayChatClient(
+            base_url="https://model.example",
+            path="/v1/chat/completions",
+            model="qwen3-4b",
+        ).complete(
+            messages=(ChatMessage(role="user", content="员工年假怎么申请？"),),
+            temperature=0.1,
+            max_tokens=800,
+        )
+
+    assert exc_info.value.error_code == "LLM_PROVIDER_HTTP_ERROR"
+    assert "HTTP 400" in exc_info.value.message
+    assert "context length exceeded" in exc_info.value.message

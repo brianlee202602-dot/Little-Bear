@@ -1,8 +1,4 @@
-"""Import Service 与 Worker 状态推进。
-
-P0-4 先实现“创建导入任务 -> Worker 领取 -> 阶段推进”的最小闭环。真正的
-对象存储、解析器、chunk 写入和索引发布在后续 P0-5 接入端口与 adapter。
-"""
+"""Import Service 与 Worker 状态推进。"""
 
 from __future__ import annotations
 
@@ -12,6 +8,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.modules.import_pipeline.errors import ImportServiceError
+from app.modules.import_pipeline.executors import (
+    DocumentChunker,
+    DocumentCleaner,
+    DocumentParser,
+    HeadingParagraphChunker,
+    MultiFormatDocumentParser,
+    ParsedDocument,
+    PlainTextCleaner,
+    SourceDocument,
+)
 from app.modules.import_pipeline.schemas import (
     DocumentImportItem,
     ImportActorContext,
@@ -41,13 +47,86 @@ IMPORT_STAGES = (
     "finished",
 )
 TERMINAL_STATUSES = {"success", "partial_success", "failed", "cancelled"}
+DEFAULT_MAX_UPLOAD_BYTES = 2 * 1024 * 1024
+DEFAULT_ALLOWED_FILE_TYPES = ("txt", "md", "pdf", "docx")
+CONTENT_TYPE_TO_FILE_TYPE = {
+    "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "text/plain": "txt",
+    "text/markdown": "md",
+    "text/x-markdown": "md",
+}
+EXTENSION_TO_FILE_TYPE = {
+    "pdf": "pdf",
+    "docx": "docx",
+    "txt": "txt",
+    "text": "txt",
+    "md": "md",
+    "markdown": "md",
+}
 
 
 class ImportService:
     """导入任务写模型和 Worker 任务状态机。"""
 
-    def __init__(self, *, object_storage: ObjectStorage | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        object_storage: ObjectStorage | None = None,
+        parser: DocumentParser | None = None,
+        cleaner: DocumentCleaner | None = None,
+        chunker: DocumentChunker | None = None,
+        max_upload_bytes: int | None = None,
+        allowed_file_types: tuple[str, ...] | None = None,
+    ) -> None:
         self.object_storage = object_storage or InMemoryObjectStorage()
+        self.parser = parser or MultiFormatDocumentParser()
+        self.cleaner = cleaner or PlainTextCleaner()
+        self.chunker = chunker or HeadingParagraphChunker()
+        self.max_upload_bytes = max_upload_bytes or DEFAULT_MAX_UPLOAD_BYTES
+        self.allowed_file_types = _normalize_allowed_file_types(
+            allowed_file_types or DEFAULT_ALLOWED_FILE_TYPES
+        )
+
+    def validate_upload_file(
+        self,
+        *,
+        filename: str,
+        content_type: str | None,
+        size_bytes: int,
+        file_index: int,
+    ) -> str:
+        """按导入运行时配置校验上传文件，并返回规范化文件类型。"""
+
+        file_type = _infer_file_type(filename=filename, content_type=content_type)
+        if not file_type or file_type not in self.allowed_file_types:
+            raise ImportServiceError(
+                "IMPORT_FILE_TYPE_UNSUPPORTED",
+                "uploaded file type is not allowed by active import config",
+                status_code=415,
+                retryable=False,
+                details={
+                    "file_index": file_index,
+                    "filename": filename,
+                    "content_type": content_type,
+                    "file_type": file_type,
+                    "allowed_file_types": list(self.allowed_file_types),
+                },
+            )
+        if size_bytes > self.max_upload_bytes:
+            raise ImportServiceError(
+                "IMPORT_FILE_TOO_LARGE",
+                "uploaded file is too large for active import config",
+                status_code=413,
+                retryable=False,
+                details={
+                    "file_index": file_index,
+                    "filename": filename,
+                    "max_bytes": self.max_upload_bytes,
+                    "size_bytes": size_bytes,
+                },
+            )
+        return file_type
 
     def create_document_import(
         self,
@@ -112,7 +191,7 @@ class ImportService:
                 folder_id=folder_id,
             )
 
-        permission_version = self._bump_permission_version(session, enterprise_id)
+        permission_version = self._load_permission_version(session, enterprise_id)
         document_ids: list[str] = []
         document_version_ids: list[str] = []
         request_items: list[dict[str, Any]] = []
@@ -163,7 +242,7 @@ class ImportService:
                 tags=_metadata_tags(item.metadata),
                 actor_user_id=actor_user_id,
             )
-            object_key = item.url
+            object_key = None
             if job_type == "upload":
                 object_key = self._store_upload_object(
                     enterprise_id=enterprise_id,
@@ -190,6 +269,7 @@ class ImportService:
                     "title": item.title,
                     "url": item.url,
                     "object_key": object_key,
+                    "content_type": item.content_type,
                     "metadata": item.metadata,
                     "content_hash": content_hash,
                 }
@@ -728,13 +808,25 @@ class ImportService:
             self._mark_documents_indexing(session, request_json=_json_mapping(row["request_json"]))
             return
         if stage == "parse":
-            self._mark_versions_parsed(session, request_json=_json_mapping(row["request_json"]))
+            self._mark_versions_parsed(
+                session,
+                row=row,
+                request_json=_json_mapping(row["request_json"]),
+            )
             return
         if stage == "clean":
-            self._mark_versions_cleaned(session, request_json=_json_mapping(row["request_json"]))
+            self._mark_versions_cleaned(
+                session,
+                row=row,
+                request_json=_json_mapping(row["request_json"]),
+            )
             return
         if stage == "chunk":
-            self._write_draft_chunks(session, request_json=_json_mapping(row["request_json"]))
+            self._write_draft_chunks(
+                session,
+                row=row,
+                request_json=_json_mapping(row["request_json"]),
+            )
             return
         if stage not in {"embed", "index", "publish"}:
             return
@@ -798,62 +890,120 @@ class ImportService:
         self,
         session: Session,
         *,
+        row: Any,
         request_json: dict[str, Any],
     ) -> None:
-        document_version_ids = _document_version_ids_from_request(request_json, None)
-        if not document_version_ids:
+        items = _request_items(request_json)
+        for item in items:
+            document_id = _item_str(item, "document_id")
+            document_version_id = _item_str(item, "document_version_id")
+            if not document_id or not document_version_id:
+                continue
+            source = self._source_document_from_item(item)
+            parsed = self.parser.parse(source)
+            parsed_object_key = _derived_object_key(
+                "parsed",
+                enterprise_id=row["enterprise_id"],
+                document_id=document_id,
+                document_version_id=document_version_id,
+            )
+            self._put_text_object(
+                object_key=parsed_object_key,
+                text_content=parsed.text,
+                error_code="IMPORT_PARSED_OBJECT_STORE_FAILED",
+            )
+            item["parsed_object_key"] = parsed_object_key
+            item["parser_version"] = parsed.parser_version
+            session.execute(
+                text(
+                    """
+                    UPDATE document_versions
+                    SET status = CASE WHEN status = 'draft' THEN 'parsed' ELSE status END,
+                        parser_version = :parser_version,
+                        parsed_object_key = :parsed_object_key
+                    WHERE id = CAST(:document_version_id AS uuid)
+                      AND status IN ('draft', 'parsed')
+                    """
+                ),
+                {
+                    "document_version_id": document_version_id,
+                    "parser_version": parsed.parser_version,
+                    "parsed_object_key": parsed_object_key,
+                },
+            )
+        if not any(_item_str(item, "document_version_id") for item in items):
             raise ImportServiceError(
                 "IMPORT_DOCUMENT_VERSIONS_REQUIRED",
                 "import job request does not include document version ids",
                 status_code=409,
             )
-        session.execute(
-            text(
-                """
-                UPDATE document_versions
-                SET status = CASE WHEN status = 'draft' THEN 'parsed' ELSE status END,
-                    parser_version = COALESCE(parser_version, 'plain-text-p0'),
-                    parsed_object_key = COALESCE(parsed_object_key, object_key)
-                WHERE id = ANY(CAST(:document_version_ids AS uuid[]))
-                  AND status IN ('draft', 'parsed')
-                """
-            ),
-            {"document_version_ids": document_version_ids},
-        )
+        self._update_job_request_json(session, job_id=row["job_id"], request_json=request_json)
 
     def _mark_versions_cleaned(
         self,
         session: Session,
         *,
+        row: Any,
         request_json: dict[str, Any],
     ) -> None:
-        document_version_ids = _document_version_ids_from_request(request_json, None)
-        if not document_version_ids:
+        items = _request_items(request_json)
+        for item in items:
+            document_id = _item_str(item, "document_id")
+            document_version_id = _item_str(item, "document_version_id")
+            if not document_id or not document_version_id:
+                continue
+            parsed_text = self._item_stage_text(item, preferred_key="parsed_object_key")
+            cleaned = self.cleaner.clean(
+                ParsedDocument(
+                    text=parsed_text,
+                    parser_version=_item_str(item, "parser_version") or "stage-text",
+                    metadata=_item_metadata(item),
+                )
+            )
+            cleaned_object_key = _derived_object_key(
+                "cleaned",
+                enterprise_id=row["enterprise_id"],
+                document_id=document_id,
+                document_version_id=document_version_id,
+            )
+            self._put_text_object(
+                object_key=cleaned_object_key,
+                text_content=cleaned.text,
+                error_code="IMPORT_CLEANED_OBJECT_STORE_FAILED",
+            )
+            item["cleaned_object_key"] = cleaned_object_key
+            item["cleaner_version"] = cleaned.cleaner_version
+            session.execute(
+                text(
+                    """
+                    UPDATE document_versions
+                    SET cleaned_object_key = :cleaned_object_key
+                    WHERE id = CAST(:document_version_id AS uuid)
+                      AND status IN ('parsed', 'chunked')
+                    """
+                ),
+                {
+                    "document_version_id": document_version_id,
+                    "cleaned_object_key": cleaned_object_key,
+                },
+            )
+        if not any(_item_str(item, "document_version_id") for item in items):
             raise ImportServiceError(
                 "IMPORT_DOCUMENT_VERSIONS_REQUIRED",
                 "import job request does not include document version ids",
                 status_code=409,
             )
-        session.execute(
-            text(
-                """
-                UPDATE document_versions
-                SET cleaned_object_key = COALESCE(cleaned_object_key, parsed_object_key, object_key)
-                WHERE id = ANY(CAST(:document_version_ids AS uuid[]))
-                  AND status IN ('parsed', 'chunked')
-                """
-            ),
-            {"document_version_ids": document_version_ids},
-        )
+        self._update_job_request_json(session, job_id=row["job_id"], request_json=request_json)
 
     def _write_draft_chunks(
         self,
         session: Session,
         *,
+        row: Any,
         request_json: dict[str, Any],
     ) -> None:
-        items = request_json.get("items")
-        if not isinstance(items, list) or not items:
+        items = _request_items(request_json)
+        if not items:
             raise ImportServiceError(
                 "IMPORT_ITEMS_REQUIRED",
                 "import job request does not include items for chunking",
@@ -861,35 +1011,55 @@ class ImportService:
             )
         document_version_ids: list[str] = []
         for item_index, item in enumerate(items):
-            if not isinstance(item, dict):
-                continue
-            document_id = item.get("document_id")
-            document_version_id = item.get("document_version_id")
-            if not isinstance(document_id, str) or not isinstance(document_version_id, str):
+            document_id = _item_str(item, "document_id")
+            document_version_id = _item_str(item, "document_version_id")
+            if not document_id or not document_version_id:
                 continue
             document_version_ids.append(document_version_id)
-            text_content = _item_text_content(item)
-            for ordinal, chunk_text in enumerate(_split_plain_text(text_content), start=1):
+            text_content = self._item_stage_text(item, preferred_key="cleaned_object_key")
+            cleaned = self.cleaner.clean(
+                ParsedDocument(
+                    text=text_content,
+                    parser_version=_item_str(item, "parser_version") or "stage-text",
+                    metadata=_item_metadata(item),
+                )
+            )
+            chunk_documents = self.chunker.chunk(cleaned, title=_item_title(item))
+            item["chunk_count"] = len(chunk_documents)
+            item["chunker_version"] = self.chunker.version
+            for chunk in chunk_documents:
+                chunk_text = chunk.text
                 preview = chunk_text[:500]
                 content_hash = stable_json_hash(
                     {
                         "document_id": document_id,
                         "document_version_id": document_version_id,
-                        "ordinal": ordinal,
+                        "ordinal": chunk.ordinal,
                         "text": chunk_text,
                     }
+                )
+                text_object_key = _chunk_text_object_key(
+                    enterprise_id=row["enterprise_id"],
+                    document_id=document_id,
+                    document_version_id=document_version_id,
+                    ordinal=chunk.ordinal,
+                )
+                self._put_text_object(
+                    object_key=text_object_key,
+                    text_content=chunk_text,
+                    error_code="IMPORT_CHUNK_OBJECT_STORE_FAILED",
                 )
                 session.execute(
                     text(
                         """
                         INSERT INTO chunks(
                             id, enterprise_id, kb_id, document_id, document_version_id,
-                            ordinal, text_preview, heading_path, source_offsets,
+                            ordinal, text_object_key, text_preview, heading_path, source_offsets,
                             content_hash, token_count, status, permission_snapshot_id
                         )
                         SELECT
                             CAST(:id AS uuid), d.enterprise_id, d.kb_id, d.id, dv.id,
-                            :ordinal, :text_preview, :heading_path,
+                            :ordinal, :text_object_key, :text_preview, :heading_path,
                             CAST(:source_offsets AS jsonb), :content_hash, :token_count,
                             'draft', d.permission_snapshot_id
                         FROM documents d
@@ -904,16 +1074,21 @@ class ImportService:
                         "id": str(uuid.uuid4()),
                         "document_id": document_id,
                         "document_version_id": document_version_id,
-                        "ordinal": ordinal,
+                        "ordinal": chunk.ordinal,
+                        "text_object_key": text_object_key,
                         "text_preview": preview,
-                        "heading_path": _heading_path(item),
+                        "heading_path": chunk.heading_path,
                         "source_offsets": json.dumps(
-                            {"item_index": item_index, "chunk_ordinal": ordinal},
+                            {
+                                "item_index": item_index,
+                                "chunk_ordinal": chunk.ordinal,
+                                **chunk.source_offsets,
+                            },
                             ensure_ascii=False,
                             sort_keys=True,
                         ),
                         "content_hash": content_hash,
-                        "token_count": _estimate_token_count(chunk_text),
+                        "token_count": chunk.token_count,
                     },
                 )
         if document_version_ids:
@@ -922,13 +1097,103 @@ class ImportService:
                     """
                     UPDATE document_versions
                     SET status = 'chunked',
-                        chunker_version = COALESCE(chunker_version, 'plain-text-p0')
+                        chunker_version = :chunker_version
                     WHERE id = ANY(CAST(:document_version_ids AS uuid[]))
                       AND status IN ('parsed', 'chunked')
                     """
                 ),
-                {"document_version_ids": document_version_ids},
+                {
+                    "document_version_ids": document_version_ids,
+                    "chunker_version": self.chunker.version,
+                },
             )
+        self._update_job_request_json(session, job_id=row["job_id"], request_json=request_json)
+
+    def _source_document_from_item(self, item: dict[str, Any]) -> SourceDocument:
+        object_key = _item_str(item, "object_key")
+        content = None
+        if object_key and _looks_like_object_key(object_key):
+            content = self._get_object(
+                object_key=object_key,
+                error_code="IMPORT_OBJECT_READ_FAILED",
+            )
+        return SourceDocument(
+            title=_item_title(item),
+            url=_item_str(item, "url"),
+            object_key=object_key,
+            content=content,
+            content_type=_item_content_type(item),
+            metadata=_item_metadata(item),
+        )
+
+    def _item_stage_text(self, item: dict[str, Any], *, preferred_key: str) -> str:
+        object_key = _item_str(item, preferred_key)
+        if object_key:
+            content = self._get_object(
+                object_key=object_key,
+                error_code="IMPORT_STAGE_OBJECT_READ_FAILED",
+            )
+            try:
+                return content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ImportServiceError(
+                    "IMPORT_STAGE_OBJECT_ENCODING_UNSUPPORTED",
+                    "derived import object is not valid UTF-8 text",
+                    status_code=422,
+                    retryable=False,
+                    details={"object_key": object_key},
+                ) from exc
+        return _item_text_content(item)
+
+    def _get_object(self, *, object_key: str, error_code: str) -> bytes:
+        try:
+            return self.object_storage.get_object(object_key=object_key)
+        except Exception as exc:
+            raise ImportServiceError(
+                error_code,
+                "import object cannot be read",
+                status_code=503,
+                retryable=True,
+                details={"object_key": object_key},
+            ) from exc
+
+    def _put_text_object(self, *, object_key: str, text_content: str, error_code: str) -> None:
+        try:
+            self.object_storage.put_object(
+                object_key=object_key,
+                content=text_content.encode("utf-8"),
+                content_type="text/plain; charset=utf-8",
+            )
+        except Exception as exc:
+            raise ImportServiceError(
+                error_code,
+                "derived import object cannot be stored",
+                status_code=503,
+                retryable=True,
+                details={"object_key": object_key},
+            ) from exc
+
+    def _update_job_request_json(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        request_json: dict[str, Any],
+    ) -> None:
+        session.execute(
+            text(
+                """
+                UPDATE import_jobs
+                SET request_json = CAST(:request_json AS jsonb),
+                    updated_at = now()
+                WHERE id = CAST(:job_id AS uuid)
+                """
+            ),
+            {
+                "job_id": job_id,
+                "request_json": json.dumps(request_json, ensure_ascii=False, sort_keys=True),
+            },
+        )
 
     def _load_knowledge_base(
         self,
@@ -1112,34 +1377,27 @@ class ImportService:
         ).one_or_none()
         return _job_from_mapping(row._mapping) if row else None
 
-    def _bump_permission_version(self, session: Session, enterprise_id: str) -> int:
+    def _load_permission_version(self, session: Session, enterprise_id: str) -> int:
         row = session.execute(
             text(
                 """
-                UPDATE enterprises
-                SET permission_version = permission_version + 1,
-                    updated_at = now()
+                SELECT permission_version
+                FROM enterprises
                 WHERE id = CAST(:enterprise_id AS uuid)
-                RETURNING permission_version
+                  AND status = 'active'
+                LIMIT 1
                 """
             ),
             {"enterprise_id": enterprise_id},
-        ).one()
+        ).one_or_none()
+        if row is None:
+            raise ImportServiceError(
+                "IMPORT_ENTERPRISE_UNAVAILABLE",
+                "enterprise is not active",
+                status_code=409,
+                details={"enterprise_id": enterprise_id},
+            )
         version = int(row._mapping["permission_version"])
-        session.execute(
-            text(
-                """
-                INSERT INTO system_state(key, value_json)
-                VALUES (
-                    'permission_version',
-                    jsonb_build_object('version', CAST(:version AS integer))
-                )
-                ON CONFLICT (key) DO UPDATE
-                SET value_json = EXCLUDED.value_json, updated_at = now()
-                """
-            ),
-            {"version": version},
-        )
         return version
 
     def _replace_resource_policy(
@@ -1646,10 +1904,10 @@ def _normalize_items(*, job_type: str, items: list[DocumentImportItem]) -> list[
                 status_code=400,
                 details={"item_index": index},
             )
-        if job_type == "upload" and not _metadata_text(item.metadata):
+        if job_type == "upload" and item.object_content is None:
             raise ImportServiceError(
-                "IMPORT_ITEM_CONTENT_REQUIRED",
-                "upload import item requires text content",
+                "IMPORT_OBJECT_CONTENT_REQUIRED",
+                "upload import item requires raw object content",
                 status_code=400,
                 details={"item_index": index},
             )
@@ -1734,6 +1992,42 @@ def _metadata_text(metadata: dict[str, Any]) -> str | None:
     return None
 
 
+def _request_items(request_json: dict[str, Any]) -> list[dict[str, Any]]:
+    items = request_json.get("items")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _item_str(item: dict[str, Any], key: str) -> str | None:
+    value = item.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _item_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _item_title(item: dict[str, Any]) -> str:
+    title = _item_str(item, "title")
+    return title or "untitled document"
+
+
+def _item_content_type(item: dict[str, Any]) -> str | None:
+    content_type = _item_str(item, "content_type")
+    if content_type:
+        return content_type
+    metadata = _item_metadata(item)
+    value = metadata.get("content_type")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _looks_like_object_key(object_key: str) -> bool:
+    lowered = object_key.lower()
+    return not lowered.startswith(("http://", "https://"))
+
+
 def _item_text_content(item: dict[str, Any]) -> str:
     metadata = item.get("metadata")
     metadata_text = _metadata_text(metadata if isinstance(metadata, dict) else {})
@@ -1754,6 +2048,26 @@ def _build_upload_object_key(
 ) -> str:
     safe_name = filename.strip().replace("/", "_") or "document.txt"
     return f"uploads/{enterprise_id}/{kb_id}/{document_id}/{safe_name}"
+
+
+def _derived_object_key(
+    kind: str,
+    *,
+    enterprise_id: str,
+    document_id: str,
+    document_version_id: str,
+) -> str:
+    return f"derived/{enterprise_id}/{document_id}/{document_version_id}/{kind}.txt"
+
+
+def _chunk_text_object_key(
+    *,
+    enterprise_id: str,
+    document_id: str,
+    document_version_id: str,
+    ordinal: int,
+) -> str:
+    return f"chunks/{enterprise_id}/{document_id}/{document_version_id}/{ordinal:06d}.txt"
 
 
 def _heading_path(item: dict[str, Any]) -> str | None:
@@ -1837,6 +2151,35 @@ def _json_mapping(value: Any) -> dict[str, Any]:
         parsed = json.loads(value)
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _infer_file_type(*, filename: str, content_type: str | None) -> str | None:
+    extension = _extension_from_name(filename)
+    if extension and extension in EXTENSION_TO_FILE_TYPE:
+        return EXTENSION_TO_FILE_TYPE[extension]
+    if extension:
+        return None
+    if content_type:
+        normalized_content_type = content_type.lower().split(";")[0].strip()
+        return CONTENT_TYPE_TO_FILE_TYPE.get(normalized_content_type)
+    return None
+
+
+def _extension_from_name(name: str | None) -> str | None:
+    if not name or "." not in name:
+        return None
+    extension = name.rsplit(".", 1)[1].strip().lower()
+    return extension or None
+
+
+def _normalize_allowed_file_types(values: tuple[str, ...]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in values:
+        item = value.strip().lower().lstrip(".")
+        file_type = EXTENSION_TO_FILE_TYPE.get(item, item)
+        if file_type and file_type not in normalized:
+            normalized.append(file_type)
+    return tuple(normalized)
 
 
 def _next_stage(stage: str) -> str | None:

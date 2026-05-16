@@ -513,7 +513,10 @@ class IndexingService:
                 "draft vector points cannot be written",
                 status_code=503,
                 retryable=True,
-                details={"point_count": len(points)},
+                details={
+                    "point_count": len(points),
+                    "source_error": _source_error(exc),
+                },
             ) from exc
 
     def _mark_index_versions_ready(self, session: Session, *, index_version_ids: list[str]) -> None:
@@ -763,6 +766,7 @@ class IndexingService:
                     "index_version_id": version.index_version_id,
                     "collection_name": version.collection_name,
                     "point_count": len(vector_ids),
+                    "source_error": _source_error(exc),
                 },
             ) from exc
 
@@ -1041,3 +1045,18 @@ def _database_error(error_code: str, message: str, exc: SQLAlchemyError) -> Inde
             }
         },
     )
+
+
+def _source_error(exc: Exception) -> dict[str, str | None]:
+    cause = exc.__cause__
+    root_cause = exc
+    while root_cause.__cause__ is not None:
+        root_cause = root_cause.__cause__
+    return {
+        "type": exc.__class__.__name__,
+        "message": str(exc) or None,
+        "cause_type": cause.__class__.__name__ if cause is not None else None,
+        "cause_message": str(cause) if cause is not None and str(cause) else None,
+        "root_cause_type": root_cause.__class__.__name__,
+        "root_cause_message": str(root_cause) or None,
+    }

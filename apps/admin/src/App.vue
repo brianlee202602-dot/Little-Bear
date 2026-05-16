@@ -9,18 +9,22 @@ import {
   type AdminRoleBindingData,
   type AdminRoleData,
   type AdminUserData,
+  createAdminKnowledgeBase,
   createAdminDepartment,
   createAdminUser,
   createSession,
   createAdminUserRoleBindings,
+  deleteAdminKnowledgeBase,
   deleteAdminDepartment,
   deleteAdminUser,
   deleteCurrentSession,
   discardConfigDraft,
+  getAdminKnowledgeBase,
   getCurrentUser,
   getAdminDepartment,
   getSetupState,
   initializeSetup,
+  listAdminImportJobs,
   listAdminDepartments,
   listAdminKnowledgeBases,
   listAdminRoles,
@@ -30,6 +34,7 @@ import {
   listAuditLogs,
   listConfigVersions,
   listConfigs,
+  patchAdminKnowledgeBase,
   patchAdminDepartment,
   patchAdminUser,
   publishConfigVersion,
@@ -39,12 +44,16 @@ import {
   revokeAdminUserRoleBinding,
   saveConfigDraft,
   unlockAdminUser,
+  uploadKnowledgeBaseDocuments,
   validateAdminConfig,
   validateSetupConfig,
   type AuditLogData,
   type ConfigItemData,
   type ConfigVersionData,
   type CurrentUserData,
+  type ImportJobData,
+  type ImportJobStage,
+  type ImportJobStatus,
   type SetupInitializationData,
   type SetupIssue,
   type SetupStateData,
@@ -77,9 +86,10 @@ type FieldOption = {
 type Tone = "success" | "error" | "warning" | "neutral";
 type LocalIssueTone = "error" | "warning";
 type ActiveView = "loading" | "setup" | "login" | "dashboard";
-type ActiveAdminTab = "config" | "departments" | "users";
+type ActiveAdminTab = "config" | "departments" | "users" | "knowledge";
 type ConfigModalMode = "create" | "edit" | "delete" | null;
 type DepartmentModalMode = "create" | "edit" | "delete" | null;
+type KnowledgeBaseModalMode = "create" | "edit" | "delete" | "upload" | null;
 type UserModalMode = "create" | "edit" | "departments" | "roles" | "password" | "delete" | null;
 type RoleScopeType = AdminRoleData["scope_type"];
 type RoleBindingCandidate = {
@@ -183,6 +193,13 @@ const departmentAdminBusy = reactive({
   updating: false,
   deleting: false,
 });
+const importAdminBusy = reactive({
+  loading: false,
+  creating: false,
+  updating: false,
+  deleting: false,
+  uploading: false,
+});
 const loginForm = reactive({
   username: "",
   password: "",
@@ -194,6 +211,20 @@ const userSearchForm = reactive({
 const departmentSearchForm = reactive({
   keyword: "",
   status: "",
+});
+const knowledgeBaseSearchForm = reactive({
+  keyword: "",
+  status: "",
+});
+const importSearchForm = reactive({
+  kbId: "",
+  status: "",
+  stage: "",
+});
+const importUploadForm = reactive({
+  kbId: "",
+  visibility: "department" as "department" | "enterprise",
+  idempotencyKey: "",
 });
 const userCreateForm = reactive({
   username: "",
@@ -212,12 +243,29 @@ const departmentEditForm = reactive({
   name: "",
   status: "active" as "active" | "disabled",
 });
+const knowledgeBaseCreateForm = reactive({
+  name: "",
+  ownerDepartmentId: "",
+  defaultVisibility: "department" as "department" | "enterprise",
+  configScopeId: "",
+  confirmedEnterpriseVisibility: false,
+});
+const knowledgeBaseEditForm = reactive({
+  name: "",
+  status: "active" as "active" | "disabled" | "archived",
+  defaultVisibility: "department" as "department" | "enterprise",
+  configScopeId: "",
+  confirmedVisibilityExpand: false,
+});
 const userEditForm = reactive({
   name: "",
   status: "active" as "active" | "disabled" | "locked",
   confirmedDisableAdmin: false,
 });
 const departmentDangerForm = reactive({
+  confirmedDelete: false,
+});
+const knowledgeBaseDangerForm = reactive({
   confirmedDelete: false,
 });
 const userDangerForm = reactive({
@@ -255,6 +303,7 @@ const userAdminFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string 
 const departmentAdminFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(
   null,
 );
+const importAdminFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
 const validationErrorPayload = ref<ApiErrorPayload | null>(null);
 const initializationErrorPayload = ref<ApiErrorPayload | null>(null);
 const submitConfirmed = ref(false);
@@ -275,11 +324,16 @@ const adminUsers = ref<AdminUserData[]>([]);
 const adminDepartments = ref<AdminDepartmentData[]>([]);
 const adminKnowledgeBases = ref<AdminKnowledgeBaseData[]>([]);
 const adminRoles = ref<AdminRoleData[]>([]);
+const adminImportJobs = ref<ImportJobData[]>([]);
+const selectedImportFiles = ref<File[]>([]);
+const importFileInputKey = ref(0);
 const selectedDepartmentId = ref<string>("");
+const selectedKnowledgeBaseId = ref<string>("");
 const selectedAdminUserId = ref<string>("");
 const selectedUserDepartments = ref<AdminDepartmentData[]>([]);
 const selectedUserRoleBindings = ref<AdminRoleBindingData[]>([]);
 const departmentModalMode = ref<DepartmentModalMode>(null);
+const knowledgeBaseModalMode = ref<KnowledgeBaseModalMode>(null);
 const userModalMode = ref<UserModalMode>(null);
 
 const statusLabels: Record<string, string> = {
@@ -834,6 +888,15 @@ const canManageRoles = computed(() => hasScope(currentUser.value?.scopes ?? [], 
 const canManageKnowledgeBases = computed(() =>
   hasScope(currentUser.value?.scopes ?? [], "knowledge_base:manage"),
 );
+const canImportDocuments = computed(() =>
+  hasScope(currentUser.value?.scopes ?? [], "document:import"),
+);
+const canReadImportJobs = computed(() =>
+  hasScope(currentUser.value?.scopes ?? [], "import_job:read"),
+);
+const canLoadImportAdmin = computed(
+  () => canImportDocuments.value || canReadImportJobs.value || canManageKnowledgeBases.value,
+);
 const selectedConfigItem = computed(() =>
   configItems.value.find(
     (item) =>
@@ -858,6 +921,9 @@ const selectedAdminUser = computed(
 const selectedDepartment = computed(
   () => adminDepartments.value.find((department) => department.id === selectedDepartmentId.value) ?? null,
 );
+const selectedKnowledgeBase = computed(
+  () => adminKnowledgeBases.value.find((knowledgeBase) => knowledgeBase.id === selectedKnowledgeBaseId.value) ?? null,
+);
 const selectedUserDepartmentsForDisplay = computed(() => {
   if (selectedUserDepartments.value.length > 0) {
     return selectedUserDepartments.value;
@@ -873,6 +939,44 @@ const activeDepartments = computed(() =>
 );
 const activeKnowledgeBases = computed(() =>
   adminKnowledgeBases.value.filter((knowledgeBase) => knowledgeBase.status === "active"),
+);
+const selectedImportKnowledgeBase = computed(
+  () => adminKnowledgeBases.value.find((knowledgeBase) => knowledgeBase.id === importUploadForm.kbId) ?? null,
+);
+const canUploadImportFiles = computed(
+  () =>
+    canImportDocuments.value &&
+    importUploadForm.kbId.trim().length > 0 &&
+    selectedImportFiles.value.length > 0 &&
+    !importAdminBusy.uploading,
+);
+const canCreateKnowledgeBase = computed(
+  () =>
+    canManageKnowledgeBases.value &&
+    knowledgeBaseCreateForm.name.trim().length > 0 &&
+    knowledgeBaseCreateForm.ownerDepartmentId.trim().length > 0 &&
+    (knowledgeBaseCreateForm.defaultVisibility !== "enterprise" ||
+      knowledgeBaseCreateForm.confirmedEnterpriseVisibility) &&
+    !importAdminBusy.creating,
+);
+const canUpdateSelectedKnowledgeBase = computed(
+  () =>
+    canManageKnowledgeBases.value &&
+    Boolean(selectedKnowledgeBase.value) &&
+    knowledgeBaseEditForm.name.trim().length > 0 &&
+    !(
+      selectedKnowledgeBase.value?.default_visibility === "department" &&
+      knowledgeBaseEditForm.defaultVisibility === "enterprise" &&
+      !knowledgeBaseEditForm.confirmedVisibilityExpand
+    ) &&
+    !importAdminBusy.updating,
+);
+const canDeleteSelectedKnowledgeBase = computed(
+  () =>
+    canManageKnowledgeBases.value &&
+    Boolean(selectedKnowledgeBase.value) &&
+    knowledgeBaseDangerForm.confirmedDelete &&
+    !importAdminBusy.deleting,
 );
 const roleBindingCandidates = computed<RoleBindingCandidate[]>(() =>
   assignableRoles.value.flatMap((role): RoleBindingCandidate[] => {
@@ -1526,6 +1630,68 @@ async function refreshDepartmentAdminState(): Promise<void> {
   }
 }
 
+async function refreshKnowledgeBaseAdminState(): Promise<void> {
+  if (!canLoadImportAdmin.value) {
+    adminKnowledgeBases.value = [];
+    adminImportJobs.value = [];
+    selectedKnowledgeBaseId.value = "";
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "当前账号缺少知识库管理、文档导入或导入任务读取权限。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.loading = true;
+  try {
+    if (canReadDepartments.value) {
+      const departmentsResponse = await listAdminDepartments(accessToken, { status: "active" });
+      adminDepartments.value = departmentsResponse.data;
+      syncKnowledgeBaseCreateOwnerDefault();
+    }
+    if (canManageKnowledgeBases.value) {
+      const knowledgeBasesResponse = await listAdminKnowledgeBases(accessToken, {
+        keyword: knowledgeBaseSearchForm.keyword.trim() || undefined,
+        status: knowledgeBaseSearchForm.status || undefined,
+      });
+      adminKnowledgeBases.value = knowledgeBasesResponse.data;
+      if (
+        !selectedKnowledgeBaseId.value ||
+        !adminKnowledgeBases.value.some((knowledgeBase) => knowledgeBase.id === selectedKnowledgeBaseId.value)
+      ) {
+        selectedKnowledgeBaseId.value = adminKnowledgeBases.value[0]?.id ?? "";
+      }
+      ensureImportKnowledgeBaseSelection();
+      syncKnowledgeBaseEditForm();
+    }
+    if (canReadImportJobs.value) {
+      const jobsResponse = await listAdminImportJobs(accessToken, {
+        kb_id: importSearchForm.kbId || undefined,
+        status: importSearchForm.status || undefined,
+        stage: importSearchForm.stage || undefined,
+      });
+      adminImportJobs.value = jobsResponse.data;
+    } else {
+      adminImportJobs.value = [];
+    }
+    importAdminFeedback.value = {
+      tone: "success",
+      message: "知识库管理数据已刷新。",
+    };
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取知识库管理数据失败"),
+    };
+  } finally {
+    importAdminBusy.loading = false;
+  }
+}
+
 async function refreshSelectedUserRoleBindings(existingAccessToken?: string): Promise<void> {
   if (!selectedAdminUserId.value || !canReadRoles.value) {
     selectedUserRoleBindings.value = [];
@@ -1593,9 +1759,301 @@ function switchAdminTab(tab: ActiveAdminTab): void {
     void refreshDepartmentAdminState();
   } else if (tab === "users") {
     void refreshUserRoleAdminState();
+  } else if (tab === "knowledge") {
+    void refreshKnowledgeBaseAdminState();
   } else if (tab === "config") {
     void refreshConfigAdminState();
   }
+}
+
+function syncKnowledgeBaseCreateOwnerDefault(): void {
+  if (
+    knowledgeBaseCreateForm.ownerDepartmentId &&
+    activeDepartments.value.some((department) => department.id === knowledgeBaseCreateForm.ownerDepartmentId)
+  ) {
+    return;
+  }
+  const defaultDepartment =
+    activeDepartments.value.find((department) => department.is_default) ??
+    currentUser.value?.departments.find((department) => department.status === "active") ??
+    activeDepartments.value[0];
+  knowledgeBaseCreateForm.ownerDepartmentId = defaultDepartment?.id ?? knowledgeBaseCreateForm.ownerDepartmentId;
+}
+
+function syncKnowledgeBaseEditForm(): void {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  knowledgeBaseEditForm.name = knowledgeBase?.name ?? "";
+  knowledgeBaseEditForm.status = knowledgeBase?.status ?? "active";
+  knowledgeBaseEditForm.defaultVisibility = knowledgeBase?.default_visibility ?? "department";
+  knowledgeBaseEditForm.configScopeId = knowledgeBase?.config_scope_id ?? "";
+  knowledgeBaseEditForm.confirmedVisibilityExpand = false;
+}
+
+function resetKnowledgeBaseCreateForm(): void {
+  knowledgeBaseCreateForm.name = "";
+  knowledgeBaseCreateForm.defaultVisibility = "department";
+  knowledgeBaseCreateForm.configScopeId = "";
+  knowledgeBaseCreateForm.confirmedEnterpriseVisibility = false;
+  syncKnowledgeBaseCreateOwnerDefault();
+}
+
+function openCreateKnowledgeBaseModal(): void {
+  resetKnowledgeBaseCreateForm();
+  importAdminFeedback.value = null;
+  knowledgeBaseModalMode.value = "create";
+}
+
+async function openEditKnowledgeBaseModal(knowledgeBase: AdminKnowledgeBaseData): Promise<void> {
+  knowledgeBaseModalMode.value = "edit";
+  await selectKnowledgeBase(knowledgeBase.id);
+  syncKnowledgeBaseEditForm();
+}
+
+async function openDeleteKnowledgeBaseModal(knowledgeBase: AdminKnowledgeBaseData): Promise<void> {
+  knowledgeBaseDangerForm.confirmedDelete = false;
+  knowledgeBaseModalMode.value = "delete";
+  await selectKnowledgeBase(knowledgeBase.id);
+}
+
+async function openUploadKnowledgeBaseModal(knowledgeBase: AdminKnowledgeBaseData): Promise<void> {
+  knowledgeBaseModalMode.value = "upload";
+  await selectKnowledgeBase(knowledgeBase.id);
+  importUploadForm.kbId = knowledgeBase.id;
+  importUploadForm.visibility = knowledgeBase.default_visibility;
+  importUploadForm.idempotencyKey = "";
+  clearImportFiles();
+}
+
+function closeKnowledgeBaseModal(): void {
+  knowledgeBaseModalMode.value = null;
+  knowledgeBaseDangerForm.confirmedDelete = false;
+  knowledgeBaseCreateForm.confirmedEnterpriseVisibility = false;
+  knowledgeBaseEditForm.confirmedVisibilityExpand = false;
+}
+
+function ensureImportKnowledgeBaseSelection(): void {
+  if (
+    importUploadForm.kbId &&
+    activeKnowledgeBases.value.some((knowledgeBase) => knowledgeBase.id === importUploadForm.kbId)
+  ) {
+    return;
+  }
+  importUploadForm.kbId = activeKnowledgeBases.value[0]?.id ?? importUploadForm.kbId;
+}
+
+function onImportFilesChange(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  selectedImportFiles.value = Array.from(input.files ?? []);
+}
+
+function clearImportFiles(): void {
+  selectedImportFiles.value = [];
+  importFileInputKey.value += 1;
+}
+
+async function submitDocumentUpload(): Promise<void> {
+  if (!canUploadImportFiles.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: !canImportDocuments.value
+        ? "当前账号缺少 document:import，不能上传文档。"
+        : "请选择目标知识库和至少一个文件。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.uploading = true;
+  try {
+    const response = await uploadKnowledgeBaseDocuments(
+      importUploadForm.kbId.trim(),
+      {
+        files: selectedImportFiles.value,
+        visibility: importUploadForm.visibility,
+        owner_department_id: selectedImportKnowledgeBase.value?.owner_department_id,
+        idempotency_key: importUploadForm.idempotencyKey.trim() || undefined,
+      },
+      accessToken,
+    );
+    adminImportJobs.value = [
+      response.data,
+      ...adminImportJobs.value.filter((job) => job.id !== response.data.id),
+    ];
+    clearImportFiles();
+    importUploadForm.idempotencyKey = "";
+    if (canReadImportJobs.value) {
+      await refreshKnowledgeBaseAdminState();
+    }
+    importAdminFeedback.value = {
+      tone: "success",
+      message: `上传任务已创建：${response.data.id}`,
+    };
+    closeKnowledgeBaseModal();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "上传文档失败"),
+    };
+  } finally {
+    importAdminBusy.uploading = false;
+  }
+}
+
+async function submitCreateKnowledgeBase(): Promise<void> {
+  if (!canCreateKnowledgeBase.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "请填写知识库名称和所属部门。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.creating = true;
+  try {
+    const response = await createAdminKnowledgeBase(
+      {
+        name: knowledgeBaseCreateForm.name.trim(),
+        owner_department_id: knowledgeBaseCreateForm.ownerDepartmentId.trim(),
+        default_visibility: knowledgeBaseCreateForm.defaultVisibility,
+        config_scope_id: knowledgeBaseCreateForm.configScopeId.trim() || null,
+      },
+      accessToken,
+      knowledgeBaseCreateForm.confirmedEnterpriseVisibility,
+    );
+    upsertKnowledgeBase(response.data);
+    selectedKnowledgeBaseId.value = response.data.id;
+    importSearchForm.kbId = response.data.id;
+    await refreshKnowledgeBaseAdminState();
+    importAdminFeedback.value = {
+      tone: "success",
+      message: "知识库已创建。",
+    };
+    closeKnowledgeBaseModal();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "创建知识库失败"),
+    };
+  } finally {
+    importAdminBusy.creating = false;
+  }
+}
+
+async function selectKnowledgeBase(kbId: string): Promise<void> {
+  selectedKnowledgeBaseId.value = kbId;
+  knowledgeBaseDangerForm.confirmedDelete = false;
+  syncKnowledgeBaseEditForm();
+
+  const accessToken = await ensureAccessToken();
+  if (!accessToken || !canManageKnowledgeBases.value) {
+    return;
+  }
+  try {
+    const response = await getAdminKnowledgeBase(kbId, accessToken);
+    upsertKnowledgeBase(response.data);
+    syncKnowledgeBaseEditForm();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取知识库详情失败"),
+    };
+  }
+}
+
+async function submitPatchKnowledgeBase(): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase || !canUpdateSelectedKnowledgeBase.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "请选择知识库并填写知识库名称。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.updating = true;
+  try {
+    const response = await patchAdminKnowledgeBase(
+      knowledgeBase.id,
+      {
+        name: knowledgeBaseEditForm.name.trim(),
+        status: knowledgeBaseEditForm.status,
+        default_visibility: knowledgeBaseEditForm.defaultVisibility,
+        config_scope_id: knowledgeBaseEditForm.configScopeId.trim() || null,
+      },
+      accessToken,
+      knowledgeBaseEditForm.confirmedVisibilityExpand,
+    );
+    upsertKnowledgeBase(response.data);
+    selectedKnowledgeBaseId.value = response.data.id;
+    await refreshKnowledgeBaseAdminState();
+    importAdminFeedback.value = {
+      tone: "success",
+      message: "知识库已更新。",
+    };
+    closeKnowledgeBaseModal();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "更新知识库失败"),
+    };
+  } finally {
+    importAdminBusy.updating = false;
+  }
+}
+
+async function deleteSelectedKnowledgeBase(): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase || !knowledgeBaseDangerForm.confirmedDelete) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "删除知识库前必须勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.deleting = true;
+  try {
+    await deleteAdminKnowledgeBase(knowledgeBase.id, accessToken, true);
+    selectedKnowledgeBaseId.value = "";
+    knowledgeBaseDangerForm.confirmedDelete = false;
+    await refreshKnowledgeBaseAdminState();
+    importAdminFeedback.value = {
+      tone: "success",
+      message: "知识库已删除，并已创建索引清理任务。",
+    };
+    closeKnowledgeBaseModal();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "删除知识库失败"),
+    };
+  } finally {
+    importAdminBusy.deleting = false;
+  }
+}
+
+function upsertKnowledgeBase(knowledgeBase: AdminKnowledgeBaseData): void {
+  const index = adminKnowledgeBases.value.findIndex((item) => item.id === knowledgeBase.id);
+  if (index >= 0) {
+    adminKnowledgeBases.value[index] = knowledgeBase;
+    return;
+  }
+  adminKnowledgeBases.value = [knowledgeBase, ...adminKnowledgeBases.value];
 }
 
 function toggleCreateRole(roleId: string, checked: boolean): void {
@@ -2662,6 +3120,18 @@ function clearAuthSession(): void {
   adminDepartments.value = [];
   adminKnowledgeBases.value = [];
   adminRoles.value = [];
+  adminImportJobs.value = [];
+  selectedKnowledgeBaseId.value = "";
+  selectedImportFiles.value = [];
+  knowledgeBaseSearchForm.keyword = "";
+  knowledgeBaseSearchForm.status = "";
+  knowledgeBaseModalMode.value = null;
+  knowledgeBaseDangerForm.confirmedDelete = false;
+  importUploadForm.kbId = "";
+  importUploadForm.idempotencyKey = "";
+  importSearchForm.kbId = "";
+  importSearchForm.status = "";
+  importSearchForm.stage = "";
   selectedAdminUserId.value = "";
   selectedUserRoleBindings.value = [];
   selectedConfigKey.value = "";
@@ -2905,6 +3375,77 @@ function formatKnowledgeBaseLabel(
   knowledgeBase: { name?: string | null; id?: string | null } | null | undefined,
 ): string {
   return knowledgeBase?.name?.trim() || knowledgeBase?.id?.trim() || "-";
+}
+
+function formatDepartmentById(departmentId: string): string {
+  const department =
+    adminDepartments.value.find((item) => item.id === departmentId) ??
+    currentUser.value?.departments.find((item) => item.id === departmentId);
+  return formatDepartmentLabel(department ?? { code: "", name: departmentId });
+}
+
+function knowledgeBaseStatusTone(status: AdminKnowledgeBaseData["status"]): Tone {
+  if (status === "active") {
+    return "success";
+  }
+  if (status === "disabled") {
+    return "warning";
+  }
+  return "neutral";
+}
+
+function knowledgeBaseVisibilityLabel(visibility: AdminKnowledgeBaseData["default_visibility"]): string {
+  return visibility === "enterprise" ? "企业可见" : "部门可见";
+}
+
+function formatImportJobKnowledgeBase(job: ImportJobData): string {
+  const knowledgeBase = adminKnowledgeBases.value.find((item) => item.id === job.kb_id);
+  return formatKnowledgeBaseLabel(knowledgeBase ?? { id: job.kb_id, name: "" });
+}
+
+function formatDocumentIds(documentIds: string[]): string {
+  if (!documentIds.length) {
+    return "-";
+  }
+  return documentIds.length === 1 ? documentIds[0] : `${documentIds.length} 个文档`;
+}
+
+function formatFileSize(size: number): string {
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function importJobStatusTone(status: ImportJobStatus): Tone {
+  if (status === "success" || status === "partial_success") {
+    return "success";
+  }
+  if (status === "failed" || status === "cancelled") {
+    return "error";
+  }
+  if (status === "retrying") {
+    return "warning";
+  }
+  return "neutral";
+}
+
+function importJobStageLabel(stage: ImportJobStage): string {
+  const labels: Record<ImportJobStage, string> = {
+    validate: "校验",
+    parse: "解析",
+    clean: "清洗",
+    chunk: "切片",
+    embed: "向量化",
+    index: "写索引",
+    publish: "发布",
+    cleanup: "清理",
+    finished: "完成",
+  };
+  return labels[stage];
 }
 
 function formatRoleBindingScope(binding: AdminRoleBindingData): string {
@@ -3697,6 +4238,13 @@ function isComposeDemoProvider(value: string): boolean {
         >
           用户管理
         </button>
+        <button
+          :class="['admin-nav__item', { 'admin-nav__item--active': selectedAdminTab === 'knowledge' }]"
+          type="button"
+          @click="switchAdminTab('knowledge')"
+        >
+          知识库管理
+        </button>
       </nav>
     </aside>
 
@@ -3981,6 +4529,215 @@ function isComposeDemoProvider(value: string): boolean {
               </article>
             </div>
             <p v-else class="empty-state empty-state--plain">当前尚未读取到用户。</p>
+          </div>
+        </section>
+
+        <section v-if="selectedAdminTab === 'knowledge'" class="panel panel--wide">
+          <header class="panel__header">
+            <div>
+              <h3>知识库管理</h3>
+              <p :class="toneClass(canLoadImportAdmin ? 'success' : 'warning')">
+                {{
+                  canManageKnowledgeBases
+                    ? "可管理知识库并添加文档"
+                    : canImportDocuments
+                      ? "可向指定知识库添加文档"
+                      : canReadImportJobs
+                        ? "可读取导入任务"
+                        : "缺少知识库或导入权限"
+                }}
+              </p>
+            </div>
+            <div class="panel__actions">
+              <button
+                class="button button--secondary"
+                type="button"
+                @click="refreshKnowledgeBaseAdminState"
+                :disabled="importAdminBusy.loading || !canLoadImportAdmin"
+              >
+                {{ importAdminBusy.loading ? "刷新中" : "刷新知识库" }}
+              </button>
+              <button
+                class="button"
+                type="button"
+                @click="openCreateKnowledgeBaseModal"
+                :disabled="!canManageKnowledgeBases"
+              >
+                新增知识库
+              </button>
+            </div>
+          </header>
+
+          <div class="admin-list-panel">
+            <div
+              v-if="importAdminFeedback"
+              :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]"
+            >
+              {{ importAdminFeedback.message }}
+            </div>
+
+            <form class="list-filter" @submit.prevent="refreshKnowledgeBaseAdminState">
+              <label class="field">
+                <span class="field__label">关键词</span>
+                <p class="field__hint">按知识库名称过滤。</p>
+                <input v-model.trim="knowledgeBaseSearchForm.keyword" class="control" type="text" />
+              </label>
+              <label class="field">
+                <span class="field__label">知识库状态</span>
+                <p class="field__hint">留空时显示全部未删除知识库。</p>
+                <select v-model="knowledgeBaseSearchForm.status" class="control">
+                  <option value="">全部</option>
+                  <option value="active">active</option>
+                  <option value="disabled">disabled</option>
+                  <option value="archived">archived</option>
+                </select>
+              </label>
+              <button class="button button--secondary" type="submit" :disabled="importAdminBusy.loading">
+                查询
+              </button>
+            </form>
+
+            <div v-if="canManageKnowledgeBases && adminKnowledgeBases.length" class="entity-table entity-table--knowledge">
+              <div class="entity-table__row entity-table__row--header">
+                <span>知识库</span>
+                <span>状态</span>
+                <span>可见性</span>
+                <span>所属部门</span>
+                <span>策略</span>
+                <span>操作</span>
+              </div>
+              <article v-for="knowledgeBase in adminKnowledgeBases" :key="knowledgeBase.id" class="entity-table__row">
+                <div class="entity-main">
+                  <strong>{{ knowledgeBase.name }}</strong>
+                  <span>{{ knowledgeBase.id }}</span>
+                </div>
+                <div class="entity-cell">
+                  <span :class="toneClass(knowledgeBaseStatusTone(knowledgeBase.status))">
+                    {{ knowledgeBase.status }}
+                  </span>
+                </div>
+                <div class="entity-cell">
+                  {{ knowledgeBaseVisibilityLabel(knowledgeBase.default_visibility) }}
+                </div>
+                <div class="entity-cell">{{ formatDepartmentById(knowledgeBase.owner_department_id) }}</div>
+                <div class="entity-cell">
+                  v{{ knowledgeBase.policy_version }} / {{ knowledgeBase.config_scope_id ?? "-" }}
+                </div>
+                <div class="row-actions row-actions--dense">
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="openUploadKnowledgeBaseModal(knowledgeBase)"
+                    :disabled="!canImportDocuments || knowledgeBase.status !== 'active'"
+                  >
+                    添加文件
+                  </button>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="openEditKnowledgeBaseModal(knowledgeBase)"
+                    :disabled="!canManageKnowledgeBases"
+                  >
+                    编辑
+                  </button>
+                  <button
+                    class="button button--danger button--small"
+                    type="button"
+                    @click="openDeleteKnowledgeBaseModal(knowledgeBase)"
+                    :disabled="!canManageKnowledgeBases"
+                  >
+                    删除
+                  </button>
+                </div>
+              </article>
+            </div>
+            <p v-else-if="canManageKnowledgeBases" class="empty-state empty-state--plain">
+              当前尚未读取到知识库。
+            </p>
+            <p v-else class="empty-state empty-state--plain">
+              当前账号缺少 knowledge_base:manage，无法读取知识库列表；如需上传，请使用具备知识库管理权限的账号。
+            </p>
+
+            <form
+              v-if="canReadImportJobs"
+              class="list-filter list-filter--imports"
+              @submit.prevent="refreshKnowledgeBaseAdminState"
+            >
+              <label class="field">
+                <span class="field__label">知识库过滤</span>
+                <p class="field__hint">留空时显示当前权限下的全部导入任务。</p>
+                <select v-if="activeKnowledgeBases.length" v-model="importSearchForm.kbId" class="control">
+                  <option value="">全部</option>
+                  <option
+                    v-for="knowledgeBase in activeKnowledgeBases"
+                    :key="knowledgeBase.id"
+                    :value="knowledgeBase.id"
+                  >
+                    {{ formatKnowledgeBaseLabel(knowledgeBase) }}
+                  </option>
+                </select>
+                <input v-else v-model.trim="importSearchForm.kbId" class="control" type="text" />
+              </label>
+              <label class="field">
+                <span class="field__label">状态</span>
+                <p class="field__hint">按任务运行状态过滤。</p>
+                <select v-model="importSearchForm.status" class="control">
+                  <option value="">全部</option>
+                  <option value="queued">queued</option>
+                  <option value="running">running</option>
+                  <option value="retrying">retrying</option>
+                  <option value="partial_success">partial_success</option>
+                  <option value="success">success</option>
+                  <option value="failed">failed</option>
+                  <option value="cancelled">cancelled</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field__label">阶段</span>
+                <p class="field__hint">按导入阶段过滤。</p>
+                <select v-model="importSearchForm.stage" class="control">
+                  <option value="">全部</option>
+                  <option value="validate">validate</option>
+                  <option value="parse">parse</option>
+                  <option value="clean">clean</option>
+                  <option value="chunk">chunk</option>
+                  <option value="embed">embed</option>
+                  <option value="index">index</option>
+                  <option value="publish">publish</option>
+                  <option value="cleanup">cleanup</option>
+                  <option value="finished">finished</option>
+                </select>
+              </label>
+              <button class="button button--secondary" type="submit" :disabled="importAdminBusy.loading">
+                查询任务
+              </button>
+            </form>
+
+            <div v-if="canReadImportJobs && adminImportJobs.length" class="entity-table entity-table--imports">
+              <div class="entity-table__row entity-table__row--header">
+                <span>任务</span>
+                <span>知识库</span>
+                <span>状态</span>
+                <span>阶段</span>
+                <span>文档</span>
+                <span>错误</span>
+              </div>
+              <article v-for="job in adminImportJobs" :key="job.id" class="entity-table__row">
+                <div class="entity-main">
+                  <strong>{{ job.id }}</strong>
+                  <span>{{ job.document_ids.length }} 个文档</span>
+                </div>
+                <div class="entity-cell">{{ formatImportJobKnowledgeBase(job) }}</div>
+                <div class="entity-cell">
+                  <span :class="toneClass(importJobStatusTone(job.status))">{{ job.status }}</span>
+                </div>
+                <div class="entity-cell">{{ importJobStageLabel(job.stage) }} / {{ job.stage }}</div>
+                <div class="entity-cell">{{ formatDocumentIds(job.document_ids) }}</div>
+                <div class="entity-cell">{{ job.error_summary ?? "-" }}</div>
+              </article>
+            </div>
+            <p v-else-if="canReadImportJobs" class="empty-state empty-state--plain">当前尚未读取到导入任务。</p>
+            <p v-else class="empty-state empty-state--plain">当前账号缺少 import_job:read，上传后只能看到本次创建结果。</p>
           </div>
         </section>
 
@@ -4298,6 +5055,296 @@ function isComposeDemoProvider(value: string): boolean {
                 :disabled="!canDiscardSelectedDraft"
               >
                 {{ configBusy.deleting ? "删除中..." : "删除草稿" }}
+              </button>
+            </footer>
+          </div>
+        </section>
+      </div>
+
+      <div
+        v-if="knowledgeBaseModalMode"
+        class="modal-backdrop"
+        role="presentation"
+        @click.self="closeKnowledgeBaseModal"
+      >
+        <section class="modal modal--wide" role="dialog" aria-modal="true" aria-labelledby="knowledge-base-modal-title">
+          <header class="modal__header">
+            <div>
+              <p class="eyebrow">知识库管理</p>
+              <h3 id="knowledge-base-modal-title">
+                {{
+                  knowledgeBaseModalMode === "create"
+                    ? "新增知识库"
+                    : knowledgeBaseModalMode === "edit"
+                      ? "编辑知识库"
+                      : knowledgeBaseModalMode === "upload"
+                        ? "添加文件"
+                        : "删除知识库"
+                }}
+              </h3>
+            </div>
+            <button class="button button--secondary button--small" type="button" @click="closeKnowledgeBaseModal">
+              关闭
+            </button>
+          </header>
+
+          <form v-if="knowledgeBaseModalMode === 'create'" @submit.prevent="submitCreateKnowledgeBase">
+            <div class="modal__body">
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">知识库名称</span>
+                  <p class="field__hint">用于管理后台和用户查询入口展示。</p>
+                  <input v-model.trim="knowledgeBaseCreateForm.name" class="control" type="text" required />
+                </label>
+                <label class="field">
+                  <span class="field__label">所属部门</span>
+                  <p class="field__hint">作为知识库和默认文档权限策略的 owner_department_id。</p>
+                  <select
+                    v-if="activeDepartments.length"
+                    v-model="knowledgeBaseCreateForm.ownerDepartmentId"
+                    class="control"
+                    required
+                  >
+                    <option value="">请选择部门</option>
+                    <option v-for="department in activeDepartments" :key="department.id" :value="department.id">
+                      {{ formatDepartmentLabel(department) }}
+                    </option>
+                  </select>
+                  <input
+                    v-else
+                    v-model.trim="knowledgeBaseCreateForm.ownerDepartmentId"
+                    class="control"
+                    type="text"
+                    placeholder="输入 department id"
+                    required
+                  />
+                </label>
+                <label class="field">
+                  <span class="field__label">默认可见性</span>
+                  <p class="field__hint">后续从该知识库添加文件时会默认沿用这个可见性。</p>
+                  <select v-model="knowledgeBaseCreateForm.defaultVisibility" class="control">
+                    <option value="department">department</option>
+                    <option value="enterprise">enterprise</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">配置作用域</span>
+                  <p class="field__hint">可留空；后续用于按知识库覆盖模型或索引配置。</p>
+                  <input v-model.trim="knowledgeBaseCreateForm.configScopeId" class="control" type="text" />
+                </label>
+                <label
+                  v-if="knowledgeBaseCreateForm.defaultVisibility === 'enterprise'"
+                  class="confirm confirm--inline modal-confirm"
+                >
+                  <input v-model="knowledgeBaseCreateForm.confirmedEnterpriseVisibility" type="checkbox" />
+                  <span>确认创建企业可见知识库</span>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeKnowledgeBaseModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canCreateKnowledgeBase">
+                {{ importAdminBusy.creating ? "创建中..." : "创建知识库" }}
+              </button>
+            </footer>
+          </form>
+
+          <form v-else-if="knowledgeBaseModalMode === 'edit' && selectedKnowledgeBase" @submit.prevent="submitPatchKnowledgeBase">
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>知识库 ID</dt>
+                  <dd class="summary__value--break">{{ selectedKnowledgeBase.id }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>所属部门</dt>
+                  <dd>{{ formatDepartmentById(selectedKnowledgeBase.owner_department_id) }}</dd>
+                </div>
+              </dl>
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">知识库名称</span>
+                  <p class="field__hint">修改不会影响已有文档内容和索引版本。</p>
+                  <input v-model.trim="knowledgeBaseEditForm.name" class="control" type="text" required />
+                </label>
+                <label class="field">
+                  <span class="field__label">状态</span>
+                  <p class="field__hint">disabled / archived 会影响后续查询和导入可用性。</p>
+                  <select v-model="knowledgeBaseEditForm.status" class="control">
+                    <option value="active">active</option>
+                    <option value="disabled">disabled</option>
+                    <option value="archived">archived</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">默认可见性</span>
+                  <p class="field__hint">从 department 扩大到 enterprise 需要显式确认。</p>
+                  <select v-model="knowledgeBaseEditForm.defaultVisibility" class="control">
+                    <option value="department">department</option>
+                    <option value="enterprise">enterprise</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">配置作用域</span>
+                  <p class="field__hint">可留空；仅保存 scope id，不直接发布配置。</p>
+                  <input v-model.trim="knowledgeBaseEditForm.configScopeId" class="control" type="text" />
+                </label>
+                <label
+                  v-if="
+                    selectedKnowledgeBase.default_visibility === 'department' &&
+                    knowledgeBaseEditForm.defaultVisibility === 'enterprise'
+                  "
+                  class="confirm confirm--inline modal-confirm"
+                >
+                  <input v-model="knowledgeBaseEditForm.confirmedVisibilityExpand" type="checkbox" />
+                  <span>确认将知识库可见性扩大到企业</span>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeKnowledgeBaseModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canUpdateSelectedKnowledgeBase">
+                {{ importAdminBusy.updating ? "保存中..." : "保存知识库" }}
+              </button>
+            </footer>
+          </form>
+
+          <form v-else-if="knowledgeBaseModalMode === 'upload' && selectedImportKnowledgeBase" @submit.prevent="submitDocumentUpload">
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>目标知识库</dt>
+                  <dd>{{ formatKnowledgeBaseLabel(selectedImportKnowledgeBase) }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>所属部门</dt>
+                  <dd>{{ formatDepartmentById(selectedImportKnowledgeBase.owner_department_id) }}</dd>
+                </div>
+              </dl>
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+              <div class="upload-panel upload-panel--modal">
+                <section class="upload-panel__main">
+                  <label class="field">
+                    <span class="field__label">文档可见性</span>
+                    <p class="field__hint">默认沿用知识库可见性；department 会按所属部门可见。</p>
+                    <select
+                      v-model="importUploadForm.visibility"
+                      class="control"
+                      :disabled="!canImportDocuments || importAdminBusy.uploading"
+                    >
+                      <option value="department">department</option>
+                      <option value="enterprise">enterprise</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="field__label">幂等键</span>
+                    <p class="field__hint">重复测试同一文件时可留空；需要防重提交时填写稳定键。</p>
+                    <input
+                      v-model.trim="importUploadForm.idempotencyKey"
+                      class="control"
+                      type="text"
+                      :disabled="!canImportDocuments || importAdminBusy.uploading"
+                    />
+                  </label>
+                  <label class="field field--full">
+                    <span class="field__label">选择文件</span>
+                    <p class="field__hint">支持 PDF、DOCX、UTF-8 文本和 Markdown；大小限制由 active_config.import 控制。</p>
+                    <input
+                      :key="importFileInputKey"
+                      class="control control--file"
+                      type="file"
+                      multiple
+                      accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
+                      :disabled="!canImportDocuments || importAdminBusy.uploading"
+                      @change="onImportFilesChange"
+                    />
+                  </label>
+                </section>
+
+                <section class="upload-panel__side">
+                  <h4>待上传文件</h4>
+                  <div v-if="selectedImportFiles.length" class="file-list">
+                    <article
+                      v-for="file in selectedImportFiles"
+                      :key="`${file.name}-${file.size}-${file.lastModified}`"
+                      class="file-row"
+                    >
+                      <strong>{{ file.name }}</strong>
+                      <span>{{ formatFileSize(file.size) }}</span>
+                    </article>
+                  </div>
+                  <p v-else class="empty-state empty-state--plain">尚未选择文件。</p>
+                  <dl class="summary summary--compact upload-summary">
+                    <div class="summary__row">
+                      <dt>文件数</dt>
+                      <dd>{{ selectedImportFiles.length }}</dd>
+                    </div>
+                  </dl>
+                  <div class="upload-actions">
+                    <button
+                      class="button button--secondary"
+                      type="button"
+                      @click="clearImportFiles"
+                      :disabled="!selectedImportFiles.length || importAdminBusy.uploading"
+                    >
+                      清空文件
+                    </button>
+                    <button class="button" type="submit" :disabled="!canUploadImportFiles">
+                      {{ importAdminBusy.uploading ? "上传中..." : "创建导入任务" }}
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeKnowledgeBaseModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canUploadImportFiles">
+                {{ importAdminBusy.uploading ? "上传中..." : "创建导入任务" }}
+              </button>
+            </footer>
+          </form>
+
+          <div v-else-if="knowledgeBaseModalMode === 'delete' && selectedKnowledgeBase">
+            <div class="modal__body">
+              <div class="danger-panel">
+                <h4>确认删除知识库</h4>
+                <p>
+                  将删除 {{ selectedKnowledgeBase.name }}，并写入 access block，后续由索引清理任务处理相关索引。
+                </p>
+                <label class="confirm confirm--inline">
+                  <input v-model="knowledgeBaseDangerForm.confirmedDelete" type="checkbox" />
+                  <span>确认删除该知识库</span>
+                </label>
+              </div>
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeKnowledgeBaseModal">
+                取消
+              </button>
+              <button
+                class="button button--danger"
+                type="button"
+                @click="deleteSelectedKnowledgeBase"
+                :disabled="!canDeleteSelectedKnowledgeBase"
+              >
+                {{ importAdminBusy.deleting ? "删除中..." : "删除知识库" }}
               </button>
             </footer>
           </div>
@@ -5492,8 +6539,89 @@ function isComposeDemoProvider(value: string): boolean {
   align-items: end;
 }
 
+.list-filter--imports {
+  grid-template-columns: minmax(220px, 1fr) minmax(140px, 180px) minmax(140px, 180px) auto;
+}
+
 .list-filter .field {
   grid-column: auto;
+}
+
+.upload-panel {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.8fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.upload-panel__main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.upload-panel__side {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.upload-panel__side h4 {
+  margin: 0;
+}
+
+.upload-panel--modal {
+  background: #ffffff;
+}
+
+.control--file {
+  padding: 10px;
+}
+
+.file-list {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.file-row {
+  min-width: 0;
+  border: 1px solid #e1e6ee;
+  border-radius: 8px;
+  padding: 10px;
+  display: grid;
+  gap: 2px;
+}
+
+.file-row strong,
+.file-row span {
+  overflow-wrap: anywhere;
+}
+
+.file-row span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.upload-summary {
+  margin: 0;
+}
+
+.upload-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .entity-table {
@@ -5523,6 +6651,14 @@ function isComposeDemoProvider(value: string): boolean {
 
 .entity-table--configs .entity-table__row {
   grid-template-columns: minmax(220px, 1.3fr) minmax(90px, 0.45fr) minmax(110px, 0.5fr) minmax(220px, 1.2fr) minmax(210px, 1fr);
+}
+
+.entity-table--knowledge .entity-table__row {
+  grid-template-columns: minmax(220px, 1.25fr) minmax(90px, 0.45fr) minmax(110px, 0.55fr) minmax(170px, 0.85fr) minmax(150px, 0.75fr) minmax(230px, 1fr);
+}
+
+.entity-table--imports .entity-table__row {
+  grid-template-columns: minmax(220px, 1.2fr) minmax(160px, 0.8fr) minmax(100px, 0.5fr) minmax(130px, 0.65fr) minmax(140px, 0.7fr) minmax(160px, 0.8fr);
 }
 
 .entity-table__row--header {
@@ -6329,9 +7465,16 @@ function isComposeDemoProvider(value: string): boolean {
 
   .entity-table--departments .entity-table__row,
   .entity-table--users .entity-table__row,
-  .entity-table--configs .entity-table__row {
+  .entity-table--configs .entity-table__row,
+  .entity-table--knowledge .entity-table__row,
+  .entity-table--imports .entity-table__row {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .upload-panel,
+  .upload-panel__main {
+    grid-template-columns: 1fr;
   }
 
   .row-actions {
@@ -6363,6 +7506,7 @@ function isComposeDemoProvider(value: string): boolean {
   .panel__header,
   .panel__actions,
   .list-filter,
+  .list-filter--imports,
   .modal__header,
   .modal__footer,
   .modal__body--split {

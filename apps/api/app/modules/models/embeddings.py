@@ -59,6 +59,7 @@ class ModelGatewayEmbeddingClient:
             return []
         payload = _embedding_payload(
             provider_type=self.provider_type,
+            path=self.path,
             model=self.model,
             texts=texts,
         )
@@ -85,8 +86,15 @@ class ModelGatewayEmbeddingClient:
         return _l2_normalize(vector) if self.normalize else vector
 
 
-def _embedding_payload(*, provider_type: str, model: str, texts: list[str]) -> dict[str, Any]:
-    if provider_type == "tei":
+def _embedding_payload(
+    *,
+    provider_type: str,
+    path: str,
+    model: str,
+    texts: list[str],
+) -> dict[str, Any]:
+    normalized_path = path.rstrip("/")
+    if provider_type == "tei" and normalized_path not in {"/v1/embeddings", "/embeddings"}:
         return {"inputs": texts}
     return {"model": model, "input": texts}
 

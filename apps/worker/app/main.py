@@ -15,7 +15,7 @@ if str(API_PATH) not in sys.path:
 
 from app.db.session import session_scope  # noqa: E402
 from app.modules.import_pipeline.errors import ImportServiceError  # noqa: E402
-from app.modules.import_pipeline.service import ImportService  # noqa: E402
+from app.modules.import_pipeline.runtime import build_import_service  # noqa: E402
 
 
 LOGGER = logging.getLogger("little_bear.worker")
@@ -45,7 +45,6 @@ def main() -> None:
     if not database_url:
         raise RuntimeError("DATABASE_URL is required")
 
-    service = ImportService()
     worker_id = os.getenv("WORKER_ID") or f"worker-{os.getpid()}"
     poll_interval_seconds = float(os.getenv("WORKER_POLL_INTERVAL_SECONDS", "2"))
     lock_seconds = int(os.getenv("WORKER_LOCK_SECONDS", "60"))
@@ -55,6 +54,7 @@ def main() -> None:
     while not stop:
         try:
             with session_scope() as session:
+                service = build_import_service(session)
                 job = service.claim_next_job(
                     session,
                     worker_id=worker_id,
@@ -65,18 +65,43 @@ def main() -> None:
                 continue
 
             while not stop and job.status == "running":
-                with session_scope() as session:
-                    service.heartbeat_claimed_job(
-                        session,
-                        job_id=job.id,
-                        worker_id=worker_id,
-                        lock_seconds=lock_seconds,
+                try:
+                    with session_scope() as session:
+                        service = build_import_service(session)
+                        service.heartbeat_claimed_job(
+                            session,
+                            job_id=job.id,
+                            worker_id=worker_id,
+                            lock_seconds=lock_seconds,
+                        )
+                        advanced = service.advance_claimed_job(
+                            session,
+                            job_id=job.id,
+                            worker_id=worker_id,
+                        )
+                except ImportServiceError as exc:
+                    with session_scope() as session:
+                        service = build_import_service(session)
+                        job = service.mark_claimed_job_failed(
+                            session,
+                            job_id=job.id,
+                            worker_id=worker_id,
+                            error_code=exc.error_code,
+                            error_message=exc.message,
+                            retryable=exc.retryable,
+                        )
+                    LOGGER.warning(
+                        "import job marked failed",
+                        extra={
+                            "worker_id": worker_id,
+                            "job_id": job.id,
+                            "status": job.status,
+                            "stage": job.stage,
+                            "error_code": exc.error_code,
+                            "retryable": exc.retryable,
+                        },
                     )
-                    advanced = service.advance_claimed_job(
-                        session,
-                        job_id=job.id,
-                        worker_id=worker_id,
-                    )
+                    break
                 LOGGER.info(
                     "import job advanced",
                     extra={

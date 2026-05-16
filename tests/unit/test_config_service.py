@@ -176,7 +176,11 @@ class _FakeSession:
         if "UPDATE config_versions" in sql or "UPDATE system_configs" in sql:
             return _Result()
 
-        if "INSERT INTO config_versions" in sql or "INSERT INTO system_configs" in sql or "INSERT INTO audit_logs" in sql:
+        if (
+            "INSERT INTO config_versions" in sql
+            or "INSERT INTO system_configs" in sql
+            or "INSERT INTO audit_logs" in sql
+        ):
             return _Result()
 
         raise AssertionError(f"unexpected SQL: {sql}")
@@ -387,7 +391,10 @@ def test_config_service_discards_draft_version() -> None:
     assert version.status == "archived"
     assert any("UPDATE config_versions" in sql for sql, _params in session.statements)
     assert any("UPDATE system_configs" in sql for sql, _params in session.statements)
-    assert any("config.draft_discarded" in params.get("event_name", "") for _sql, params in session.statements)
+    assert any(
+        "config.draft_discarded" in params.get("event_name", "")
+        for _sql, params in session.statements
+    )
 
 
 def test_config_service_rejects_discarding_active_version() -> None:

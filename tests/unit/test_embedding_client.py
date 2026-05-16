@@ -92,3 +92,26 @@ def test_embedding_client_batches_tei_embeddings(monkeypatch) -> None:
     assert captured["url"] == "https://model.example/embed"
     assert captured["body"] == {"inputs": ["第一段", "第二段"]}
     assert vectors == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def test_embedding_client_uses_openai_payload_for_tei_v1_embeddings_path(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response({"data": [{"embedding": [1.0, 0.0]}]})
+
+    monkeypatch.setattr("app.modules.models.embeddings.urlopen", _urlopen)
+
+    vectors = ModelGatewayEmbeddingClient(
+        base_url="https://model.example",
+        path="/v1/embeddings",
+        provider_type="tei",
+        model="bge-m3",
+        expected_dimension=2,
+    ).embed_texts(["第一段"])
+
+    assert captured["url"] == "https://model.example/v1/embeddings"
+    assert captured["body"] == {"model": "bge-m3", "input": ["第一段"]}
+    assert vectors == [[1.0, 0.0]]

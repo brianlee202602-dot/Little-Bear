@@ -22,6 +22,7 @@ from app.modules.auth.errors import AuthServiceError
 from app.modules.auth.schemas import AuthContext
 from app.modules.auth.service import AuthService
 from app.modules.import_pipeline.errors import ImportServiceError
+from app.modules.import_pipeline.runtime import build_import_service
 from app.modules.import_pipeline.schemas import (
     DocumentImportItem,
     ImportActorContext,
@@ -31,7 +32,6 @@ from app.modules.import_pipeline.service import ImportService
 from app.shared.context import get_request_context
 
 router = APIRouter(prefix="/internal/v1", tags=["import"])
-MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 
 
 @router.post(
@@ -49,11 +49,12 @@ async def create_upload_document_import(
     authorization: str | None = Header(default=None),
 ) -> ImportJobResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
-    service = ImportService()
     try:
-        upload_items = await _upload_items(files)
         with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:import")
+            service = build_import_service(session)
+        upload_items = await _upload_items(files, service=service)
+        with session_scope() as session:
             job = service.create_document_import(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
@@ -88,10 +89,10 @@ async def create_document_import(
     idempotency_key: str | None = Header(default=None),
 ) -> ImportJobResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
-    service = ImportService()
     try:
         with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:import")
+            service = build_import_service(session)
             job = service.create_document_import(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
@@ -314,7 +315,11 @@ def _job_data(job: ImportJob) -> ImportJobData:
     )
 
 
-async def _upload_items(files: list[UploadFile]) -> list[DocumentImportItem]:
+async def _upload_items(
+    files: list[UploadFile],
+    *,
+    service: ImportService,
+) -> list[DocumentImportItem]:
     if not files:
         raise ImportServiceError(
             "IMPORT_FILES_REQUIRED",
@@ -331,20 +336,13 @@ async def _upload_items(files: list[UploadFile]) -> list[DocumentImportItem]:
                 status_code=400,
                 details={"file_index": index, "filename": upload.filename},
             )
-        if len(content) > MAX_UPLOAD_BYTES:
-            raise ImportServiceError(
-                "IMPORT_FILE_TOO_LARGE",
-                "uploaded file is too large for P0 inline import",
-                status_code=413,
-                details={
-                    "file_index": index,
-                    "filename": upload.filename,
-                    "max_bytes": MAX_UPLOAD_BYTES,
-                    "size_bytes": len(content),
-                },
-            )
         filename = upload.filename or f"document-{index + 1}.txt"
-        text_content = content.decode("utf-8", errors="replace")
+        file_type = service.validate_upload_file(
+            filename=filename,
+            content_type=upload.content_type,
+            size_bytes=len(content),
+            file_index=index,
+        )
         items.append(
             DocumentImportItem(
                 title=filename,
@@ -353,8 +351,8 @@ async def _upload_items(files: list[UploadFile]) -> list[DocumentImportItem]:
                 metadata={
                     "filename": filename,
                     "content_type": upload.content_type,
+                    "file_type": file_type,
                     "size_bytes": len(content),
-                    "content": text_content,
                 },
             )
         )

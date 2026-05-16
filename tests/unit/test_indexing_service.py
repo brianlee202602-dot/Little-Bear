@@ -407,6 +407,8 @@ def test_write_draft_indexes_marks_failure_retryable_when_vector_write_fails() -
     assert exc_info.value.error_code == "INDEX_VECTOR_WRITE_FAILED"
     assert exc_info.value.retryable is True
     assert exc_info.value.details["point_count"] == 1
+    assert exc_info.value.details["source_error"]["type"] == "RuntimeError"
+    assert exc_info.value.details["source_error"]["message"] == "qdrant upsert failed"
     assert not any("SET status = 'ready'" in statement for statement, _ in session.executed)
 
 

@@ -118,7 +118,7 @@ def test_create_document_import_writes_documents_versions_and_job(monkeypatch) -
         _Result(one_or_none=_Row({"department_id": _DEPARTMENT_ID, "status": "active"})),
     ]
     service = ImportService()
-    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 9)
+    monkeypatch.setattr(service, "_load_permission_version", lambda *_args: 9)
     monkeypatch.setattr(
         service,
         "_replace_resource_policy",
@@ -184,7 +184,7 @@ def test_create_upload_import_stores_source_object_and_records_object_key(monkey
     ]
     storage = InMemoryObjectStorage()
     service = ImportService(object_storage=storage)
-    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 9)
+    monkeypatch.setattr(service, "_load_permission_version", lambda *_args: 9)
     monkeypatch.setattr(
         service,
         "_replace_resource_policy",
@@ -239,6 +239,93 @@ def test_create_upload_import_stores_source_object_and_records_object_key(monkey
     assert request_json["items"][0]["object_key"] == object_key
 
 
+def test_validate_upload_file_uses_configured_type_and_size_policy() -> None:
+    service = ImportService(max_upload_bytes=4, allowed_file_types=("pdf", "md"))
+
+    assert (
+        service.validate_upload_file(
+            filename="handbook.pdf",
+            content_type="application/pdf",
+            size_bytes=4,
+            file_index=0,
+        )
+        == "pdf"
+    )
+
+    with pytest.raises(ImportServiceError) as too_large:
+        service.validate_upload_file(
+            filename="handbook.md",
+            content_type="text/markdown",
+            size_bytes=5,
+            file_index=0,
+        )
+    assert too_large.value.error_code == "IMPORT_FILE_TOO_LARGE"
+
+    with pytest.raises(ImportServiceError) as unsupported:
+        service.validate_upload_file(
+            filename="image.png",
+            content_type="image/png",
+            size_bytes=1,
+            file_index=0,
+        )
+    assert unsupported.value.error_code == "IMPORT_FILE_TYPE_UNSUPPORTED"
+
+
+def test_create_upload_import_accepts_object_content_without_inline_metadata(monkeypatch) -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_Row(
+                {
+                    "kb_id": _KB_ID,
+                    "owner_department_id": _DEPARTMENT_ID,
+                    "default_visibility": "department",
+                    "status": "active",
+                    "policy_version": 1,
+                }
+            )
+        ),
+        _Result(one_or_none=_Row({"department_id": _DEPARTMENT_ID, "status": "active"})),
+    ]
+    storage = InMemoryObjectStorage()
+    service = ImportService(object_storage=storage)
+    monkeypatch.setattr(service, "_load_permission_version", lambda *_args: 9)
+    monkeypatch.setattr(
+        service,
+        "_replace_resource_policy",
+        lambda *_args, **_kwargs: "66666666-6666-6666-6666-666666666666",
+    )
+    monkeypatch.setattr(
+        service,
+        "_insert_permission_snapshot",
+        lambda *_args, **_kwargs: {
+            "snapshot_id": "77777777-7777-7777-7777-777777777777",
+            "payload_hash": "hash_1",
+        },
+    )
+    monkeypatch.setattr(service, "_insert_audit_log", lambda *_args, **_kwargs: None)
+
+    job = service.create_document_import(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        kb_id=_KB_ID,
+        actor_user_id=_USER_ID,
+        job_type="upload",
+        items=[
+            DocumentImportItem(
+                title="handbook.txt",
+                object_content=b"hello from object storage",
+                content_type="text/plain",
+                metadata={"filename": "handbook.txt"},
+            )
+        ],
+        actor_context=_actor(),
+    )
+
+    assert job.status == "queued"
+    assert list(storage.objects.values()) == [b"hello from object storage"]
+
+
 def test_create_document_import_retries_when_object_storage_fails(monkeypatch) -> None:
     session = _FakeSession()
     session.results = [
@@ -256,7 +343,7 @@ def test_create_document_import_retries_when_object_storage_fails(monkeypatch) -
         _Result(one_or_none=_Row({"department_id": _DEPARTMENT_ID, "status": "active"})),
     ]
     service = ImportService(object_storage=_FailingObjectStorage())
-    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 9)
+    monkeypatch.setattr(service, "_load_permission_version", lambda *_args: 9)
     monkeypatch.setattr(
         service,
         "_replace_resource_policy",
@@ -456,6 +543,7 @@ def test_advance_claimed_job_chunk_stage_writes_draft_chunks(monkeypatch) -> Non
         ),
         _Result(),
         _Result(),
+        _Result(),
         _Result(one=_job_row(status="running", stage="embed")),
     ]
     service = ImportService()
@@ -470,6 +558,125 @@ def test_advance_claimed_job_chunk_stage_writes_draft_chunks(monkeypatch) -> Non
     assert job.stage == "embed"
     assert any("INSERT INTO chunks" in statement for statement, _ in session.executed)
     assert any("chunker_version" in statement for statement, _ in session.executed)
+
+
+def test_advance_claimed_job_parse_stage_reads_object_and_writes_parsed_text(monkeypatch) -> None:
+    storage = InMemoryObjectStorage(
+        objects={"uploads/source.txt": b"# Handbook\n\nHello"},
+        content_types={"uploads/source.txt": "text/markdown"},
+    )
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_Row(
+                {
+                    "job_id": "99999999-9999-9999-9999-999999999999",
+                    "enterprise_id": _ENTERPRISE_ID,
+                    "job_type": "upload",
+                    "kb_id": _KB_ID,
+                    "document_id": "44444444-4444-4444-4444-444444444444",
+                    "document_version_id": "55555555-5555-5555-5555-555555555555",
+                    "status": "running",
+                    "stage": "parse",
+                    "request_json": {
+                        "items": [
+                            {
+                                "document_id": "44444444-4444-4444-4444-444444444444",
+                                "document_version_id": "55555555-5555-5555-5555-555555555555",
+                                "title": "source.txt",
+                                "object_key": "uploads/source.txt",
+                                "content_type": "text/markdown",
+                                "metadata": {},
+                            }
+                        ],
+                    },
+                    "result_json": {},
+                    "error_message": None,
+                    "attempt_count": 1,
+                    "max_attempts": 3,
+                    "cancel_requested_at": None,
+                }
+            )
+        ),
+        _Result(),
+        _Result(),
+        _Result(one=_job_row(status="running", stage="clean")),
+    ]
+    service = ImportService(object_storage=storage)
+    monkeypatch.setattr(service, "_insert_worker_audit_log", lambda *_args, **_kwargs: None)
+
+    job = service.advance_claimed_job(
+        session,
+        job_id="99999999-9999-9999-9999-999999999999",
+        worker_id="worker_1",
+    )
+
+    assert job.stage == "clean"
+    parsed_keys = [key for key in storage.objects if key.startswith("derived/")]
+    assert len(parsed_keys) == 1
+    assert storage.objects[parsed_keys[0]] == b"# Handbook\n\nHello"
+    version_update = next(
+        params for statement, params in session.executed if "parser_version" in statement
+    )
+    assert version_update["parsed_object_key"] == parsed_keys[0]
+
+
+def test_advance_claimed_job_clean_stage_treats_parsed_pdf_text_as_text(monkeypatch) -> None:
+    storage = InMemoryObjectStorage(
+        objects={"derived/source/parsed.txt": b"[page 1]\nPDF text"},
+        content_types={"derived/source/parsed.txt": "text/plain; charset=utf-8"},
+    )
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_Row(
+                {
+                    "job_id": "99999999-9999-9999-9999-999999999999",
+                    "enterprise_id": _ENTERPRISE_ID,
+                    "job_type": "upload",
+                    "kb_id": _KB_ID,
+                    "document_id": "44444444-4444-4444-4444-444444444444",
+                    "document_version_id": "55555555-5555-5555-5555-555555555555",
+                    "status": "running",
+                    "stage": "clean",
+                    "request_json": {
+                        "items": [
+                            {
+                                "document_id": "44444444-4444-4444-4444-444444444444",
+                                "document_version_id": "55555555-5555-5555-5555-555555555555",
+                                "title": "source.pdf",
+                                "parsed_object_key": "derived/source/parsed.txt",
+                                "parser_version": "pdf-p0",
+                                "content_type": "application/pdf",
+                                "metadata": {"file_type": "pdf"},
+                            }
+                        ],
+                    },
+                    "result_json": {},
+                    "error_message": None,
+                    "attempt_count": 1,
+                    "max_attempts": 3,
+                    "cancel_requested_at": None,
+                }
+            )
+        ),
+        _Result(),
+        _Result(),
+        _Result(one=_job_row(status="running", stage="chunk")),
+    ]
+    service = ImportService(object_storage=storage)
+    monkeypatch.setattr(service, "_insert_worker_audit_log", lambda *_args, **_kwargs: None)
+
+    job = service.advance_claimed_job(
+        session,
+        job_id="99999999-9999-9999-9999-999999999999",
+        worker_id="worker_1",
+    )
+
+    assert job.stage == "chunk"
+    cleaned_keys = [key for key in storage.objects if key.endswith("/cleaned.txt")]
+    assert len(cleaned_keys) == 1
+    assert storage.objects[cleaned_keys[0]] == b"[page 1]\nPDF text"
 
 
 def test_mark_claimed_job_failed_schedules_retry(monkeypatch) -> None:

@@ -22,13 +22,10 @@ EXPECTED_CONTRACT_ONLY_OPERATIONS = {
     ("/internal/v1/admin/roles/{role_id}", "DELETE"),
     ("/internal/v1/admin/roles/{role_id}", "PATCH"),
     ("/internal/v1/documents/{doc_id}", "GET"),
-    ("/internal/v1/documents/{doc_id}/chunks", "GET"),
     ("/internal/v1/documents/{doc_id}/permissions", "PUT"),
     ("/internal/v1/documents/{doc_id}/preview", "GET"),
     ("/internal/v1/documents/{doc_id}/versions", "GET"),
-    ("/internal/v1/knowledge-bases", "GET"),
     ("/internal/v1/knowledge-bases/{kb_id}", "GET"),
-    ("/internal/v1/knowledge-bases/{kb_id}/documents", "GET"),
     ("/internal/v1/knowledge-bases/{kb_id}/folders", "GET"),
     ("/internal/v1/knowledge-bases/{kb_id}/permissions", "PUT"),
     ("/internal/v1/model-catalog", "GET"),
@@ -37,7 +34,6 @@ EXPECTED_CONTRACT_ONLY_OPERATIONS = {
     ("/internal/v1/model-health", "GET"),
     ("/internal/v1/model-rerankings", "POST"),
     ("/internal/v1/permission-evaluations", "GET"),
-    ("/internal/v1/query-streams", "POST"),
 }
 
 

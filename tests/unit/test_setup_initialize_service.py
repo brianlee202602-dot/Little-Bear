@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from app.modules.setup.initialize_service import SetupInitializationService, SetupStatus
+from app.modules.setup.initialize_service import (
+    SetupInitializationService,
+    SetupStatus,
+    _role_scopes,
+)
 
 
 class _CaptureSession:
@@ -168,3 +172,21 @@ def test_mark_status_writes_json_value_without_jsonb_build_object_parameter() ->
     statement, params = session.calls[0]
     assert "jsonb_build_object" not in str(statement)
     assert params == {"value_json": '{"status": "creating_admin"}'}
+
+
+def test_employee_builtin_role_includes_knowledge_base_read_scope() -> None:
+    scopes = _role_scopes("employee")
+
+    assert "knowledge_base:read" in scopes
+    assert "document:read" in scopes
+    assert "rag:query" in scopes
+
+
+def test_department_admin_builtin_role_includes_department_read_scopes() -> None:
+    scopes = _role_scopes("department_admin")
+
+    assert "department:*" in scopes
+    assert "user:read" in scopes
+    assert "knowledge_base:read" in scopes
+    assert "document:read" in scopes
+    assert "rag:query" in scopes

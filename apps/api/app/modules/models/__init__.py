@@ -8,6 +8,12 @@ from app.modules.models.chat import (
 )
 from app.modules.models.embeddings import EmbeddingClient, ModelGatewayEmbeddingClient
 from app.modules.models.errors import ModelClientError
+from app.modules.models.rerank import (
+    ModelGatewayRerankClient,
+    RerankClient,
+    RerankClientResult,
+    RerankScoredItem,
+)
 
 __all__ = [
     "ChatCompletionClient",
@@ -17,4 +23,8 @@ __all__ = [
     "ModelClientError",
     "ModelGatewayChatClient",
     "ModelGatewayEmbeddingClient",
+    "ModelGatewayRerankClient",
+    "RerankClient",
+    "RerankClientResult",
+    "RerankScoredItem",
 ]

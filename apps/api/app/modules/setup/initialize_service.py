@@ -1082,7 +1082,13 @@ def _role_scopes(role_code: str) -> list[str]:
         "system_admin": ["*"],
         "security_admin": ["security:*", "permission:*"],
         "audit_admin": ["audit:read", "query_log:read", "model_call:read"],
-        "department_admin": ["department:*", "user:read"],
+        "department_admin": [
+            "department:*",
+            "user:read",
+            "knowledge_base:read",
+            "document:read",
+            "rag:query",
+        ],
         "knowledge_base_admin": [
             "knowledge_base:*",
             "folder:*",
@@ -1093,6 +1099,6 @@ def _role_scopes(role_code: str) -> list[str]:
             "import_job:read",
             "import:*",
         ],
-        "employee": ["rag:query", "document:read"],
+        "employee": ["knowledge_base:read", "rag:query", "document:read"],
     }
     return scopes_by_role.get(role_code, [])

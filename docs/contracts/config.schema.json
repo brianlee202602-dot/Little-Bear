@@ -787,6 +787,10 @@
         },
         "retry_policy": {
           "$ref": "#/$defs/RetryPolicyMs"
+        },
+        "openai_extra_body": {
+          "type": "object",
+          "additionalProperties": true
         }
       }
     },

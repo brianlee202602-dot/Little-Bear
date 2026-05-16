@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 RetrievalSource = Literal["keyword", "vector"]
+ModelCallStatus = Literal["success", "failed", "degraded"]
 
 
 @dataclass(frozen=True)
@@ -36,3 +37,27 @@ class VectorSearchResult:
     candidates: tuple[RetrievalCandidate, ...]
     degraded: bool = False
     degrade_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RetrievalModelCall:
+    model_type: str
+    model_name: str
+    model_version: str | None
+    model_route_hash: str
+    status: ModelCallStatus
+    degraded: bool
+    latency_ms: int
+    token_usage: dict[str, int] | None = None
+    prompt_hash: str | None = None
+    input_hash: str | None = None
+    output_hash: str | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class RerankResult:
+    candidates: tuple[RetrievalCandidate, ...]
+    degraded: bool = False
+    degrade_reason: str | None = None
+    model_call: RetrievalModelCall | None = None

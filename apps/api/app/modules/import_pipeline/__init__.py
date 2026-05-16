@@ -1,6 +1,7 @@
 """导入流水线模块。"""
 
 from app.modules.import_pipeline.errors import ImportServiceError
+from app.modules.import_pipeline.runtime import build_import_service
 from app.modules.import_pipeline.schemas import (
     DocumentImportItem,
     ImportActorContext,
@@ -16,4 +17,5 @@ __all__ = [
     "ImportJobList",
     "ImportService",
     "ImportServiceError",
+    "build_import_service",
 ]

@@ -737,7 +737,12 @@ class ConfigService:
                 )
         return None
 
-    def _list_draft_config_payloads(self, session: Session, *, limit: int = 20) -> list[dict[str, Any]]:
+    def _list_draft_config_payloads(
+        self,
+        session: Session,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
         try:
             rows = session.execute(
                 text(
