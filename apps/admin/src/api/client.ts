@@ -249,6 +249,101 @@ export interface AdminKnowledgeBaseResponse {
   data: AdminKnowledgeBaseData;
 }
 
+export interface AdminFolderData {
+  id: string;
+  kb_id: string;
+  parent_id: string | null;
+  name: string;
+  status: "active" | "disabled" | "archived";
+}
+
+export interface AdminFolderCreateRequest {
+  name: string;
+  parent_id?: string | null;
+}
+
+export interface AdminFolderPatchRequest {
+  name?: string;
+  parent_id?: string | null;
+  status?: "active" | "disabled" | "archived";
+}
+
+export interface AdminFolderListResponse {
+  request_id: string;
+  data: AdminFolderData[];
+  pagination: PaginationData;
+}
+
+export interface AdminFolderResponse {
+  request_id: string;
+  data: AdminFolderData;
+}
+
+export interface AdminDocumentData {
+  id: string;
+  kb_id: string;
+  folder_id: string | null;
+  title: string;
+  lifecycle_status: "draft" | "active" | "archived" | "deleted";
+  index_status: "none" | "indexing" | "indexed" | "index_failed" | "blocked";
+  owner_department_id: string;
+  visibility: "department" | "enterprise";
+  current_version_id: string | null;
+}
+
+export interface AdminDocumentListResponse {
+  request_id: string;
+  data: AdminDocumentData[];
+  pagination: PaginationData;
+}
+
+export interface AdminDocumentResponse {
+  request_id: string;
+  data: AdminDocumentData;
+}
+
+export interface DocumentVersionData {
+  id: string;
+  document_id: string;
+  version_no: number;
+  status: string;
+}
+
+export interface DocumentVersionListResponse {
+  request_id: string;
+  data: DocumentVersionData[];
+}
+
+export interface ChunkData {
+  id: string;
+  document_id: string;
+  document_version_id: string;
+  text_preview: string;
+  page_start: number | null;
+  page_end: number | null;
+  status: string;
+}
+
+export interface ChunkListResponse {
+  request_id: string;
+  data: ChunkData[];
+}
+
+export interface ResourcePermissionPutRequest {
+  visibility: "department" | "enterprise";
+  owner_department_id?: string | null;
+}
+
+export interface PermissionPolicyResponse {
+  request_id: string;
+  data: {
+    resource_type: "knowledge_base" | "document";
+    resource_id: string;
+    visibility: "department" | "enterprise";
+    permission_version: number;
+  };
+}
+
 export interface AcceptedResponse {
   request_id: string;
   data: {
@@ -872,6 +967,153 @@ export async function deleteAdminKnowledgeBase(
     {
       method: "DELETE",
       headers: confirmed ? { "x-knowledge-base-confirm": "delete" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function listAdminFolders(
+  kbId: string,
+  accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
+): Promise<AdminFolderListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  return requestJson<AdminFolderListResponse>(
+    `/internal/v1/admin/knowledge-bases/${encodeURIComponent(kbId)}/folders?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function createAdminFolder(
+  kbId: string,
+  payload: AdminFolderCreateRequest,
+  accessToken: string,
+): Promise<AdminFolderResponse> {
+  return requestJson<AdminFolderResponse>(
+    `/internal/v1/admin/knowledge-bases/${encodeURIComponent(kbId)}/folders`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    accessToken,
+  );
+}
+
+export async function patchAdminFolder(
+  folderId: string,
+  payload: AdminFolderPatchRequest,
+  accessToken: string,
+): Promise<AdminFolderResponse> {
+  return requestJson<AdminFolderResponse>(
+    `/internal/v1/admin/folders/${encodeURIComponent(folderId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+    accessToken,
+  );
+}
+
+export async function deleteAdminFolder(
+  folderId: string,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<AcceptedResponse> {
+  return requestJson<AcceptedResponse>(
+    `/internal/v1/admin/folders/${encodeURIComponent(folderId)}`,
+    {
+      method: "DELETE",
+      headers: confirmed ? { "x-folder-confirm": "delete" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function listAdminDocuments(
+  kbId: string,
+  accessToken: string,
+  filters: { status?: string; page?: number; page_size?: number } = {},
+): Promise<AdminDocumentListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  return requestJson<AdminDocumentListResponse>(
+    `/internal/v1/admin/knowledge-bases/${encodeURIComponent(kbId)}/documents?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function getAdminDocument(
+  documentId: string,
+  accessToken: string,
+): Promise<AdminDocumentResponse> {
+  return requestJson<AdminDocumentResponse>(
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminDocumentVersions(
+  documentId: string,
+  accessToken: string,
+): Promise<DocumentVersionListResponse> {
+  return requestJson<DocumentVersionListResponse>(
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/versions`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminDocumentChunks(
+  documentId: string,
+  accessToken: string,
+): Promise<ChunkListResponse> {
+  return requestJson<ChunkListResponse>(
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/chunks`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function putKnowledgeBasePermissions(
+  kbId: string,
+  payload: ResourcePermissionPutRequest,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<PermissionPolicyResponse> {
+  return requestJson<PermissionPolicyResponse>(
+    `/internal/v1/knowledge-bases/${encodeURIComponent(kbId)}/permissions`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      headers: confirmed ? { "x-permission-confirm": "replace" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function putDocumentPermissions(
+  documentId: string,
+  payload: ResourcePermissionPutRequest,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<PermissionPolicyResponse> {
+  return requestJson<PermissionPolicyResponse>(
+    `/internal/v1/documents/${encodeURIComponent(documentId)}/permissions`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      headers: confirmed ? { "x-permission-confirm": "replace" } : undefined,
     },
     accessToken,
   );

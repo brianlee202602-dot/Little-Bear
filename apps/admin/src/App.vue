@@ -5,15 +5,20 @@ import {
   ApiRequestError,
   type ApiErrorPayload,
   type AdminDepartmentData,
+  type AdminDocumentData,
+  type AdminFolderData,
   type AdminKnowledgeBaseData,
   type AdminRoleBindingData,
   type AdminRoleData,
+  type ChunkData,
   type AdminUserData,
+  createAdminFolder,
   createAdminKnowledgeBase,
   createAdminDepartment,
   createAdminUser,
   createSession,
   createAdminUserRoleBindings,
+  deleteAdminFolder,
   deleteAdminKnowledgeBase,
   deleteAdminDepartment,
   deleteAdminUser,
@@ -24,6 +29,10 @@ import {
   getAdminDepartment,
   getSetupState,
   initializeSetup,
+  listAdminDocumentChunks,
+  listAdminDocuments,
+  listAdminDocumentVersions,
+  listAdminFolders,
   listAdminImportJobs,
   listAdminDepartments,
   listAdminKnowledgeBases,
@@ -34,9 +43,12 @@ import {
   listAuditLogs,
   listConfigVersions,
   listConfigs,
+  patchAdminFolder,
   patchAdminKnowledgeBase,
   patchAdminDepartment,
   patchAdminUser,
+  putDocumentPermissions,
+  putKnowledgeBasePermissions,
   publishConfigVersion,
   refreshSession,
   replaceAdminUserDepartments,
@@ -51,6 +63,7 @@ import {
   type ConfigItemData,
   type ConfigVersionData,
   type CurrentUserData,
+  type DocumentVersionData,
   type ImportJobData,
   type ImportJobStage,
   type ImportJobStatus,
@@ -89,7 +102,9 @@ type ActiveView = "loading" | "setup" | "login" | "dashboard";
 type ActiveAdminTab = "config" | "departments" | "users" | "knowledge";
 type ConfigModalMode = "create" | "edit" | "delete" | null;
 type DepartmentModalMode = "create" | "edit" | "delete" | null;
-type KnowledgeBaseModalMode = "create" | "edit" | "delete" | "upload" | null;
+type KnowledgeBaseModalMode = "create" | "edit" | "delete" | "upload" | "permissions" | null;
+type FolderModalMode = "create" | "edit" | "delete" | null;
+type DocumentModalMode = "permissions" | null;
 type UserModalMode = "create" | "edit" | "departments" | "roles" | "password" | "delete" | null;
 type RoleScopeType = AdminRoleData["scope_type"];
 type RoleBindingCandidate = {
@@ -195,10 +210,15 @@ const departmentAdminBusy = reactive({
 });
 const importAdminBusy = reactive({
   loading: false,
+  loadingFolders: false,
+  loadingDocuments: false,
+  loadingDocumentDetails: false,
   creating: false,
   updating: false,
   deleting: false,
+  managingFolder: false,
   uploading: false,
+  updatingPermissions: false,
 });
 const loginForm = reactive({
   username: "",
@@ -221,8 +241,12 @@ const importSearchForm = reactive({
   status: "",
   stage: "",
 });
+const documentSearchForm = reactive({
+  status: "",
+});
 const importUploadForm = reactive({
   kbId: "",
+  folderId: "",
   visibility: "department" as "department" | "enterprise",
   idempotencyKey: "",
 });
@@ -257,6 +281,25 @@ const knowledgeBaseEditForm = reactive({
   configScopeId: "",
   confirmedVisibilityExpand: false,
 });
+const knowledgeBasePermissionForm = reactive({
+  visibility: "department" as "department" | "enterprise",
+  ownerDepartmentId: "",
+  confirmedReplace: false,
+});
+const folderCreateForm = reactive({
+  name: "",
+  parentId: "",
+});
+const folderEditForm = reactive({
+  name: "",
+  parentId: "",
+  status: "active" as "active" | "disabled" | "archived",
+});
+const documentPermissionForm = reactive({
+  visibility: "department" as "department" | "enterprise",
+  ownerDepartmentId: "",
+  confirmedReplace: false,
+});
 const userEditForm = reactive({
   name: "",
   status: "active" as "active" | "disabled" | "locked",
@@ -266,6 +309,9 @@ const departmentDangerForm = reactive({
   confirmedDelete: false,
 });
 const knowledgeBaseDangerForm = reactive({
+  confirmedDelete: false,
+});
+const folderDangerForm = reactive({
   confirmedDelete: false,
 });
 const userDangerForm = reactive({
@@ -323,17 +369,25 @@ const configModalMode = ref<ConfigModalMode>(null);
 const adminUsers = ref<AdminUserData[]>([]);
 const adminDepartments = ref<AdminDepartmentData[]>([]);
 const adminKnowledgeBases = ref<AdminKnowledgeBaseData[]>([]);
+const adminFolders = ref<AdminFolderData[]>([]);
+const adminDocuments = ref<AdminDocumentData[]>([]);
+const selectedDocumentVersions = ref<DocumentVersionData[]>([]);
+const selectedDocumentChunks = ref<ChunkData[]>([]);
 const adminRoles = ref<AdminRoleData[]>([]);
 const adminImportJobs = ref<ImportJobData[]>([]);
 const selectedImportFiles = ref<File[]>([]);
 const importFileInputKey = ref(0);
 const selectedDepartmentId = ref<string>("");
 const selectedKnowledgeBaseId = ref<string>("");
+const selectedFolderId = ref<string>("");
+const selectedDocumentId = ref<string>("");
 const selectedAdminUserId = ref<string>("");
 const selectedUserDepartments = ref<AdminDepartmentData[]>([]);
 const selectedUserRoleBindings = ref<AdminRoleBindingData[]>([]);
 const departmentModalMode = ref<DepartmentModalMode>(null);
 const knowledgeBaseModalMode = ref<KnowledgeBaseModalMode>(null);
+const folderModalMode = ref<FolderModalMode>(null);
+const documentModalMode = ref<DocumentModalMode>(null);
 const userModalMode = ref<UserModalMode>(null);
 
 const statusLabels: Record<string, string> = {
@@ -888,14 +942,29 @@ const canManageRoles = computed(() => hasScope(currentUser.value?.scopes ?? [], 
 const canManageKnowledgeBases = computed(() =>
   hasScope(currentUser.value?.scopes ?? [], "knowledge_base:manage"),
 );
+const canManageDocuments = computed(() =>
+  hasScope(currentUser.value?.scopes ?? [], "document:manage"),
+);
+const canManageFolders = computed(() =>
+  hasScope(currentUser.value?.scopes ?? [], "folder:manage"),
+);
 const canImportDocuments = computed(() =>
   hasScope(currentUser.value?.scopes ?? [], "document:import"),
+);
+const canManagePermissions = computed(() =>
+  hasScope(currentUser.value?.scopes ?? [], "permission:manage"),
 );
 const canReadImportJobs = computed(() =>
   hasScope(currentUser.value?.scopes ?? [], "import_job:read"),
 );
 const canLoadImportAdmin = computed(
-  () => canImportDocuments.value || canReadImportJobs.value || canManageKnowledgeBases.value,
+  () =>
+    canImportDocuments.value ||
+    canReadImportJobs.value ||
+    canManageKnowledgeBases.value ||
+    canManageFolders.value ||
+    canManageDocuments.value ||
+    canManagePermissions.value,
 );
 const selectedConfigItem = computed(() =>
   configItems.value.find(
@@ -924,6 +993,12 @@ const selectedDepartment = computed(
 const selectedKnowledgeBase = computed(
   () => adminKnowledgeBases.value.find((knowledgeBase) => knowledgeBase.id === selectedKnowledgeBaseId.value) ?? null,
 );
+const selectedFolder = computed(
+  () => adminFolders.value.find((folder) => folder.id === selectedFolderId.value) ?? null,
+);
+const selectedAdminDocument = computed(
+  () => adminDocuments.value.find((document) => document.id === selectedDocumentId.value) ?? null,
+);
 const selectedUserDepartmentsForDisplay = computed(() => {
   if (selectedUserDepartments.value.length > 0) {
     return selectedUserDepartments.value;
@@ -939,6 +1014,12 @@ const activeDepartments = computed(() =>
 );
 const activeKnowledgeBases = computed(() =>
   adminKnowledgeBases.value.filter((knowledgeBase) => knowledgeBase.status === "active"),
+);
+const activeFolders = computed(() =>
+  adminFolders.value.filter((folder) => folder.status === "active"),
+);
+const folderParentOptions = computed(() =>
+  activeFolders.value.filter((folder) => folder.id !== selectedFolderId.value),
 );
 const selectedImportKnowledgeBase = computed(
   () => adminKnowledgeBases.value.find((knowledgeBase) => knowledgeBase.id === importUploadForm.kbId) ?? null,
@@ -977,6 +1058,43 @@ const canDeleteSelectedKnowledgeBase = computed(
     Boolean(selectedKnowledgeBase.value) &&
     knowledgeBaseDangerForm.confirmedDelete &&
     !importAdminBusy.deleting,
+);
+const canCreateFolder = computed(
+  () =>
+    canManageFolders.value &&
+    Boolean(selectedKnowledgeBase.value) &&
+    folderCreateForm.name.trim().length > 0 &&
+    !importAdminBusy.managingFolder,
+);
+const canUpdateSelectedFolder = computed(
+  () =>
+    canManageFolders.value &&
+    Boolean(selectedFolder.value) &&
+    folderEditForm.name.trim().length > 0 &&
+    !importAdminBusy.managingFolder,
+);
+const canDeleteSelectedFolder = computed(
+  () =>
+    canManageFolders.value &&
+    Boolean(selectedFolder.value) &&
+    folderDangerForm.confirmedDelete &&
+    !importAdminBusy.managingFolder,
+);
+const canReplaceSelectedKnowledgeBasePermissions = computed(
+  () =>
+    canManagePermissions.value &&
+    Boolean(selectedKnowledgeBase.value) &&
+    knowledgeBasePermissionForm.ownerDepartmentId.trim().length > 0 &&
+    knowledgeBasePermissionForm.confirmedReplace &&
+    !importAdminBusy.updatingPermissions,
+);
+const canReplaceSelectedDocumentPermissions = computed(
+  () =>
+    canManagePermissions.value &&
+    Boolean(selectedAdminDocument.value) &&
+    documentPermissionForm.ownerDepartmentId.trim().length > 0 &&
+    documentPermissionForm.confirmedReplace &&
+    !importAdminBusy.updatingPermissions,
 );
 const roleBindingCandidates = computed<RoleBindingCandidate[]>(() =>
   assignableRoles.value.flatMap((role): RoleBindingCandidate[] => {
@@ -1633,11 +1751,17 @@ async function refreshDepartmentAdminState(): Promise<void> {
 async function refreshKnowledgeBaseAdminState(): Promise<void> {
   if (!canLoadImportAdmin.value) {
     adminKnowledgeBases.value = [];
+    adminFolders.value = [];
+    adminDocuments.value = [];
+    selectedDocumentVersions.value = [];
+    selectedDocumentChunks.value = [];
     adminImportJobs.value = [];
     selectedKnowledgeBaseId.value = "";
+    selectedFolderId.value = "";
+    selectedDocumentId.value = "";
     importAdminFeedback.value = {
       tone: "error",
-      message: "当前账号缺少知识库管理、文档导入或导入任务读取权限。",
+      message: "当前账号缺少知识库、文件夹、文档、权限或导入任务读取权限。",
     };
     return;
   }
@@ -1667,6 +1791,28 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
       }
       ensureImportKnowledgeBaseSelection();
       syncKnowledgeBaseEditForm();
+      syncKnowledgeBasePermissionForm();
+      if (canManageFolders.value) {
+        await refreshSelectedKnowledgeBaseFolders(accessToken);
+      } else {
+        adminFolders.value = [];
+        selectedFolderId.value = "";
+      }
+      if (canManageDocuments.value) {
+        await refreshSelectedKnowledgeBaseDocuments(accessToken);
+      } else {
+        adminDocuments.value = [];
+        selectedDocumentId.value = "";
+        selectedDocumentVersions.value = [];
+        selectedDocumentChunks.value = [];
+      }
+    } else {
+      adminFolders.value = [];
+      adminDocuments.value = [];
+      selectedFolderId.value = "";
+      selectedDocumentId.value = "";
+      selectedDocumentVersions.value = [];
+      selectedDocumentChunks.value = [];
     }
     if (canReadImportJobs.value) {
       const jobsResponse = await listAdminImportJobs(accessToken, {
@@ -1725,6 +1871,126 @@ async function refreshSelectedUserDepartments(existingAccessToken?: string): Pro
   selectedUserDepartments.value = response.data;
   updateSelectedAdminUserDepartments(response.data);
   syncSelectedUserDepartmentForm();
+}
+
+async function refreshSelectedKnowledgeBaseFolders(existingAccessToken?: string): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase || !canManageFolders.value) {
+    adminFolders.value = [];
+    selectedFolderId.value = "";
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.loadingFolders = true;
+  try {
+    const response = await listAdminFolders(knowledgeBase.id, accessToken, { page_size: 100 });
+    adminFolders.value = response.data;
+    if (
+      selectedFolderId.value &&
+      !adminFolders.value.some((folder) => folder.id === selectedFolderId.value)
+    ) {
+      selectedFolderId.value = "";
+    }
+    if (
+      importUploadForm.folderId &&
+      !adminFolders.value.some((folder) => folder.id === importUploadForm.folderId)
+    ) {
+      importUploadForm.folderId = "";
+    }
+    syncFolderEditForm();
+  } catch (error) {
+    adminFolders.value = [];
+    selectedFolderId.value = "";
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取知识库文件夹失败"),
+    };
+  } finally {
+    importAdminBusy.loadingFolders = false;
+  }
+}
+
+async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: string): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase || !canManageDocuments.value) {
+    adminDocuments.value = [];
+    selectedDocumentId.value = "";
+    selectedDocumentVersions.value = [];
+    selectedDocumentChunks.value = [];
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.loadingDocuments = true;
+  try {
+    const response = await listAdminDocuments(knowledgeBase.id, accessToken, {
+      status: documentSearchForm.status || undefined,
+      page_size: 100,
+    });
+    adminDocuments.value = response.data;
+    if (
+      selectedDocumentId.value &&
+      !adminDocuments.value.some((document) => document.id === selectedDocumentId.value)
+    ) {
+      selectedDocumentId.value = "";
+      selectedDocumentVersions.value = [];
+      selectedDocumentChunks.value = [];
+    }
+    if (!selectedDocumentId.value && adminDocuments.value.length > 0) {
+      selectedDocumentId.value = adminDocuments.value[0].id;
+    }
+    syncDocumentPermissionForm();
+    if (selectedDocumentId.value) {
+      await refreshSelectedDocumentDetails(accessToken);
+    }
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取知识库文档失败"),
+    };
+  } finally {
+    importAdminBusy.loadingDocuments = false;
+  }
+}
+
+async function refreshSelectedDocumentDetails(existingAccessToken?: string): Promise<void> {
+  const document = selectedAdminDocument.value;
+  if (!document || !canManageDocuments.value) {
+    selectedDocumentVersions.value = [];
+    selectedDocumentChunks.value = [];
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.loadingDocumentDetails = true;
+  try {
+    const [versionsResponse, chunksResponse] = await Promise.all([
+      listAdminDocumentVersions(document.id, accessToken),
+      listAdminDocumentChunks(document.id, accessToken),
+    ]);
+    selectedDocumentVersions.value = versionsResponse.data;
+    selectedDocumentChunks.value = chunksResponse.data;
+    syncDocumentPermissionForm();
+  } catch (error) {
+    selectedDocumentVersions.value = [];
+    selectedDocumentChunks.value = [];
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取文档版本或 chunk 失败"),
+    };
+  } finally {
+    importAdminBusy.loadingDocumentDetails = false;
+  }
 }
 
 async function selectAdminUser(userId: string): Promise<void> {
@@ -1789,6 +2055,27 @@ function syncKnowledgeBaseEditForm(): void {
   knowledgeBaseEditForm.confirmedVisibilityExpand = false;
 }
 
+function syncKnowledgeBasePermissionForm(): void {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  knowledgeBasePermissionForm.visibility = knowledgeBase?.default_visibility ?? "department";
+  knowledgeBasePermissionForm.ownerDepartmentId = knowledgeBase?.owner_department_id ?? "";
+  knowledgeBasePermissionForm.confirmedReplace = false;
+}
+
+function syncFolderEditForm(): void {
+  const folder = selectedFolder.value;
+  folderEditForm.name = folder?.name ?? "";
+  folderEditForm.parentId = folder?.parent_id ?? "";
+  folderEditForm.status = folder?.status ?? "active";
+}
+
+function syncDocumentPermissionForm(): void {
+  const document = selectedAdminDocument.value;
+  documentPermissionForm.visibility = document?.visibility ?? "department";
+  documentPermissionForm.ownerDepartmentId = document?.owner_department_id ?? "";
+  documentPermissionForm.confirmedReplace = false;
+}
+
 function resetKnowledgeBaseCreateForm(): void {
   knowledgeBaseCreateForm.name = "";
   knowledgeBaseCreateForm.defaultVisibility = "department";
@@ -1815,10 +2102,20 @@ async function openDeleteKnowledgeBaseModal(knowledgeBase: AdminKnowledgeBaseDat
   await selectKnowledgeBase(knowledgeBase.id);
 }
 
+async function openKnowledgeBasePermissionsModal(knowledgeBase: AdminKnowledgeBaseData): Promise<void> {
+  knowledgeBaseModalMode.value = "permissions";
+  await selectKnowledgeBase(knowledgeBase.id);
+  syncKnowledgeBasePermissionForm();
+}
+
 async function openUploadKnowledgeBaseModal(knowledgeBase: AdminKnowledgeBaseData): Promise<void> {
   knowledgeBaseModalMode.value = "upload";
   await selectKnowledgeBase(knowledgeBase.id);
   importUploadForm.kbId = knowledgeBase.id;
+  importUploadForm.folderId =
+    selectedFolderId.value && activeFolders.value.some((folder) => folder.id === selectedFolderId.value)
+      ? selectedFolderId.value
+      : "";
   importUploadForm.visibility = knowledgeBase.default_visibility;
   importUploadForm.idempotencyKey = "";
   clearImportFiles();
@@ -1829,6 +2126,7 @@ function closeKnowledgeBaseModal(): void {
   knowledgeBaseDangerForm.confirmedDelete = false;
   knowledgeBaseCreateForm.confirmedEnterpriseVisibility = false;
   knowledgeBaseEditForm.confirmedVisibilityExpand = false;
+  knowledgeBasePermissionForm.confirmedReplace = false;
 }
 
 function ensureImportKnowledgeBaseSelection(): void {
@@ -1839,6 +2137,42 @@ function ensureImportKnowledgeBaseSelection(): void {
     return;
   }
   importUploadForm.kbId = activeKnowledgeBases.value[0]?.id ?? importUploadForm.kbId;
+}
+
+function openCreateFolderModal(): void {
+  if (!selectedKnowledgeBase.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "请先选择知识库。",
+    };
+    return;
+  }
+  folderCreateForm.name = "";
+  folderCreateForm.parentId =
+    selectedFolderId.value && activeFolders.value.some((folder) => folder.id === selectedFolderId.value)
+      ? selectedFolderId.value
+      : "";
+  importAdminFeedback.value = null;
+  folderModalMode.value = "create";
+}
+
+function openEditFolderModal(folder: AdminFolderData): void {
+  selectedFolderId.value = folder.id;
+  folderDangerForm.confirmedDelete = false;
+  syncFolderEditForm();
+  folderModalMode.value = "edit";
+}
+
+function openDeleteFolderModal(folder: AdminFolderData): void {
+  selectedFolderId.value = folder.id;
+  folderDangerForm.confirmedDelete = false;
+  syncFolderEditForm();
+  folderModalMode.value = "delete";
+}
+
+function closeFolderModal(): void {
+  folderModalMode.value = null;
+  folderDangerForm.confirmedDelete = false;
 }
 
 function onImportFilesChange(event: Event): void {
@@ -1874,6 +2208,7 @@ async function submitDocumentUpload(): Promise<void> {
         files: selectedImportFiles.value,
         visibility: importUploadForm.visibility,
         owner_department_id: selectedImportKnowledgeBase.value?.owner_department_id,
+        folder_id: importUploadForm.folderId || undefined,
         idempotency_key: importUploadForm.idempotencyKey.trim() || undefined,
       },
       accessToken,
@@ -1946,23 +2281,154 @@ async function submitCreateKnowledgeBase(): Promise<void> {
   }
 }
 
-async function selectKnowledgeBase(kbId: string): Promise<void> {
-  selectedKnowledgeBaseId.value = kbId;
-  knowledgeBaseDangerForm.confirmedDelete = false;
-  syncKnowledgeBaseEditForm();
-
-  const accessToken = await ensureAccessToken();
-  if (!accessToken || !canManageKnowledgeBases.value) {
+async function submitCreateFolder(): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase || !canCreateFolder.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "请选择知识库并填写文件夹名称。",
+    };
     return;
   }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.managingFolder = true;
   try {
-    const response = await getAdminKnowledgeBase(kbId, accessToken);
-    upsertKnowledgeBase(response.data);
-    syncKnowledgeBaseEditForm();
+    const response = await createAdminFolder(
+      knowledgeBase.id,
+      {
+        name: folderCreateForm.name.trim(),
+        parent_id: folderCreateForm.parentId || null,
+      },
+      accessToken,
+    );
+    selectedFolderId.value = response.data.id;
+    await refreshSelectedKnowledgeBaseFolders(accessToken);
+    importAdminFeedback.value = {
+      tone: "success",
+      message: "文件夹已创建。",
+    };
+    closeFolderModal();
   } catch (error) {
     importAdminFeedback.value = {
       tone: "error",
-      message: normalizeErrorMessage(error, "读取知识库详情失败"),
+      message: normalizeErrorMessage(error, "创建文件夹失败"),
+    };
+  } finally {
+    importAdminBusy.managingFolder = false;
+  }
+}
+
+async function submitPatchFolder(): Promise<void> {
+  const folder = selectedFolder.value;
+  if (!folder || !canUpdateSelectedFolder.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "请选择文件夹并填写文件夹名称。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.managingFolder = true;
+  try {
+    const response = await patchAdminFolder(
+      folder.id,
+      {
+        name: folderEditForm.name.trim(),
+        parent_id: folderEditForm.parentId || null,
+        status: folderEditForm.status,
+      },
+      accessToken,
+    );
+    selectedFolderId.value = response.data.id;
+    await refreshSelectedKnowledgeBaseFolders(accessToken);
+    importAdminFeedback.value = {
+      tone: "success",
+      message: "文件夹已更新。",
+    };
+    closeFolderModal();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "更新文件夹失败"),
+    };
+  } finally {
+    importAdminBusy.managingFolder = false;
+  }
+}
+
+async function deleteSelectedFolder(): Promise<void> {
+  const folder = selectedFolder.value;
+  if (!folder || !folderDangerForm.confirmedDelete) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "删除文件夹前必须勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.managingFolder = true;
+  try {
+    await deleteAdminFolder(folder.id, accessToken, true);
+    selectedFolderId.value = "";
+    importUploadForm.folderId = importUploadForm.folderId === folder.id ? "" : importUploadForm.folderId;
+    await refreshSelectedKnowledgeBaseFolders(accessToken);
+    await refreshSelectedKnowledgeBaseDocuments(accessToken);
+    importAdminFeedback.value = {
+      tone: "success",
+      message: "文件夹已删除，并已写入访问阻断。",
+    };
+    closeFolderModal();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "删除文件夹失败"),
+    };
+  } finally {
+    importAdminBusy.managingFolder = false;
+  }
+}
+
+async function selectKnowledgeBase(kbId: string): Promise<void> {
+  selectedKnowledgeBaseId.value = kbId;
+  selectedFolderId.value = "";
+  selectedDocumentId.value = "";
+  selectedDocumentVersions.value = [];
+  selectedDocumentChunks.value = [];
+  knowledgeBaseDangerForm.confirmedDelete = false;
+  folderDangerForm.confirmedDelete = false;
+  syncKnowledgeBaseEditForm();
+  syncKnowledgeBasePermissionForm();
+  syncFolderEditForm();
+
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+  try {
+    if (canManageKnowledgeBases.value) {
+      const response = await getAdminKnowledgeBase(kbId, accessToken);
+      upsertKnowledgeBase(response.data);
+      syncKnowledgeBaseEditForm();
+      syncKnowledgeBasePermissionForm();
+    }
+    await refreshSelectedKnowledgeBaseFolders(accessToken);
+    await refreshSelectedKnowledgeBaseDocuments(accessToken);
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取知识库详情、文件夹或文档失败"),
     };
   }
 }
@@ -2012,6 +2478,47 @@ async function submitPatchKnowledgeBase(): Promise<void> {
   }
 }
 
+async function submitKnowledgeBasePermissions(): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase || !canReplaceSelectedKnowledgeBasePermissions.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "请选择知识库、填写所属部门并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.updatingPermissions = true;
+  try {
+    await putKnowledgeBasePermissions(
+      knowledgeBase.id,
+      {
+        visibility: knowledgeBasePermissionForm.visibility,
+        owner_department_id: knowledgeBasePermissionForm.ownerDepartmentId.trim(),
+      },
+      accessToken,
+      true,
+    );
+    await refreshKnowledgeBaseAdminState();
+    importAdminFeedback.value = {
+      tone: "success",
+      message: "知识库权限策略已更新。",
+    };
+    closeKnowledgeBaseModal();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "更新知识库权限失败"),
+    };
+  } finally {
+    importAdminBusy.updatingPermissions = false;
+  }
+}
+
 async function deleteSelectedKnowledgeBase(): Promise<void> {
   const knowledgeBase = selectedKnowledgeBase.value;
   if (!knowledgeBase || !knowledgeBaseDangerForm.confirmedDelete) {
@@ -2054,6 +2561,65 @@ function upsertKnowledgeBase(knowledgeBase: AdminKnowledgeBaseData): void {
     return;
   }
   adminKnowledgeBases.value = [knowledgeBase, ...adminKnowledgeBases.value];
+}
+
+async function selectAdminDocument(documentId: string): Promise<void> {
+  selectedDocumentId.value = documentId;
+  syncDocumentPermissionForm();
+  await refreshSelectedDocumentDetails();
+}
+
+async function openDocumentPermissionsModal(document: AdminDocumentData): Promise<void> {
+  selectedDocumentId.value = document.id;
+  syncDocumentPermissionForm();
+  documentModalMode.value = "permissions";
+  await refreshSelectedDocumentDetails();
+}
+
+function closeDocumentModal(): void {
+  documentModalMode.value = null;
+  documentPermissionForm.confirmedReplace = false;
+}
+
+async function submitDocumentPermissions(): Promise<void> {
+  const document = selectedAdminDocument.value;
+  if (!document || !canReplaceSelectedDocumentPermissions.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "请选择文档、填写所属部门并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.updatingPermissions = true;
+  try {
+    await putDocumentPermissions(
+      document.id,
+      {
+        visibility: documentPermissionForm.visibility,
+        owner_department_id: documentPermissionForm.ownerDepartmentId.trim(),
+      },
+      accessToken,
+      true,
+    );
+    await refreshSelectedKnowledgeBaseDocuments(accessToken);
+    importAdminFeedback.value = {
+      tone: "success",
+      message: "文档权限策略已更新。",
+    };
+    closeDocumentModal();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "更新文档权限失败"),
+    };
+  } finally {
+    importAdminBusy.updatingPermissions = false;
+  }
 }
 
 function toggleCreateRole(roleId: string, checked: boolean): void {
@@ -3119,19 +3685,32 @@ function clearAuthSession(): void {
   adminUsers.value = [];
   adminDepartments.value = [];
   adminKnowledgeBases.value = [];
+  adminFolders.value = [];
+  adminDocuments.value = [];
+  selectedDocumentVersions.value = [];
+  selectedDocumentChunks.value = [];
   adminRoles.value = [];
   adminImportJobs.value = [];
   selectedKnowledgeBaseId.value = "";
+  selectedFolderId.value = "";
+  selectedDocumentId.value = "";
   selectedImportFiles.value = [];
   knowledgeBaseSearchForm.keyword = "";
   knowledgeBaseSearchForm.status = "";
   knowledgeBaseModalMode.value = null;
+  folderModalMode.value = null;
+  documentModalMode.value = null;
   knowledgeBaseDangerForm.confirmedDelete = false;
+  folderDangerForm.confirmedDelete = false;
+  knowledgeBasePermissionForm.confirmedReplace = false;
+  documentPermissionForm.confirmedReplace = false;
   importUploadForm.kbId = "";
+  importUploadForm.folderId = "";
   importUploadForm.idempotencyKey = "";
   importSearchForm.kbId = "";
   importSearchForm.status = "";
   importSearchForm.stage = "";
+  documentSearchForm.status = "";
   selectedAdminUserId.value = "";
   selectedUserRoleBindings.value = [];
   selectedConfigKey.value = "";
@@ -3377,11 +3956,33 @@ function formatKnowledgeBaseLabel(
   return knowledgeBase?.name?.trim() || knowledgeBase?.id?.trim() || "-";
 }
 
+function formatFolderLabel(folder: { name?: string | null; id?: string | null } | null | undefined): string {
+  return folder?.name?.trim() || folder?.id?.trim() || "根目录";
+}
+
+function formatFolderById(folderId: string | null): string {
+  if (!folderId) {
+    return "根目录";
+  }
+  const folder = adminFolders.value.find((item) => item.id === folderId);
+  return formatFolderLabel(folder ?? { id: folderId, name: "" });
+}
+
 function formatDepartmentById(departmentId: string): string {
   const department =
     adminDepartments.value.find((item) => item.id === departmentId) ??
     currentUser.value?.departments.find((item) => item.id === departmentId);
   return formatDepartmentLabel(department ?? { code: "", name: departmentId });
+}
+
+function folderStatusTone(status: AdminFolderData["status"]): Tone {
+  if (status === "active") {
+    return "success";
+  }
+  if (status === "disabled") {
+    return "warning";
+  }
+  return "neutral";
 }
 
 function knowledgeBaseStatusTone(status: AdminKnowledgeBaseData["status"]): Tone {
@@ -3396,6 +3997,43 @@ function knowledgeBaseStatusTone(status: AdminKnowledgeBaseData["status"]): Tone
 
 function knowledgeBaseVisibilityLabel(visibility: AdminKnowledgeBaseData["default_visibility"]): string {
   return visibility === "enterprise" ? "企业可见" : "部门可见";
+}
+
+function documentLifecycleStatusTone(status: AdminDocumentData["lifecycle_status"]): Tone {
+  if (status === "active") {
+    return "success";
+  }
+  if (status === "draft" || status === "archived") {
+    return "warning";
+  }
+  return "error";
+}
+
+function documentIndexStatusTone(status: AdminDocumentData["index_status"]): Tone {
+  if (status === "indexed") {
+    return "success";
+  }
+  if (status === "indexing") {
+    return "warning";
+  }
+  if (status === "index_failed" || status === "blocked") {
+    return "error";
+  }
+  return "neutral";
+}
+
+function formatDocumentVersion(version: DocumentVersionData): string {
+  return `v${version.version_no} / ${version.status}`;
+}
+
+function formatChunkPageRange(chunk: ChunkData): string {
+  if (chunk.page_start === null && chunk.page_end === null) {
+    return "-";
+  }
+  if (chunk.page_start === chunk.page_end || chunk.page_end === null) {
+    return String(chunk.page_start ?? "-");
+  }
+  return `${chunk.page_start ?? "-"}-${chunk.page_end}`;
 }
 
 function formatImportJobKnowledgeBase(job: ImportJobData): string {
@@ -4627,10 +5265,26 @@ function isComposeDemoProvider(value: string): boolean {
                   <button
                     class="button button--secondary button--small"
                     type="button"
+                    @click="selectKnowledgeBase(knowledgeBase.id)"
+                    :disabled="!canManageDocuments || importAdminBusy.loadingDocuments"
+                  >
+                    文档
+                  </button>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
                     @click="openUploadKnowledgeBaseModal(knowledgeBase)"
                     :disabled="!canImportDocuments || knowledgeBase.status !== 'active'"
                   >
                     添加文件
+                  </button>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="openKnowledgeBasePermissionsModal(knowledgeBase)"
+                    :disabled="!canManagePermissions"
+                  >
+                    权限
                   </button>
                   <button
                     class="button button--secondary button--small"
@@ -4656,6 +5310,209 @@ function isComposeDemoProvider(value: string): boolean {
             </p>
             <p v-else class="empty-state empty-state--plain">
               当前账号缺少 knowledge_base:manage，无法读取知识库列表；如需上传，请使用具备知识库管理权限的账号。
+            </p>
+
+            <section
+              v-if="selectedKnowledgeBase && (canManageFolders || canManageDocuments)"
+              class="resource-section"
+            >
+              <section v-if="canManageFolders" class="resource-block">
+                <header class="resource-section__header">
+                  <div>
+                    <h4>文件夹管理</h4>
+                    <p>{{ formatKnowledgeBaseLabel(selectedKnowledgeBase) }} / {{ selectedKnowledgeBase.id }}</p>
+                  </div>
+                  <div class="panel__actions">
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      @click="refreshSelectedKnowledgeBaseFolders()"
+                      :disabled="importAdminBusy.loadingFolders"
+                    >
+                      {{ importAdminBusy.loadingFolders ? "刷新中" : "刷新文件夹" }}
+                    </button>
+                    <button class="button button--small" type="button" @click="openCreateFolderModal">
+                      新增文件夹
+                    </button>
+                  </div>
+                </header>
+
+                <div v-if="adminFolders.length" class="entity-table entity-table--folders">
+                  <div class="entity-table__row entity-table__row--header">
+                    <span>文件夹</span>
+                    <span>状态</span>
+                    <span>上级</span>
+                    <span>操作</span>
+                  </div>
+                  <article
+                    v-for="folder in adminFolders"
+                    :key="folder.id"
+                    :class="['entity-table__row', { 'entity-table__row--selected': folder.id === selectedFolderId }]"
+                  >
+                    <div class="entity-main">
+                      <strong>{{ folder.name }}</strong>
+                      <span>{{ folder.id }}</span>
+                    </div>
+                    <div class="entity-cell">
+                      <span :class="toneClass(folderStatusTone(folder.status))">{{ folder.status }}</span>
+                    </div>
+                    <div class="entity-cell">{{ formatFolderById(folder.parent_id) }}</div>
+                    <div class="row-actions row-actions--dense">
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        @click="openEditFolderModal(folder)"
+                      >
+                        编辑
+                      </button>
+                      <button
+                        class="button button--danger button--small"
+                        type="button"
+                        @click="openDeleteFolderModal(folder)"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </article>
+                </div>
+                <p v-else class="empty-state empty-state--plain">当前知识库尚未创建文件夹。</p>
+              </section>
+
+              <p v-else class="empty-state empty-state--plain">
+                当前账号缺少 folder:manage，无法管理该知识库下的文件夹。
+              </p>
+
+              <section v-if="canManageDocuments" class="resource-block">
+                <header class="resource-section__header">
+                  <div>
+                    <h4>文档管理</h4>
+                    <p>{{ formatKnowledgeBaseLabel(selectedKnowledgeBase) }} / {{ selectedKnowledgeBase.id }}</p>
+                  </div>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="refreshSelectedKnowledgeBaseDocuments()"
+                    :disabled="importAdminBusy.loadingDocuments"
+                  >
+                    {{ importAdminBusy.loadingDocuments ? "刷新中" : "刷新文档" }}
+                  </button>
+                </header>
+
+                <form class="list-filter list-filter--documents" @submit.prevent="refreshSelectedKnowledgeBaseDocuments()">
+                  <label class="field">
+                    <span class="field__label">文档状态</span>
+                    <p class="field__hint">留空时显示当前知识库下全部未删除文档。</p>
+                    <select v-model="documentSearchForm.status" class="control">
+                      <option value="">全部</option>
+                      <option value="draft">draft</option>
+                      <option value="active">active</option>
+                      <option value="archived">archived</option>
+                    </select>
+                  </label>
+                  <button class="button button--secondary" type="submit" :disabled="importAdminBusy.loadingDocuments">
+                    查询文档
+                  </button>
+                </form>
+
+                <div v-if="adminDocuments.length" class="entity-table entity-table--documents">
+                  <div class="entity-table__row entity-table__row--header">
+                    <span>文档</span>
+                    <span>文件夹</span>
+                    <span>生命周期</span>
+                    <span>索引</span>
+                    <span>可见性</span>
+                    <span>当前版本</span>
+                    <span>操作</span>
+                  </div>
+                  <article
+                    v-for="document in adminDocuments"
+                    :key="document.id"
+                    :class="['entity-table__row', { 'entity-table__row--selected': document.id === selectedDocumentId }]"
+                  >
+                    <div class="entity-main">
+                      <strong>{{ document.title }}</strong>
+                      <span>{{ document.id }}</span>
+                    </div>
+                    <div class="entity-cell">{{ formatFolderById(document.folder_id) }}</div>
+                    <div class="entity-cell">
+                      <span :class="toneClass(documentLifecycleStatusTone(document.lifecycle_status))">
+                        {{ document.lifecycle_status }}
+                      </span>
+                    </div>
+                    <div class="entity-cell">
+                      <span :class="toneClass(documentIndexStatusTone(document.index_status))">
+                        {{ document.index_status }}
+                      </span>
+                    </div>
+                    <div class="entity-cell">
+                      {{ knowledgeBaseVisibilityLabel(document.visibility) }} /
+                      {{ formatDepartmentById(document.owner_department_id) }}
+                    </div>
+                    <div class="entity-cell">{{ document.current_version_id ?? "-" }}</div>
+                    <div class="row-actions row-actions--dense">
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        @click="selectAdminDocument(document.id)"
+                        :disabled="importAdminBusy.loadingDocumentDetails"
+                      >
+                        版本与片段
+                      </button>
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        @click="openDocumentPermissionsModal(document)"
+                        :disabled="!canManagePermissions"
+                      >
+                        权限
+                      </button>
+                    </div>
+                  </article>
+                </div>
+                <p v-else class="empty-state empty-state--plain">当前知识库尚未读取到文档。</p>
+
+                <section v-if="selectedAdminDocument" class="document-detail-grid">
+                  <div class="document-detail-pane">
+                    <header class="document-detail-pane__header">
+                      <h4>文档版本</h4>
+                      <span>{{ importAdminBusy.loadingDocumentDetails ? "读取中" : `${selectedDocumentVersions.length} 个版本` }}</span>
+                    </header>
+                    <div v-if="selectedDocumentVersions.length" class="version-list">
+                      <article v-for="version in selectedDocumentVersions" :key="version.id" class="version-row">
+                        <div>
+                          <strong>{{ formatDocumentVersion(version) }}</strong>
+                          <span>{{ version.id }}</span>
+                        </div>
+                      </article>
+                    </div>
+                    <p v-else class="empty-state empty-state--plain">当前文档尚未读取到版本。</p>
+                  </div>
+
+                  <div class="document-detail-pane">
+                    <header class="document-detail-pane__header">
+                      <h4>Chunk 预览</h4>
+                      <span>{{ importAdminBusy.loadingDocumentDetails ? "读取中" : `${selectedDocumentChunks.length} 个片段` }}</span>
+                    </header>
+                    <div v-if="selectedDocumentChunks.length" class="chunk-preview-list">
+                      <article v-for="chunk in selectedDocumentChunks" :key="chunk.id" class="chunk-preview-row">
+                        <header>
+                          <strong>{{ chunk.id }}</strong>
+                          <span>{{ chunk.status }} / 页码 {{ formatChunkPageRange(chunk) }}</span>
+                        </header>
+                        <p>{{ chunk.text_preview }}</p>
+                      </article>
+                    </div>
+                    <p v-else class="empty-state empty-state--plain">当前文档尚未读取到 chunk。</p>
+                  </div>
+                </section>
+              </section>
+
+              <p v-else class="empty-state empty-state--plain">
+                当前账号缺少 document:manage，无法查看该知识库下的文档管理数据。
+              </p>
+            </section>
+            <p v-else-if="selectedKnowledgeBase" class="empty-state empty-state--plain">
+              当前账号缺少 folder:manage 和 document:manage，无法查看该知识库下的文件夹或文档管理数据。
             </p>
 
             <form
@@ -5077,9 +5934,11 @@ function isComposeDemoProvider(value: string): boolean {
                     ? "新增知识库"
                     : knowledgeBaseModalMode === "edit"
                       ? "编辑知识库"
-                      : knowledgeBaseModalMode === "upload"
-                        ? "添加文件"
-                        : "删除知识库"
+                      : knowledgeBaseModalMode === "permissions"
+                        ? "权限策略"
+                        : knowledgeBaseModalMode === "upload"
+                          ? "添加文件"
+                          : "删除知识库"
                 }}
               </h3>
             </div>
@@ -5219,6 +6078,73 @@ function isComposeDemoProvider(value: string): boolean {
             </footer>
           </form>
 
+          <form
+            v-else-if="knowledgeBaseModalMode === 'permissions' && selectedKnowledgeBase"
+            @submit.prevent="submitKnowledgeBasePermissions"
+          >
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>知识库</dt>
+                  <dd>{{ formatKnowledgeBaseLabel(selectedKnowledgeBase) }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>当前策略</dt>
+                  <dd>
+                    {{ knowledgeBaseVisibilityLabel(selectedKnowledgeBase.default_visibility) }} /
+                    {{ formatDepartmentById(selectedKnowledgeBase.owner_department_id) }}
+                  </dd>
+                </div>
+              </dl>
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">可见性</span>
+                  <p class="field__hint">department 仅所属部门可访问；enterprise 对企业内可读用户可见。</p>
+                  <select v-model="knowledgeBasePermissionForm.visibility" class="control">
+                    <option value="department">department</option>
+                    <option value="enterprise">enterprise</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">所属部门</span>
+                  <p class="field__hint">权限策略中的 owner_department_id，收紧或改部门会先写 access block。</p>
+                  <select
+                    v-if="activeDepartments.length"
+                    v-model="knowledgeBasePermissionForm.ownerDepartmentId"
+                    class="control"
+                  >
+                    <option value="">请选择部门</option>
+                    <option v-for="department in activeDepartments" :key="department.id" :value="department.id">
+                      {{ formatDepartmentLabel(department) }}
+                    </option>
+                  </select>
+                  <input
+                    v-else
+                    v-model.trim="knowledgeBasePermissionForm.ownerDepartmentId"
+                    class="control"
+                    type="text"
+                    placeholder="输入 department id"
+                  />
+                </label>
+                <label class="confirm confirm--inline modal-confirm">
+                  <input v-model="knowledgeBasePermissionForm.confirmedReplace" type="checkbox" />
+                  <span>确认替换知识库权限策略</span>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeKnowledgeBaseModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canReplaceSelectedKnowledgeBasePermissions">
+                {{ importAdminBusy.updatingPermissions ? "保存中..." : "保存权限" }}
+              </button>
+            </footer>
+          </form>
+
           <form v-else-if="knowledgeBaseModalMode === 'upload' && selectedImportKnowledgeBase" @submit.prevent="submitDocumentUpload">
             <div class="modal__body">
               <dl class="summary summary--compact modal-summary">
@@ -5247,6 +6173,29 @@ function isComposeDemoProvider(value: string): boolean {
                       <option value="department">department</option>
                       <option value="enterprise">enterprise</option>
                     </select>
+                  </label>
+                  <label class="field">
+                    <span class="field__label">目标文件夹</span>
+                    <p class="field__hint">留空表示导入到根目录；文件夹需要先在当前知识库中创建。</p>
+                    <select
+                      v-if="activeFolders.length"
+                      v-model="importUploadForm.folderId"
+                      class="control"
+                      :disabled="!canImportDocuments || importAdminBusy.uploading"
+                    >
+                      <option value="">根目录</option>
+                      <option v-for="folder in activeFolders" :key="folder.id" :value="folder.id">
+                        {{ formatFolderLabel(folder) }}
+                      </option>
+                    </select>
+                    <input
+                      v-else
+                      v-model.trim="importUploadForm.folderId"
+                      class="control"
+                      type="text"
+                      placeholder="可选 folder id"
+                      :disabled="!canImportDocuments || importAdminBusy.uploading"
+                    />
                   </label>
                   <label class="field">
                     <span class="field__label">幂等键</span>
@@ -5348,6 +6297,238 @@ function isComposeDemoProvider(value: string): boolean {
               </button>
             </footer>
           </div>
+        </section>
+      </div>
+
+      <div
+        v-if="folderModalMode"
+        class="modal-backdrop"
+        role="presentation"
+        @click.self="closeFolderModal"
+      >
+        <section class="modal" role="dialog" aria-modal="true" aria-labelledby="folder-modal-title">
+          <header class="modal__header">
+            <div>
+              <p class="eyebrow">文件夹管理</p>
+              <h3 id="folder-modal-title">
+                {{
+                  folderModalMode === "create"
+                    ? "新增文件夹"
+                    : folderModalMode === "edit"
+                      ? "编辑文件夹"
+                      : "删除文件夹"
+                }}
+              </h3>
+            </div>
+            <button class="button button--secondary button--small" type="button" @click="closeFolderModal">
+              关闭
+            </button>
+          </header>
+
+          <form v-if="folderModalMode === 'create' && selectedKnowledgeBase" @submit.prevent="submitCreateFolder">
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>知识库</dt>
+                  <dd>{{ formatKnowledgeBaseLabel(selectedKnowledgeBase) }}</dd>
+                </div>
+              </dl>
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">文件夹名称</span>
+                  <p class="field__hint">同一父级下不能创建重名文件夹。</p>
+                  <input v-model.trim="folderCreateForm.name" class="control" type="text" required />
+                </label>
+                <label class="field">
+                  <span class="field__label">上级文件夹</span>
+                  <p class="field__hint">留空表示根目录。</p>
+                  <select v-model="folderCreateForm.parentId" class="control">
+                    <option value="">根目录</option>
+                    <option v-for="folder in activeFolders" :key="folder.id" :value="folder.id">
+                      {{ formatFolderLabel(folder) }}
+                    </option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeFolderModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canCreateFolder">
+                {{ importAdminBusy.managingFolder ? "创建中..." : "创建文件夹" }}
+              </button>
+            </footer>
+          </form>
+
+          <form v-else-if="folderModalMode === 'edit' && selectedFolder" @submit.prevent="submitPatchFolder">
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>文件夹 ID</dt>
+                  <dd class="summary__value--break">{{ selectedFolder.id }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>当前上级</dt>
+                  <dd>{{ formatFolderById(selectedFolder.parent_id) }}</dd>
+                </div>
+              </dl>
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">文件夹名称</span>
+                  <p class="field__hint">重命名不会改变已导入文档内容。</p>
+                  <input v-model.trim="folderEditForm.name" class="control" type="text" required />
+                </label>
+                <label class="field">
+                  <span class="field__label">状态</span>
+                  <p class="field__hint">disabled/archived 会阻止后续文档导入到该目录。</p>
+                  <select v-model="folderEditForm.status" class="control">
+                    <option value="active">active</option>
+                    <option value="disabled">disabled</option>
+                    <option value="archived">archived</option>
+                  </select>
+                </label>
+                <label class="field field--full">
+                  <span class="field__label">上级文件夹</span>
+                  <p class="field__hint">不能移动到自身或自身的子目录；后端会再次校验。</p>
+                  <select v-model="folderEditForm.parentId" class="control">
+                    <option value="">根目录</option>
+                    <option v-for="folder in folderParentOptions" :key="folder.id" :value="folder.id">
+                      {{ formatFolderLabel(folder) }}
+                    </option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeFolderModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canUpdateSelectedFolder">
+                {{ importAdminBusy.managingFolder ? "保存中..." : "保存文件夹" }}
+              </button>
+            </footer>
+          </form>
+
+          <div v-else-if="folderModalMode === 'delete' && selectedFolder">
+            <div class="modal__body">
+              <div class="danger-panel">
+                <h4>确认删除文件夹</h4>
+                <p>
+                  将删除 {{ selectedFolder.name }}，并写入 access block；该文件夹下文档的清理影响由后端任务处理。
+                </p>
+                <label class="confirm confirm--inline">
+                  <input v-model="folderDangerForm.confirmedDelete" type="checkbox" />
+                  <span>确认删除该文件夹</span>
+                </label>
+              </div>
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeFolderModal">
+                取消
+              </button>
+              <button
+                class="button button--danger"
+                type="button"
+                @click="deleteSelectedFolder"
+                :disabled="!canDeleteSelectedFolder"
+              >
+                {{ importAdminBusy.managingFolder ? "删除中..." : "删除文件夹" }}
+              </button>
+            </footer>
+          </div>
+        </section>
+      </div>
+
+      <div
+        v-if="documentModalMode"
+        class="modal-backdrop"
+        role="presentation"
+        @click.self="closeDocumentModal"
+      >
+        <section class="modal modal--wide" role="dialog" aria-modal="true" aria-labelledby="document-modal-title">
+          <header class="modal__header">
+            <div>
+              <p class="eyebrow">文档管理</p>
+              <h3 id="document-modal-title">文档权限策略</h3>
+            </div>
+            <button class="button button--secondary button--small" type="button" @click="closeDocumentModal">
+              关闭
+            </button>
+          </header>
+
+          <form v-if="documentModalMode === 'permissions' && selectedAdminDocument" @submit.prevent="submitDocumentPermissions">
+            <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>文档</dt>
+                  <dd>{{ selectedAdminDocument.title }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>当前策略</dt>
+                  <dd>
+                    {{ knowledgeBaseVisibilityLabel(selectedAdminDocument.visibility) }} /
+                    {{ formatDepartmentById(selectedAdminDocument.owner_department_id) }}
+                  </dd>
+                </div>
+              </dl>
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+              <div class="form-grid form-grid--compact form-grid--modal">
+                <label class="field">
+                  <span class="field__label">可见性</span>
+                  <p class="field__hint">修改文档权限会触发权限快照更新；收紧时会写 access block。</p>
+                  <select v-model="documentPermissionForm.visibility" class="control">
+                    <option value="department">department</option>
+                    <option value="enterprise">enterprise</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">所属部门</span>
+                  <p class="field__hint">department 可见时只有该部门成员可检索。</p>
+                  <select
+                    v-if="activeDepartments.length"
+                    v-model="documentPermissionForm.ownerDepartmentId"
+                    class="control"
+                  >
+                    <option value="">请选择部门</option>
+                    <option v-for="department in activeDepartments" :key="department.id" :value="department.id">
+                      {{ formatDepartmentLabel(department) }}
+                    </option>
+                  </select>
+                  <input
+                    v-else
+                    v-model.trim="documentPermissionForm.ownerDepartmentId"
+                    class="control"
+                    type="text"
+                    placeholder="输入 department id"
+                  />
+                </label>
+                <label class="confirm confirm--inline modal-confirm">
+                  <input v-model="documentPermissionForm.confirmedReplace" type="checkbox" />
+                  <span>确认替换文档权限策略</span>
+                </label>
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeDocumentModal">
+                取消
+              </button>
+              <button class="button" type="submit" :disabled="!canReplaceSelectedDocumentPermissions">
+                {{ importAdminBusy.updatingPermissions ? "保存中..." : "保存权限" }}
+              </button>
+            </footer>
+          </form>
         </section>
       </div>
 
@@ -6543,8 +7724,106 @@ function isComposeDemoProvider(value: string): boolean {
   grid-template-columns: minmax(220px, 1fr) minmax(140px, 180px) minmax(140px, 180px) auto;
 }
 
+.list-filter--documents {
+  grid-template-columns: minmax(180px, 240px) auto;
+}
+
 .list-filter .field {
   grid-column: auto;
+}
+
+.resource-section {
+  min-width: 0;
+  border-top: 1px solid #e7ebf0;
+  padding-top: 16px;
+  display: grid;
+  gap: 18px;
+}
+
+.resource-block {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.resource-section__header,
+.document-detail-pane__header {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+}
+
+.resource-section__header h4,
+.document-detail-pane__header h4 {
+  margin: 0;
+  color: #1d2935;
+}
+
+.resource-section__header p,
+.document-detail-pane__header span {
+  margin: 4px 0 0;
+  color: #667182;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.document-detail-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.document-detail-pane {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.chunk-preview-list {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.chunk-preview-row {
+  min-width: 0;
+  border: 1px solid #e1e6ee;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.chunk-preview-row header {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.chunk-preview-row strong,
+.chunk-preview-row span,
+.chunk-preview-row p {
+  overflow-wrap: anywhere;
+}
+
+.chunk-preview-row span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.chunk-preview-row p {
+  margin: 0;
+  color: #1d2935;
+  line-height: 1.55;
 }
 
 .upload-panel {
@@ -6657,6 +7936,14 @@ function isComposeDemoProvider(value: string): boolean {
   grid-template-columns: minmax(220px, 1.25fr) minmax(90px, 0.45fr) minmax(110px, 0.55fr) minmax(170px, 0.85fr) minmax(150px, 0.75fr) minmax(230px, 1fr);
 }
 
+.entity-table--folders .entity-table__row {
+  grid-template-columns: minmax(220px, 1.35fr) minmax(100px, 0.5fr) minmax(180px, 0.9fr) minmax(150px, 0.75fr);
+}
+
+.entity-table--documents .entity-table__row {
+  grid-template-columns: minmax(220px, 1.25fr) minmax(120px, 0.6fr) minmax(100px, 0.5fr) minmax(110px, 0.55fr) minmax(190px, 0.9fr) minmax(150px, 0.75fr) minmax(190px, 0.9fr);
+}
+
 .entity-table--imports .entity-table__row {
   grid-template-columns: minmax(220px, 1.2fr) minmax(160px, 0.8fr) minmax(100px, 0.5fr) minmax(130px, 0.65fr) minmax(140px, 0.7fr) minmax(160px, 0.8fr);
 }
@@ -6667,6 +7954,11 @@ function isComposeDemoProvider(value: string): boolean {
   color: #516072;
   font-size: 12px;
   font-weight: 700;
+}
+
+.entity-table__row--selected {
+  border-color: #8ec5b1;
+  background: #f4fbf8;
 }
 
 .entity-main,
@@ -7451,7 +8743,8 @@ function isComposeDemoProvider(value: string): boolean {
   }
 
   .config-secondary-grid,
-  .config-version-strip {
+  .config-version-strip,
+  .document-detail-grid {
     grid-template-columns: 1fr;
   }
 
@@ -7467,6 +8760,8 @@ function isComposeDemoProvider(value: string): boolean {
   .entity-table--users .entity-table__row,
   .entity-table--configs .entity-table__row,
   .entity-table--knowledge .entity-table__row,
+  .entity-table--folders .entity-table__row,
+  .entity-table--documents .entity-table__row,
   .entity-table--imports .entity-table__row {
     grid-template-columns: 1fr;
     align-items: start;
@@ -7507,6 +8802,7 @@ function isComposeDemoProvider(value: string): boolean {
   .panel__actions,
   .list-filter,
   .list-filter--imports,
+  .list-filter--documents,
   .modal__header,
   .modal__footer,
   .modal__body--split {

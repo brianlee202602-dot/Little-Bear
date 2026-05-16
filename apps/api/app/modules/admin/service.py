@@ -14,14 +14,17 @@ from typing import Any
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminAcceptedResult,
+    AdminChunk,
     AdminDepartment,
     AdminDepartmentList,
     AdminDocument,
     AdminDocumentList,
+    AdminDocumentVersion,
     AdminFolder,
     AdminFolderList,
     AdminKnowledgeBase,
     AdminKnowledgeBaseList,
+    AdminPermissionPolicy,
     AdminRole,
     AdminRoleBinding,
     AdminUser,
@@ -1323,6 +1326,310 @@ class AdminService:
             actor_context=actor_context,
         )
         return document
+
+    def list_document_versions(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        doc_id: str,
+        actor_context: AdminActorContext | None = None,
+    ) -> tuple[AdminDocumentVersion, ...]:
+        """读取文档内容版本列表。"""
+
+        self._ensure_actor_can_manage_documents(actor_context)
+        self.get_document(
+            session,
+            doc_id,
+            enterprise_id=enterprise_id,
+            actor_context=actor_context,
+        )
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text AS version_id,
+                        document_id::text AS document_id,
+                        version_no,
+                        status
+                    FROM document_versions
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND document_id = CAST(:doc_id AS uuid)
+                    ORDER BY version_no DESC, created_at DESC
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "doc_id": doc_id},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_DOCUMENT_VERSIONS_UNAVAILABLE",
+                "document versions cannot be read",
+                exc,
+            ) from exc
+        return tuple(_document_version_from_mapping(row._mapping) for row in rows)
+
+    def list_document_chunks(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        doc_id: str,
+        actor_context: AdminActorContext | None = None,
+    ) -> tuple[AdminChunk, ...]:
+        """读取文档 chunk 预览列表。"""
+
+        self._ensure_actor_can_manage_documents(actor_context)
+        self.get_document(
+            session,
+            doc_id,
+            enterprise_id=enterprise_id,
+            actor_context=actor_context,
+        )
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text AS chunk_id,
+                        document_id::text AS document_id,
+                        document_version_id::text AS document_version_id,
+                        text_preview,
+                        page_start,
+                        page_end,
+                        status,
+                        ordinal
+                    FROM chunks
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND document_id = CAST(:doc_id AS uuid)
+                      AND deleted_at IS NULL
+                      AND status != 'deleted'
+                    ORDER BY document_version_id, ordinal, id
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "doc_id": doc_id},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_DOCUMENT_CHUNKS_UNAVAILABLE",
+                "document chunks cannot be read",
+                exc,
+            ) from exc
+        return tuple(_admin_chunk_from_mapping(row._mapping) for row in rows)
+
+    def replace_knowledge_base_permissions(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        actor_user_id: str,
+        kb_id: str,
+        visibility: str,
+        owner_department_id: str | None,
+        confirmed: bool,
+        actor_context: AdminActorContext | None = None,
+    ) -> AdminPermissionPolicy:
+        """独立替换知识库权限策略。"""
+
+        self._ensure_actor_can_manage_permissions(actor_context)
+        if not confirmed:
+            raise AdminServiceError(
+                "ADMIN_CONFIRMATION_REQUIRED",
+                "replacing knowledge base permissions requires confirmation",
+                status_code=428,
+            )
+        current = self._load_knowledge_base(session, kb_id, enterprise_id=enterprise_id)
+        try:
+            _validate_visibility(visibility)
+        except PermissionServiceError as exc:
+            raise AdminServiceError(
+                exc.error_code,
+                exc.message,
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+                details=exc.details,
+            ) from exc
+        next_owner_department_id = current.owner_department_id
+        if owner_department_id is not None:
+            next_owner_department_id = self._resolve_department(
+                session,
+                enterprise_id=enterprise_id,
+                department_id=owner_department_id,
+            ).id
+        permission_changed = (
+            visibility != current.default_visibility
+            or next_owner_department_id != current.owner_department_id
+        )
+        if not permission_changed:
+            return AdminPermissionPolicy(
+                resource_type="knowledge_base",
+                resource_id=current.id,
+                visibility=current.default_visibility,
+                permission_version=self._load_resource_permission_version(
+                    session,
+                    enterprise_id=enterprise_id,
+                    resource_type="knowledge_base",
+                    resource_id=current.id,
+                ),
+            )
+
+        permission_tightened = _visibility_tightens(current.default_visibility, visibility) or (
+            visibility == "department" and next_owner_department_id != current.owner_department_id
+        )
+        next_policy_version = current.policy_version + 1
+        try:
+            permission_version = self._bump_permission_version(session, enterprise_id)
+            policy_id = self._replace_resource_policy(
+                session,
+                enterprise_id=enterprise_id,
+                resource_type="knowledge_base",
+                resource_id=kb_id,
+                owner_department_id=next_owner_department_id,
+                visibility=visibility,
+                policy_version=next_policy_version,
+                actor_user_id=actor_user_id,
+            )
+            snapshot = self._insert_permission_snapshot(
+                session,
+                enterprise_id=enterprise_id,
+                resource_type="knowledge_base",
+                resource_id=kb_id,
+                owner_department_id=next_owner_department_id,
+                visibility=visibility,
+                permission_version=permission_version,
+                policy_version=next_policy_version,
+                policy_id=policy_id,
+            )
+            access_block_id = None
+            if permission_tightened:
+                access_block_id = self._insert_access_block(
+                    session,
+                    enterprise_id=enterprise_id,
+                    resource_type="knowledge_base",
+                    resource_id=kb_id,
+                    reason="permission_tightened",
+                    block_level="query",
+                    actor_user_id=actor_user_id,
+                    metadata={
+                        "previous_visibility": current.default_visibility,
+                        "next_visibility": visibility,
+                        "previous_owner_department_id": current.owner_department_id,
+                        "next_owner_department_id": next_owner_department_id,
+                        "permission_version": permission_version,
+                    },
+                )
+            session.execute(
+                text(
+                    """
+                    UPDATE knowledge_bases
+                    SET owner_department_id = CAST(:owner_department_id AS uuid),
+                        default_visibility = :visibility,
+                        policy_version = :policy_version,
+                        updated_by = CAST(:actor_user_id AS uuid),
+                        updated_at = now()
+                    WHERE id = CAST(:kb_id AS uuid)
+                      AND enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND deleted_at IS NULL
+                    """
+                ),
+                {
+                    "kb_id": kb_id,
+                    "enterprise_id": enterprise_id,
+                    "owner_department_id": next_owner_department_id,
+                    "visibility": visibility,
+                    "policy_version": next_policy_version,
+                    "actor_user_id": actor_user_id,
+                },
+            )
+            self._insert_audit_log(
+                session,
+                enterprise_id=enterprise_id,
+                actor_id=actor_user_id,
+                event_name=(
+                    "knowledge_base.permission_tightened"
+                    if permission_tightened
+                    else "knowledge_base.permission_replaced"
+                ),
+                resource_type="knowledge_base",
+                resource_id=kb_id,
+                action="replace_permission",
+                result="success",
+                risk_level="critical" if permission_tightened else "high",
+                summary={
+                    "kb_id": kb_id,
+                    "previous_visibility": current.default_visibility,
+                    "next_visibility": visibility,
+                    "previous_owner_department_id": current.owner_department_id,
+                    "next_owner_department_id": next_owner_department_id,
+                    "permission_version": permission_version,
+                    "permission_snapshot_id": snapshot["snapshot_id"],
+                    "access_block_id": access_block_id,
+                },
+            )
+        except PermissionServiceError as exc:
+            raise AdminServiceError(
+                exc.error_code,
+                exc.message,
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+                details=exc.details,
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_KNOWLEDGE_BASE_PERMISSION_UPDATE_FAILED",
+                "knowledge base permissions cannot be updated",
+                exc,
+            ) from exc
+        return AdminPermissionPolicy(
+            resource_type="knowledge_base",
+            resource_id=kb_id,
+            visibility=visibility,
+            permission_version=permission_version,
+        )
+
+    def replace_document_permissions(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        actor_user_id: str,
+        doc_id: str,
+        visibility: str,
+        owner_department_id: str | None,
+        confirmed: bool,
+        actor_context: AdminActorContext | None = None,
+    ) -> AdminPermissionPolicy:
+        """独立替换文档权限策略。"""
+
+        self._ensure_actor_can_manage_permissions(actor_context)
+        if not confirmed:
+            raise AdminServiceError(
+                "ADMIN_CONFIRMATION_REQUIRED",
+                "replacing document permissions requires confirmation",
+                status_code=428,
+            )
+        permission_actor = _permission_admin_actor_context(actor_context)
+        document = self.patch_document(
+            session,
+            enterprise_id=enterprise_id,
+            actor_user_id=actor_user_id,
+            doc_id=doc_id,
+            owner_department_id=owner_department_id,
+            visibility=visibility,
+            confirmed_visibility_expand=True,
+            actor_context=permission_actor,
+        )
+        return AdminPermissionPolicy(
+            resource_type="document",
+            resource_id=document.id,
+            visibility=document.visibility,
+            permission_version=self._load_resource_permission_version(
+                session,
+                enterprise_id=enterprise_id,
+                resource_type="document",
+                resource_id=document.id,
+            ),
+        )
 
     def patch_document(
         self,
@@ -3687,6 +3994,20 @@ class AdminService:
                 details={"required_scope": "document:manage"},
             )
 
+    def _ensure_actor_can_manage_permissions(
+        self,
+        actor_context: AdminActorContext | None,
+    ) -> None:
+        if actor_context is None:
+            return
+        if not _has_scope(actor_context.scopes, "permission:manage"):
+            raise AdminServiceError(
+                "ADMIN_SCOPE_REQUIRED",
+                "permission management requires permission:manage",
+                status_code=403,
+                details={"required_scope": "permission:manage"},
+            )
+
     def _ensure_actor_can_manage_kb_owner(
         self,
         actor_context: AdminActorContext | None,
@@ -4005,6 +4326,47 @@ class AdminService:
             {"version": version},
         )
         return version
+
+    def _load_resource_permission_version(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        resource_type: str,
+        resource_id: str,
+    ) -> int:
+        row = session.execute(
+            text(
+                """
+                SELECT permission_version
+                FROM permission_snapshots
+                WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                  AND resource_type = :resource_type
+                  AND resource_id = CAST(:resource_id AS uuid)
+                ORDER BY created_at DESC, permission_version DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "enterprise_id": enterprise_id,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+            },
+        ).one_or_none()
+        if row is not None:
+            return int(row._mapping["permission_version"])
+        row = session.execute(
+            text(
+                """
+                SELECT permission_version
+                FROM enterprises
+                WHERE id = CAST(:enterprise_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"enterprise_id": enterprise_id},
+        ).one()
+        return int(row._mapping["permission_version"])
 
     def _bump_org_version(self, session: Session, enterprise_id: str) -> int:
         row = session.execute(
@@ -4430,6 +4792,27 @@ def _document_from_mapping(row: Any) -> AdminDocument:
     )
 
 
+def _document_version_from_mapping(row: Any) -> AdminDocumentVersion:
+    return AdminDocumentVersion(
+        id=row["version_id"],
+        document_id=row["document_id"],
+        version_no=int(row["version_no"]),
+        status=row["status"],
+    )
+
+
+def _admin_chunk_from_mapping(row: Any) -> AdminChunk:
+    return AdminChunk(
+        id=row["chunk_id"],
+        document_id=row["document_id"],
+        document_version_id=row["document_version_id"],
+        text_preview=row["text_preview"],
+        page_start=_optional_int(row["page_start"]),
+        page_end=_optional_int(row["page_end"]),
+        status=row["status"],
+    )
+
+
 def _role_binding_from_mapping(row: Any) -> AdminRoleBinding:
     return AdminRoleBinding(
         id=row["binding_id"],
@@ -4506,6 +4889,22 @@ def _has_scope(scopes: tuple[str, ...], required_scope: str) -> bool:
         return True
     prefix = required_scope.split(":", maxsplit=1)[0]
     return f"{prefix}:*" in scopes
+
+
+def _permission_admin_actor_context(
+    actor_context: AdminActorContext | None,
+) -> AdminActorContext | None:
+    if actor_context is None:
+        return None
+    scopes = set(actor_context.scopes)
+    scopes.update({"document:manage", "knowledge_base:manage"})
+    return AdminActorContext(
+        user_id=actor_context.user_id,
+        scopes=tuple(sorted(scopes)),
+        department_ids=actor_context.department_ids,
+        knowledge_base_ids=actor_context.knowledge_base_ids,
+        can_manage_all_knowledge_bases=True,
+    )
 
 
 def _validate_visibility(visibility: str) -> None:
@@ -4590,6 +4989,10 @@ def _changed_update_fields(updates: list[str]) -> list[str]:
             continue
         changed_fields.append(field)
     return changed_fields
+
+
+def _optional_int(value: Any) -> int | None:
+    return value if isinstance(value, int) else None
 
 
 def _normalize_folder_name(name: str) -> str:

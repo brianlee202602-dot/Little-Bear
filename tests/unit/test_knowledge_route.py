@@ -8,8 +8,11 @@ from app.modules.knowledge import (
     AccessibleChunk,
     AccessibleDocument,
     AccessibleDocumentList,
+    AccessibleDocumentPreview,
+    AccessibleDocumentVersion,
     AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
+    AccessiblePreviewCitation,
 )
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
@@ -164,6 +167,81 @@ def test_list_documents_route_requires_document_read_scope(monkeypatch) -> None:
     assert response.json()["data"][0]["title"] == "员工手册"
 
 
+def test_get_document_route_requires_document_read_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def get_document(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AccessibleDocument(
+            id=kwargs["document_id"],
+            kb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            folder_id=None,
+            title="员工手册",
+            lifecycle_status="active",
+            index_status="indexed",
+            owner_department_id="22222222-2222-2222-2222-222222222222",
+            visibility="enterprise",
+            current_version_id="55555555-5555-5555-5555-555555555555",
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        authenticate,
+    )
+    monkeypatch.setattr("app.api.routes.knowledge.KnowledgeService.get_document", get_document)
+
+    response = TestClient(_create_test_app()).get(
+        "/internal/v1/documents/44444444-4444-4444-4444-444444444444",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "document:read"
+    assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
+    assert response.json()["data"]["title"] == "员工手册"
+
+
+def test_list_document_versions_route_returns_versions(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def list_document_versions(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return (
+            AccessibleDocumentVersion(
+                id="55555555-5555-5555-5555-555555555555",
+                document_id=kwargs["document_id"],
+                version_no=1,
+                status="active",
+            ),
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        lambda *_args, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.knowledge.KnowledgeService.list_document_versions",
+        list_document_versions,
+    )
+
+    response = TestClient(_create_test_app()).get(
+        "/internal/v1/documents/44444444-4444-4444-4444-444444444444/versions",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
+    assert response.json()["data"][0]["version_no"] == 1
+
+
 def test_list_document_chunks_route_returns_chunk_previews(monkeypatch) -> None:
     seen: dict[str, object] = {}
 
@@ -200,3 +278,46 @@ def test_list_document_chunks_route_returns_chunk_previews(monkeypatch) -> None:
     assert response.status_code == 200
     assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
     assert response.json()["data"][0]["text_preview"] == "员工年假需要提前申请"
+
+
+def test_get_document_preview_route_returns_preview(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def get_document_preview(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AccessibleDocumentPreview(
+            doc_id=kwargs["document_id"],
+            title="员工手册",
+            preview="员工年假需要提前申请",
+            citations=(
+                AccessiblePreviewCitation(
+                    source_id="chunk_1",
+                    doc_id=kwargs["document_id"],
+                    document_version_id="55555555-5555-5555-5555-555555555555",
+                    title="员工手册",
+                    page_start=1,
+                    page_end=2,
+                    score=1.0,
+                ),
+            ),
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        lambda *_args, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.knowledge.KnowledgeService.get_document_preview",
+        get_document_preview,
+    )
+
+    response = TestClient(_create_test_app()).get(
+        "/internal/v1/documents/44444444-4444-4444-4444-444444444444/preview",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
+    assert response.json()["data"]["preview"] == "员工年假需要提前申请"

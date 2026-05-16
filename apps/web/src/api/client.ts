@@ -105,6 +105,23 @@ export interface DocumentListResponse {
   pagination: PaginationData;
 }
 
+export interface DocumentResponse {
+  request_id: string;
+  data: DocumentData;
+}
+
+export interface DocumentVersionData {
+  id: string;
+  document_id: string;
+  version_no: number;
+  status: string;
+}
+
+export interface DocumentVersionListResponse {
+  request_id: string;
+  data: DocumentVersionData[];
+}
+
 export interface ChunkData {
   id: string;
   document_id: string;
@@ -118,6 +135,18 @@ export interface ChunkData {
 export interface ChunkListResponse {
   request_id: string;
   data: ChunkData[];
+}
+
+export interface DocumentPreviewData {
+  doc_id: string;
+  title: string;
+  preview: string;
+  citations: CitationData[];
+}
+
+export interface DocumentPreviewResponse {
+  request_id: string;
+  data: DocumentPreviewData;
 }
 
 export type QueryMode = "answer" | "search";
@@ -232,12 +261,51 @@ export async function listDocuments(
   );
 }
 
+export async function getDocument(
+  documentId: string,
+  accessToken: string,
+): Promise<DocumentResponse> {
+  return requestJson<DocumentResponse>(
+    `/internal/v1/documents/${encodeURIComponent(documentId)}`,
+    {
+      method: "GET",
+    },
+    accessToken,
+  );
+}
+
+export async function listDocumentVersions(
+  documentId: string,
+  accessToken: string,
+): Promise<DocumentVersionListResponse> {
+  return requestJson<DocumentVersionListResponse>(
+    `/internal/v1/documents/${encodeURIComponent(documentId)}/versions`,
+    {
+      method: "GET",
+    },
+    accessToken,
+  );
+}
+
 export async function listDocumentChunks(
   documentId: string,
   accessToken: string,
 ): Promise<ChunkListResponse> {
   return requestJson<ChunkListResponse>(
     `/internal/v1/documents/${encodeURIComponent(documentId)}/chunks`,
+    {
+      method: "GET",
+    },
+    accessToken,
+  );
+}
+
+export async function getDocumentPreview(
+  documentId: string,
+  accessToken: string,
+): Promise<DocumentPreviewResponse> {
+  return requestJson<DocumentPreviewResponse>(
+    `/internal/v1/documents/${encodeURIComponent(documentId)}/preview`,
     {
       method: "GET",
     },

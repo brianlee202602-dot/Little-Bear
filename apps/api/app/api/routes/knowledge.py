@@ -11,16 +11,24 @@ from app.api.schemas.knowledge import (
     ChunkListResponse,
     DocumentData,
     DocumentListResponse,
+    DocumentPreviewData,
+    DocumentPreviewResponse,
+    DocumentResponse,
+    DocumentVersionData,
+    DocumentVersionListResponse,
     KnowledgeBaseData,
     KnowledgeBaseListResponse,
     PaginationData,
 )
+from app.api.schemas.query import CitationData
 from app.db.session import session_scope
 from app.modules.auth.errors import AuthServiceError
 from app.modules.auth.service import AuthService
 from app.modules.knowledge import (
     AccessibleChunk,
     AccessibleDocument,
+    AccessibleDocumentPreview,
+    AccessibleDocumentVersion,
     AccessibleKnowledgeBase,
     KnowledgeService,
     KnowledgeServiceError,
@@ -104,6 +112,61 @@ async def list_documents(
     )
 
 
+@router.get("/documents/{doc_id}", response_model=DocumentResponse)
+async def get_document(
+    doc_id: str,
+    authorization: str | None = Header(default=None),
+) -> DocumentResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = KnowledgeService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:read")
+            document = service.get_document(
+                session,
+                user_id=auth_context.user.id,
+                enterprise_id=auth_context.user.enterprise_id,
+                document_id=doc_id,
+                request_id=_request_id(),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="document_get")
+    except KnowledgeServiceError as exc:
+        return _knowledge_error_response(exc, stage="document_get")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="document_get")
+    return DocumentResponse(request_id=_request_id(), data=_document_data(document))
+
+
+@router.get("/documents/{doc_id}/versions", response_model=DocumentVersionListResponse)
+async def list_document_versions(
+    doc_id: str,
+    authorization: str | None = Header(default=None),
+) -> DocumentVersionListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = KnowledgeService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:read")
+            versions = service.list_document_versions(
+                session,
+                user_id=auth_context.user.id,
+                enterprise_id=auth_context.user.enterprise_id,
+                document_id=doc_id,
+                request_id=_request_id(),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="document_version_list")
+    except KnowledgeServiceError as exc:
+        return _knowledge_error_response(exc, stage="document_version_list")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="document_version_list")
+    return DocumentVersionListResponse(
+        request_id=_request_id(),
+        data=[_document_version_data(item) for item in versions],
+    )
+
+
 @router.get("/documents/{doc_id}/chunks", response_model=ChunkListResponse)
 async def list_document_chunks(
     doc_id: str,
@@ -131,6 +194,32 @@ async def list_document_chunks(
         request_id=_request_id(),
         data=[_chunk_data(item) for item in chunks],
     )
+
+
+@router.get("/documents/{doc_id}/preview", response_model=DocumentPreviewResponse)
+async def get_document_preview(
+    doc_id: str,
+    authorization: str | None = Header(default=None),
+) -> DocumentPreviewResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = KnowledgeService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:read")
+            preview = service.get_document_preview(
+                session,
+                user_id=auth_context.user.id,
+                enterprise_id=auth_context.user.enterprise_id,
+                document_id=doc_id,
+                request_id=_request_id(),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="document_preview")
+    except KnowledgeServiceError as exc:
+        return _knowledge_error_response(exc, stage="document_preview")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="document_preview")
+    return DocumentPreviewResponse(request_id=_request_id(), data=_document_preview_data(preview))
 
 
 def _authenticate(session: object, token: str | None, *, required_scope: str):
@@ -167,6 +256,15 @@ def _document_data(item: AccessibleDocument) -> DocumentData:
     )
 
 
+def _document_version_data(item: AccessibleDocumentVersion) -> DocumentVersionData:
+    return DocumentVersionData(
+        id=item.id,
+        document_id=item.document_id,
+        version_no=item.version_no,
+        status=item.status,
+    )
+
+
 def _chunk_data(item: AccessibleChunk) -> ChunkData:
     return ChunkData(
         id=item.id,
@@ -176,6 +274,26 @@ def _chunk_data(item: AccessibleChunk) -> ChunkData:
         page_start=item.page_start,
         page_end=item.page_end,
         status=item.status,
+    )
+
+
+def _document_preview_data(item: AccessibleDocumentPreview) -> DocumentPreviewData:
+    return DocumentPreviewData(
+        doc_id=item.doc_id,
+        title=item.title,
+        preview=item.preview,
+        citations=[
+            CitationData(
+                source_id=citation.source_id,
+                doc_id=citation.doc_id,
+                document_version_id=citation.document_version_id,
+                title=citation.title,
+                page_start=citation.page_start,
+                page_end=citation.page_end,
+                score=citation.score,
+            )
+            for citation in item.citations
+        ],
     )
 
 

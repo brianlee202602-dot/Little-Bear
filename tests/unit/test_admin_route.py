@@ -6,10 +6,12 @@ from app.main import create_app
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminAcceptedResult,
+    AdminChunk,
     AdminDepartment,
     AdminDepartmentList,
     AdminDocument,
     AdminDocumentList,
+    AdminDocumentVersion,
     AdminFolder,
     AdminKnowledgeBase,
     AdminKnowledgeBaseList,
@@ -739,6 +741,85 @@ def test_document_get_route_requires_document_manage_scope(monkeypatch) -> None:
     assert seen["doc_id"] == "doc_1"
     assert seen["enterprise_id"] == "ent_1"
     assert response.json()["data"]["current_version_id"] == "version_1"
+
+
+def test_document_versions_route_requires_document_manage_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_document_versions(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return (
+            AdminDocumentVersion(
+                id="version_1",
+                document_id=kwargs["doc_id"],
+                version_no=1,
+                status="active",
+            ),
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.list_document_versions",
+        list_document_versions,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/documents/doc_1/versions",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "document:manage"
+    assert seen["doc_id"] == "doc_1"
+    assert response.json()["data"][0]["version_no"] == 1
+
+
+def test_document_chunks_route_requires_document_manage_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_document_chunks(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return (
+            AdminChunk(
+                id="chunk_1",
+                document_id=kwargs["doc_id"],
+                document_version_id="version_1",
+                text_preview="制度正文",
+                page_start=1,
+                page_end=1,
+                status="active",
+            ),
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.list_document_chunks",
+        list_document_chunks,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/documents/doc_1/chunks",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "document:manage"
+    assert seen["doc_id"] == "doc_1"
+    assert response.json()["data"][0]["text_preview"] == "制度正文"
 
 
 def test_document_patch_route_passes_visibility_confirmation(monkeypatch) -> None:

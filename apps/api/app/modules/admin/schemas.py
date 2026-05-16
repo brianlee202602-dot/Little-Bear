@@ -116,6 +116,33 @@ class AdminDocumentList:
 
 
 @dataclass(frozen=True)
+class AdminDocumentVersion:
+    id: str
+    document_id: str
+    version_no: int
+    status: str
+
+
+@dataclass(frozen=True)
+class AdminChunk:
+    id: str
+    document_id: str
+    document_version_id: str
+    text_preview: str
+    page_start: int | None
+    page_end: int | None
+    status: str
+
+
+@dataclass(frozen=True)
+class AdminPermissionPolicy:
+    resource_type: str
+    resource_id: str
+    visibility: str
+    permission_version: int
+
+
+@dataclass(frozen=True)
 class AdminRoleBinding:
     id: str
     role_id: str

@@ -9,8 +9,11 @@ from app.modules.knowledge.schemas import (
     AccessibleChunk,
     AccessibleDocument,
     AccessibleDocumentList,
+    AccessibleDocumentPreview,
+    AccessibleDocumentVersion,
     AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
+    AccessiblePreviewCitation,
 )
 from app.modules.permissions import PermissionService, PermissionServiceError
 from app.modules.permissions.schemas import PermissionContext
@@ -193,6 +196,127 @@ class KnowledgeService:
             total=int(total_row._mapping["total"]),
         )
 
+    def get_document(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        enterprise_id: str,
+        document_id: str,
+        request_id: str | None = None,
+    ) -> AccessibleDocument:
+        context = self._permission_context(
+            session,
+            user_id=user_id,
+            enterprise_id=enterprise_id,
+            request_id=request_id,
+            required_scope="document:read",
+        )
+        document_kb_id = self._load_document_kb_id(
+            session,
+            enterprise_id=context.enterprise_id,
+            document_id=document_id,
+        )
+        active_index_ids = self._load_active_index_versions(
+            session,
+            enterprise_id=context.enterprise_id,
+            kb_ids=(document_kb_id,),
+        )
+        if not active_index_ids:
+            raise KnowledgeServiceError(
+                "KNOWLEDGE_DOCUMENT_NOT_FOUND",
+                "document is not accessible",
+                status_code=404,
+                details={"document_id": document_id},
+            )
+        permission_filter = self.permission_service.build_filter(
+            context,
+            kb_ids=(document_kb_id,),
+            active_index_version_ids=active_index_ids,
+            required_scope="document:read",
+        )
+        params = dict(permission_filter.params)
+        params["document_id"] = document_id
+        try:
+            row = session.execute(
+                text(
+                    f"""
+                    SELECT DISTINCT
+                        d.id::text AS document_id,
+                        d.kb_id::text AS kb_id,
+                        d.folder_id::text AS folder_id,
+                        d.title,
+                        d.lifecycle_status,
+                        d.index_status,
+                        d.owner_department_id::text AS owner_department_id,
+                        d.visibility,
+                        d.current_version_id::text AS current_version_id
+                    FROM documents d
+                    JOIN chunks c ON c.document_id = d.id
+                    JOIN chunk_index_refs cir ON cir.chunk_id = c.id
+                    WHERE {permission_filter.metadata_where_sql}
+                      AND d.id = CAST(:document_id AS uuid)
+                    LIMIT 1
+                    """
+                ),
+                params,
+            ).one_or_none()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "KNOWLEDGE_DOCUMENT_UNAVAILABLE",
+                "document cannot be read",
+                exc,
+            ) from exc
+        if row is None:
+            raise KnowledgeServiceError(
+                "KNOWLEDGE_DOCUMENT_NOT_FOUND",
+                "document is not accessible",
+                status_code=404,
+                details={"document_id": document_id},
+            )
+        return _document_from_mapping(row._mapping)
+
+    def list_document_versions(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        enterprise_id: str,
+        document_id: str,
+        request_id: str | None = None,
+    ) -> tuple[AccessibleDocumentVersion, ...]:
+        self.get_document(
+            session,
+            user_id=user_id,
+            enterprise_id=enterprise_id,
+            document_id=document_id,
+            request_id=request_id,
+        )
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text AS version_id,
+                        document_id::text AS document_id,
+                        version_no,
+                        status
+                    FROM document_versions
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND document_id = CAST(:document_id AS uuid)
+                    ORDER BY version_no DESC, created_at DESC
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "document_id": document_id},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "KNOWLEDGE_DOCUMENT_VERSIONS_UNAVAILABLE",
+                "document versions cannot be read",
+                exc,
+            ) from exc
+        return tuple(_document_version_from_mapping(row._mapping) for row in rows)
+
     def list_document_chunks(
         self,
         session: Session,
@@ -259,6 +383,58 @@ class KnowledgeService:
                 exc,
             ) from exc
         return tuple(_chunk_from_mapping(row._mapping) for row in rows)
+
+    def get_document_preview(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        enterprise_id: str,
+        document_id: str,
+        request_id: str | None = None,
+    ) -> AccessibleDocumentPreview:
+        document = self.get_document(
+            session,
+            user_id=user_id,
+            enterprise_id=enterprise_id,
+            document_id=document_id,
+            request_id=request_id,
+        )
+        chunks = self.list_document_chunks(
+            session,
+            user_id=user_id,
+            enterprise_id=enterprise_id,
+            document_id=document_id,
+            request_id=request_id,
+        )
+        preview_parts: list[str] = []
+        remaining = 8000
+        citations: list[AccessiblePreviewCitation] = []
+        for chunk in chunks:
+            if remaining > 0:
+                text_preview = chunk.text_preview.strip()
+                if text_preview:
+                    preview_parts.append(text_preview[:remaining])
+                    remaining -= len(preview_parts[-1])
+            if len(citations) < 20:
+                page_start = chunk.page_start or 0
+                citations.append(
+                    AccessiblePreviewCitation(
+                        source_id=chunk.id,
+                        doc_id=document.id,
+                        document_version_id=chunk.document_version_id,
+                        title=document.title,
+                        page_start=page_start,
+                        page_end=chunk.page_end or page_start,
+                        score=1.0,
+                    )
+                )
+        return AccessibleDocumentPreview(
+            doc_id=document.id,
+            title=document.title,
+            preview="\n\n".join(preview_parts),
+            citations=tuple(citations),
+        )
 
     def _permission_context(
         self,
@@ -397,6 +573,15 @@ def _document_from_mapping(row: Any) -> AccessibleDocument:
         owner_department_id=str(row["owner_department_id"]),
         visibility=str(row["visibility"]),
         current_version_id=_optional_str(row.get("current_version_id")),
+    )
+
+
+def _document_version_from_mapping(row: Any) -> AccessibleDocumentVersion:
+    return AccessibleDocumentVersion(
+        id=str(row["version_id"]),
+        document_id=str(row["document_id"]),
+        version_no=int(row["version_no"]),
+        status=str(row["status"]),
     )
 
 

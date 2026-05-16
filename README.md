@@ -153,8 +153,9 @@ make PYTHON=.venv/bin/python smoke-p0
 - 设计文档和工程契约已收敛，包含 MVP、OpenAPI、数据库 Schema、权限矩阵、状态机、审计事件字典和测试计划。
 - 后端控制面已初步落地：初始化、setup token、active config、Secret Store、认证会话、配置管理、用户/部门/角色绑定管理、审计查询和健康检查。
 - 数据库迁移已覆盖 P0 大部分核心表：配置、认证、组织、权限、知识库、文档、索引、导入任务、审计、查询日志和模型调用日志。
-- 管理后台已接入 setup、登录、配置、用户、部门、角色绑定和审计查询。
+- 管理后台已接入 setup、登录、配置、用户、部门、角色绑定、审计查询和知识库运营页面；知识库页面已支持知识库 CRUD、文件夹 CRUD、指定文件夹上传、文档列表、文档版本、chunk 预览以及知识库 / 文档权限变更。
 - Permission Service 核心已落地；管理端知识库、文件夹和文档元数据管理已接入权限边界。
+- 文档详情、文档版本、chunk 来源、普通用户文档预览，以及知识库 / 文档独立权限变更 API 已补齐。
 - Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、MinIO/S3 对象存储交接、PDF / DOCX / UTF-8 文本 / Markdown parse-clean-chunk、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入和 active index 发布。
 - Query Service 非流式链路已落地：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、rerank provider、Permission Service filter、候选 gate、Context Builder、LLM provider、citation 校验、query_logs、model_call_logs 和高风险 query audit 写入；rerank、LLM 不可用或 citation 校验失败时结构化降级。
 - Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、降级状态、request_id 和 trace_id 展示。
@@ -165,6 +166,5 @@ make PYTHON=.venv/bin/python smoke-p0
 建议下一步按以下顺序推进：
 
 1. 持续保持实际 FastAPI routes 与 `docs/contracts/openapi.yaml` 的契约对齐。
-2. 补齐文档版本、chunk、预览和独立权限变更 API。
-3. 增加真实 MinIO + Worker + API 联调记录、查询回归数据集与 P0 smoke 真实环境执行记录。
-4. 将 Query Stream 从服务端缓冲式 SSE 升级为 provider token 级流式输出。
+2. 增加真实 MinIO + Worker + API 联调记录、查询回归数据集与 P0 smoke 真实环境执行记录。
+3. 将 Query Stream 从服务端缓冲式 SSE 升级为 provider token 级流式输出。

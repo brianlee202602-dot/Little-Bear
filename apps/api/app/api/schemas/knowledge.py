@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from app.api.schemas.query import CitationData
+
 
 class PaginationData(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -57,6 +59,29 @@ class DocumentListResponse(BaseModel):
     pagination: PaginationData
 
 
+class DocumentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: DocumentData
+
+
+class DocumentVersionData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    document_id: str
+    version_no: int
+    status: str
+
+
+class DocumentVersionListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[DocumentVersionData]
+
+
 class ChunkData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -74,3 +99,19 @@ class ChunkListResponse(BaseModel):
 
     request_id: str
     data: list[ChunkData]
+
+
+class DocumentPreviewData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    doc_id: str
+    title: str
+    preview: str
+    citations: list[CitationData]
+
+
+class DocumentPreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: DocumentPreviewData

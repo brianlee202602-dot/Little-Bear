@@ -19,6 +19,7 @@ from app.api.routes import (
     health,
     import_pipeline,
     knowledge,
+    permissions,
     query,
     setup,
 )
@@ -58,6 +59,7 @@ def create_app(*, run_startup_checks: bool = True) -> FastAPI:
     app.include_router(health.router)
     app.include_router(import_pipeline.router)
     app.include_router(knowledge.router)
+    app.include_router(permissions.router)
     app.include_router(query.router)
     app.include_router(setup.router)
     return app

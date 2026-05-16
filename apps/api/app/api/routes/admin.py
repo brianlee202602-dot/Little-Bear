@@ -45,12 +45,20 @@ from app.api.schemas.admin import (
     UserResponse,
 )
 from app.api.schemas.config import PaginationData
+from app.api.schemas.knowledge import (
+    ChunkData,
+    ChunkListResponse,
+    DocumentVersionData,
+    DocumentVersionListResponse,
+)
 from app.db.session import session_scope
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminAcceptedResult,
+    AdminChunk,
     AdminDepartment,
     AdminDocument,
+    AdminDocumentVersion,
     AdminFolder,
     AdminKnowledgeBase,
     AdminRole,
@@ -877,6 +885,62 @@ async def get_document(
     return DocumentResponse(request_id=_request_id(), data=_document_data(document))
 
 
+@router.get("/documents/{doc_id}/versions", response_model=DocumentVersionListResponse)
+async def list_document_versions(
+    doc_id: str,
+    authorization: str | None = Header(default=None),
+) -> DocumentVersionListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:manage")
+            versions = service.list_document_versions(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                doc_id=doc_id,
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_document_version_list")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_document_version_list")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_document_version_list")
+    return DocumentVersionListResponse(
+        request_id=_request_id(),
+        data=[_document_version_data(version) for version in versions],
+    )
+
+
+@router.get("/documents/{doc_id}/chunks", response_model=ChunkListResponse)
+async def list_document_chunks(
+    doc_id: str,
+    authorization: str | None = Header(default=None),
+) -> ChunkListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:manage")
+            chunks = service.list_document_chunks(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                doc_id=doc_id,
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_document_chunk_list")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_document_chunk_list")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_document_chunk_list")
+    return ChunkListResponse(
+        request_id=_request_id(),
+        data=[_admin_chunk_data(chunk) for chunk in chunks],
+    )
+
+
 @router.patch("/documents/{doc_id}", response_model=DocumentResponse)
 async def patch_document(
     doc_id: str,
@@ -1219,6 +1283,27 @@ def _document_data(document: AdminDocument) -> DocumentData:
         owner_department_id=document.owner_department_id,
         visibility=document.visibility,
         current_version_id=document.current_version_id,
+    )
+
+
+def _document_version_data(version: AdminDocumentVersion) -> DocumentVersionData:
+    return DocumentVersionData(
+        id=version.id,
+        document_id=version.document_id,
+        version_no=version.version_no,
+        status=version.status,
+    )
+
+
+def _admin_chunk_data(chunk: AdminChunk) -> ChunkData:
+    return ChunkData(
+        id=chunk.id,
+        document_id=chunk.document_id,
+        document_version_id=chunk.document_version_id,
+        text_preview=chunk.text_preview,
+        page_start=chunk.page_start,
+        page_end=chunk.page_end,
+        status=chunk.status,
     )
 
 

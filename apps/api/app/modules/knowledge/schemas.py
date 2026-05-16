@@ -42,6 +42,14 @@ class AccessibleDocumentList:
 
 
 @dataclass(frozen=True)
+class AccessibleDocumentVersion:
+    id: str
+    document_id: str
+    version_no: int
+    status: str
+
+
+@dataclass(frozen=True)
 class AccessibleChunk:
     id: str
     document_id: str
@@ -50,3 +58,22 @@ class AccessibleChunk:
     page_start: int | None
     page_end: int | None
     status: str
+
+
+@dataclass(frozen=True)
+class AccessiblePreviewCitation:
+    source_id: str
+    doc_id: str
+    document_version_id: str
+    title: str
+    page_start: int
+    page_end: int
+    score: float
+
+
+@dataclass(frozen=True)
+class AccessibleDocumentPreview:
+    doc_id: str
+    title: str
+    preview: str
+    citations: tuple[AccessiblePreviewCitation, ...]
