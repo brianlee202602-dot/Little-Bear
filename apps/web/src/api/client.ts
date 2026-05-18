@@ -149,6 +149,26 @@ export interface DocumentPreviewResponse {
   data: DocumentPreviewData;
 }
 
+export interface CitationSourceData {
+  source_id: string;
+  doc_id: string;
+  document_version_id: string;
+  title: string;
+  text: string;
+  text_preview: string;
+  page_start: number | null;
+  page_end: number | null;
+  ordinal: number;
+  heading_path: string | null;
+  source_offsets: Record<string, unknown> | null;
+  text_status: "object" | "preview_only" | "object_unavailable";
+}
+
+export interface CitationSourceResponse {
+  request_id: string;
+  data: CitationSourceData;
+}
+
 export type QueryMode = "answer" | "search";
 export type QueryConfidence = "low" | "medium" | "high";
 
@@ -310,6 +330,20 @@ export async function getDocumentPreview(
 ): Promise<DocumentPreviewResponse> {
   return requestJson<DocumentPreviewResponse>(
     `/internal/v1/documents/${encodeURIComponent(documentId)}/preview`,
+    {
+      method: "GET",
+    },
+    accessToken,
+  );
+}
+
+export async function getCitationSource(
+  documentId: string,
+  sourceId: string,
+  accessToken: string,
+): Promise<CitationSourceResponse> {
+  return requestJson<CitationSourceResponse>(
+    `/internal/v1/documents/${encodeURIComponent(documentId)}/sources/${encodeURIComponent(sourceId)}`,
     {
       method: "GET",
     },

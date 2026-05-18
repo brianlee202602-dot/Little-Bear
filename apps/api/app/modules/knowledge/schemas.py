@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,22 @@ class AccessibleChunk:
     page_start: int | None
     page_end: int | None
     status: str
+
+
+@dataclass(frozen=True)
+class AccessibleCitationSource:
+    source_id: str
+    doc_id: str
+    document_version_id: str
+    title: str
+    text: str
+    text_preview: str
+    page_start: int | None
+    page_end: int | None
+    ordinal: int
+    heading_path: str | None
+    source_offsets: dict[str, Any] | None
+    text_status: str
 
 
 @dataclass(frozen=True)

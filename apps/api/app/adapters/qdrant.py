@@ -114,11 +114,13 @@ class QdrantVectorIndexWriter:
         embedding_client: EmbeddingClient,
         api_key: str | None = None,
         timeout_seconds: float = 3.0,
+        vector_distance: str = "Cosine",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.embedding_client = embedding_client
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.vector_distance = vector_distance
 
     def upsert_draft_points(self, points: tuple[DraftVectorPoint, ...]) -> None:
         if not points:
@@ -143,6 +145,8 @@ class QdrantVectorIndexWriter:
             )
 
         for collection_name, collection_points in grouped.items():
+            vector_size = len(collection_points[0]["vector"])
+            self._ensure_collection(collection_name, vector_size=vector_size)
             _send_json(
                 _points_url(self.base_url, collection_name),
                 {"points": collection_points},
@@ -150,6 +154,60 @@ class QdrantVectorIndexWriter:
                 timeout_seconds=self.timeout_seconds,
                 api_key=self.api_key,
             )
+
+    def _ensure_collection(self, collection_name: str, *, vector_size: int) -> None:
+        try:
+            info = _send_json(
+                _collection_url(self.base_url, collection_name),
+                None,
+                method="GET",
+                timeout_seconds=self.timeout_seconds,
+                api_key=self.api_key,
+            )
+        except QdrantClientError as exc:
+            if exc.status_code != 404:
+                raise
+            self._create_collection(collection_name, vector_size=vector_size)
+            return
+
+        existing_size = _collection_vector_size(info)
+        if existing_size is not None and existing_size != vector_size:
+            raise QdrantClientError(
+                "qdrant collection vector size mismatch: "
+                f"collection={collection_name}, expected={vector_size}, actual={existing_size}"
+            )
+
+    def _create_collection(self, collection_name: str, *, vector_size: int) -> None:
+        try:
+            _send_json(
+                _collection_url(self.base_url, collection_name),
+                {
+                    "vectors": {
+                        "size": vector_size,
+                        "distance": self.vector_distance,
+                    }
+                },
+                method="PUT",
+                timeout_seconds=self.timeout_seconds,
+                api_key=self.api_key,
+            )
+        except QdrantClientError as exc:
+            # 多 Worker 首次导入同一 collection 时可能并发创建；409 后重读一次即可。
+            if exc.status_code != 409:
+                raise
+            info = _send_json(
+                _collection_url(self.base_url, collection_name),
+                None,
+                method="GET",
+                timeout_seconds=self.timeout_seconds,
+                api_key=self.api_key,
+            )
+            existing_size = _collection_vector_size(info)
+            if existing_size is not None and existing_size != vector_size:
+                raise QdrantClientError(
+                    "qdrant collection vector size mismatch: "
+                    f"collection={collection_name}, expected={vector_size}, actual={existing_size}"
+                ) from exc
 
     def activate_points(
         self,
@@ -200,16 +258,20 @@ class QdrantVectorIndexWriter:
 class QdrantClientError(Exception):
     """Qdrant 请求或响应不可用。"""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 def _send_json(
     url: str,
-    payload: dict[str, Any],
+    payload: dict[str, Any] | None,
     *,
     method: str,
     timeout_seconds: float,
     api_key: str | None,
 ) -> Any:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"content-type": "application/json", "accept": "application/json"}
     if api_key:
         headers["api-key"] = api_key
@@ -219,11 +281,15 @@ def _send_json(
             status = getattr(response, "status", 200)
             response_body = response.read()
     except HTTPError as exc:
-        raise QdrantClientError(f"qdrant returned HTTP {exc.code}") from exc
+        response_body = exc.read()
+        raise QdrantClientError(
+            _http_error_message(exc.code, response_body),
+            status_code=exc.code,
+        ) from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise QdrantClientError(f"qdrant request failed: {exc.__class__.__name__}") from exc
     if status < 200 or status >= 300:
-        raise QdrantClientError(f"qdrant returned HTTP {status}")
+        raise QdrantClientError(_http_error_message(status, response_body), status_code=status)
     if not response_body:
         return {}
     try:
@@ -338,6 +404,46 @@ def _points_url(base_url: str, collection_name: str) -> str:
 def _payload_url(base_url: str, collection_name: str) -> str:
     encoded_collection = quote(collection_name, safe="")
     return f"{base_url.rstrip('/')}/collections/{encoded_collection}/points/payload"
+
+
+def _collection_url(base_url: str, collection_name: str) -> str:
+    encoded_collection = quote(collection_name, safe="")
+    return f"{base_url.rstrip('/')}/collections/{encoded_collection}"
+
+
+def _collection_vector_size(response: Any) -> int | None:
+    if not isinstance(response, dict):
+        return None
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None
+    config = result.get("config")
+    if not isinstance(config, dict):
+        return None
+    params = config.get("params")
+    if not isinstance(params, dict):
+        return None
+    vectors = params.get("vectors")
+    if isinstance(vectors, dict):
+        size = vectors.get("size")
+        if isinstance(size, int):
+            return size
+        default_vector = vectors.get("default")
+        if isinstance(default_vector, dict) and isinstance(default_vector.get("size"), int):
+            return int(default_vector["size"])
+    return None
+
+
+def _http_error_message(status: int, response_body: bytes | None) -> str:
+    if not response_body:
+        return f"qdrant returned HTTP {status}"
+    try:
+        body_text = response_body.decode("utf-8", errors="replace").strip()
+    except Exception:
+        body_text = ""
+    if not body_text:
+        return f"qdrant returned HTTP {status}"
+    return f"qdrant returned HTTP {status}: {body_text[:500]}"
 
 
 def _unique(values: tuple[str, ...]) -> tuple[str, ...]:

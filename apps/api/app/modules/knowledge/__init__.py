@@ -3,6 +3,7 @@
 from app.modules.knowledge.errors import KnowledgeServiceError
 from app.modules.knowledge.schemas import (
     AccessibleChunk,
+    AccessibleCitationSource,
     AccessibleDocument,
     AccessibleDocumentList,
     AccessibleDocumentPreview,
@@ -15,6 +16,7 @@ from app.modules.knowledge.service import KnowledgeService
 
 __all__ = [
     "AccessibleChunk",
+    "AccessibleCitationSource",
     "AccessibleDocument",
     "AccessibleDocumentList",
     "AccessibleDocumentPreview",

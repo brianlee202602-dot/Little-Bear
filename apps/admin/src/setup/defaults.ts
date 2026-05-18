@@ -45,6 +45,7 @@ export interface SetupFormModel {
   vectorTopK: number;
   keywordTopK: number;
   rerankInputTopK: number;
+  rerankMinScore: number;
   finalContextTopK: number;
   maxContextTokens: number;
   chunkDefaultSizeTokens: number;
@@ -130,8 +131,9 @@ export function createDefaultSetupForm(): SetupFormModel {
     vectorTopK: 20,
     keywordTopK: 20,
     rerankInputTopK: 20,
+    rerankMinScore: 0.05,
     finalContextTopK: 8,
-    maxContextTokens: 6000,
+    maxContextTokens: 1500,
     chunkDefaultSizeTokens: 800,
     chunkOverlapTokens: 120,
     chunkStrategyMode: "heading_paragraph",
@@ -316,6 +318,11 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
           max_retries: 0,
           backoff_ms: 0,
         },
+        openai_extra_body: {
+          chat_template_kwargs: {
+            enable_thinking: false,
+          },
+        },
       },
       auth: {
         password_min_length: form.passwordMinLength,
@@ -342,6 +349,7 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
           low_ocr_penalty: 0.8,
         },
         rerank_input_top_k: form.rerankInputTopK,
+        rerank_min_score: form.rerankMinScore,
         final_context_top_k: form.finalContextTopK,
         max_context_tokens: form.maxContextTokens,
         rewrite_enabled: false,
@@ -429,10 +437,10 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
         query_total_ms: 8000,
         auth_permission_ms: 100,
         rewrite_ms: 300,
-        embedding_ms: 500,
+        embedding_ms: 3000,
         vector_search_ms: 500,
         keyword_search_ms: 500,
-        rerank_ms: 800,
+        rerank_ms: 3000,
         context_ms: 200,
         postprocess_ms: 300,
       },

@@ -172,6 +172,28 @@ class _FailingCandidateReranker:
         )
 
 
+class _LowScoreCandidateReranker:
+    def rerank(self, *, query_text, candidates, texts, top_k) -> RerankResult:
+        ranked = tuple(
+            replace(candidate, rank=rank, score=0.01 / rank)
+            for rank, candidate in enumerate(candidates[:top_k], start=1)
+        )
+        return RerankResult(
+            candidates=ranked,
+            model_call=RetrievalModelCall(
+                model_type="rerank",
+                model_name="bge-reranker",
+                model_version=None,
+                model_route_hash="rerank-route",
+                status="success",
+                degraded=False,
+                latency_ms=12,
+                input_hash="rerank-input",
+                output_hash="rerank-output",
+            ),
+        )
+
+
 def test_create_query_returns_fused_permission_gated_citations_and_logs() -> None:
     vector_retriever = _FakeVectorRetriever(candidates=(_vector_candidate(),))
     session = _FakeSession(
@@ -250,6 +272,7 @@ def test_create_query_returns_fused_permission_gated_citations_and_logs() -> Non
                     )
                 ]
             ),
+            _Result(all_rows=_candidate_fact_rows(include_vector=True)),
             _Result(),
         ]
     )
@@ -367,6 +390,53 @@ def test_create_query_degrades_when_reranker_fails() -> None:
     assert audit_params["error_code"] == "RERANK_PROVIDER_UNAVAILABLE"
     assert session.executed[-1][1]["degraded"] is True
     assert session.executed[-1][1]["degrade_reason"] == "RERANK_PROVIDER_UNAVAILABLE"
+
+
+def test_create_query_filters_low_relevance_rerank_candidates_before_llm() -> None:
+    session = _session_with_one_keyword_candidate(rerank_chunks=True)
+
+    result = QueryService(
+        vector_retriever=_FakeVectorRetriever(),
+        candidate_reranker=_LowScoreCandidateReranker(),
+        rerank_min_score=0.05,
+        answer_service=AnswerService(chat_client=_FakeChatClient()),
+    ).create_query(
+        session,
+        user_id=USER_ID,
+        enterprise_id=ENTERPRISE_ID,
+        kb_ids=[KB_ID],
+        query_text="怎么开始采购项目",
+        mode="answer",
+        filters={},
+        top_k=3,
+        include_sources=True,
+        request_id="req_query",
+        trace_id="trace_query",
+    )
+
+    assert result.citations == ()
+    assert result.context is not None
+    assert result.context.chunks == ()
+    assert "相关性过低" in result.answer
+    assert result.degraded is True
+    assert result.degrade_reason == "retrieval_relevance_too_low;llm_context_empty"
+    model_log_params = [
+        params
+        for statement, params in session.executed
+        if "INSERT INTO model_call_logs" in statement
+    ]
+    assert [params["caller"] for params in model_log_params] == ["query.rerank"]
+    audit_params = next(
+        params
+        for statement, params in session.executed
+        if "INSERT INTO audit_logs" in statement
+    )
+    assert audit_params["event_name"] == "query.relevance_gate_failed"
+    assert audit_params["error_code"] == "retrieval_relevance_too_low"
+    assert session.executed[-1][1]["degrade_reason"] == (
+        "retrieval_relevance_too_low;llm_context_empty"
+    )
+    assert session.executed[-1][1]["citation_count"] == 0
 
 
 def test_create_query_degrades_to_keyword_when_vector_retriever_unavailable() -> None:
@@ -539,6 +609,81 @@ def test_create_query_degrades_and_audits_unauthorized_llm_citation() -> None:
     assert session.executed[-1][1]["degrade_reason"] == "citation_unauthorized"
 
 
+def test_create_query_degrades_invalid_llm_citation_format_without_permission_alarm() -> None:
+    session = _session_with_one_keyword_candidate(context_chunks=True)
+
+    result = QueryService(
+        vector_retriever=_FakeVectorRetriever(),
+        answer_service=AnswerService(
+            chat_client=_FakeChatClient(
+                content="根据资料未找到明确规定。[source:无相关资料]"
+            )
+        ),
+    ).create_query(
+        session,
+        user_id=USER_ID,
+        enterprise_id=ENTERPRISE_ID,
+        kb_ids=[KB_ID],
+        query_text="员工手册",
+        mode="answer",
+        filters={},
+        top_k=3,
+        include_sources=True,
+        request_id="req_query",
+        trace_id="trace_query",
+    )
+
+    assert "不存在的引用占位符" in result.answer
+    assert result.degraded is True
+    assert result.degrade_reason == "citation_invalid_format"
+    audit_params = next(
+        params
+        for statement, params in session.executed
+        if "INSERT INTO audit_logs" in statement
+    )
+    assert audit_params["event_name"] == "query.citation_validation_failed"
+    assert audit_params["risk_level"] == "medium"
+    assert audit_params["error_code"] == "citation_invalid_format"
+    assert "无相关资料" in audit_params["summary_json"]
+
+
+def test_create_query_auto_attaches_sources_when_llm_omits_citations() -> None:
+    session = _session_with_one_keyword_candidate(context_chunks=True)
+
+    result = QueryService(
+        vector_retriever=_FakeVectorRetriever(),
+        answer_service=AnswerService(
+            chat_client=_FakeChatClient(content="员工年假需要提前在系统中提交申请。")
+        ),
+    ).create_query(
+        session,
+        user_id=USER_ID,
+        enterprise_id=ENTERPRISE_ID,
+        kb_ids=[KB_ID],
+        query_text="员工手册",
+        mode="answer",
+        filters={},
+        top_k=3,
+        include_sources=True,
+        request_id="req_query",
+        trace_id="trace_query",
+    )
+
+    assert "员工年假需要提前在系统中提交申请。" in result.answer
+    assert f"[source:{CHUNK_ID}]" in result.answer
+    assert result.degraded is True
+    assert result.degrade_reason == "citation_auto_attached"
+    audit_params = next(
+        params
+        for statement, params in session.executed
+        if "INSERT INTO audit_logs" in statement
+    )
+    assert audit_params["event_name"] == "query.citation_validation_failed"
+    assert audit_params["risk_level"] == "medium"
+    assert audit_params["error_code"] == "citation_auto_attached"
+    assert "original_degrade_reason" in audit_params["summary_json"]
+
+
 def test_create_query_degrades_when_llm_provider_fails() -> None:
     session = _session_with_one_keyword_candidate(context_chunks=True)
 
@@ -700,6 +845,7 @@ def _session_with_one_keyword_candidate(
                 )
             ]
         ),
+        _Result(all_rows=_candidate_fact_rows(include_vector=True)),
     ]
     if rerank_chunks:
         results.append(
@@ -742,6 +888,43 @@ def _session_with_one_keyword_candidate(
         )
     results.append(_Result())
     return _FakeSession(results)
+
+
+def _candidate_fact_rows(*, include_vector: bool = False) -> list[_Row]:
+    rows = [_candidate_fact_row(chunk_id=CHUNK_ID, page_start=1, page_end=2)]
+    if include_vector:
+        rows.append(_candidate_fact_row(chunk_id=VECTOR_CHUNK_ID, page_start=3, page_end=3))
+    return rows
+
+
+def _candidate_fact_row(
+    *,
+    chunk_id: str,
+    page_start: int,
+    page_end: int,
+    access_blocked: bool = False,
+) -> _Row:
+    return _Row(
+        {
+            "enterprise_id": ENTERPRISE_ID,
+            "kb_id": KB_ID,
+            "document_id": DOC_ID,
+            "document_version_id": DOC_VERSION_ID,
+            "chunk_id": chunk_id,
+            "title": "员工手册",
+            "owner_department_id": DEPARTMENT_ID,
+            "visibility": "department",
+            "document_lifecycle_status": "active",
+            "document_index_status": "indexed",
+            "chunk_status": "active",
+            "visibility_state": "active",
+            "index_version_id": INDEX_VERSION_ID,
+            "indexed_permission_version": 15,
+            "page_start": page_start,
+            "page_end": page_end,
+            "access_blocked": access_blocked,
+        }
+    )
 
 
 def _vector_candidate() -> RetrievalCandidate:

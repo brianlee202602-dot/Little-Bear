@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from urllib.error import URLError
+from io import BytesIO
+from urllib.error import HTTPError, URLError
 
 import pytest
 from app.adapters import QdrantVectorIndexWriter, QdrantVectorRetriever
@@ -153,14 +154,22 @@ def test_qdrant_vector_retriever_degrades_when_qdrant_request_fails(monkeypatch)
 
 
 def test_qdrant_vector_index_writer_upserts_draft_points(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: list[dict[str, object]] = []
 
     def _urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["method"] = request.get_method()
-        captured["timeout"] = timeout
-        captured["headers"] = dict(request.header_items())
-        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "timeout": timeout,
+                "headers": dict(request.header_items()),
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        if request.get_method() == "GET":
+            return _Response(
+                {"result": {"config": {"params": {"vectors": {"size": 2, "distance": "Cosine"}}}}}
+            )
         return _Response({"result": {"status": "acknowledged"}})
 
     monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
@@ -181,12 +190,48 @@ def test_qdrant_vector_index_writer_upserts_draft_points(monkeypatch) -> None:
         )
     )
 
-    assert captured["method"] == "PUT"
-    assert captured["url"] == "http://qdrant:6333/collections/little_bear_p0/points"
-    assert captured["timeout"] == 2.0
-    assert captured["body"]["points"][0]["id"] == "11111111-1111-5111-8111-111111111111"
-    assert captured["body"]["points"][0]["vector"] == [0.1, 0.2]
-    assert captured["body"]["points"][0]["payload"]["visibility_state"] == "draft"
+    assert captured[0]["method"] == "GET"
+    assert captured[0]["url"] == "http://qdrant:6333/collections/little_bear_p0"
+    assert captured[1]["method"] == "PUT"
+    assert captured[1]["url"] == "http://qdrant:6333/collections/little_bear_p0/points"
+    assert captured[1]["timeout"] == 2.0
+    assert captured[1]["body"]["points"][0]["id"] == "11111111-1111-5111-8111-111111111111"
+    assert captured[1]["body"]["points"][0]["vector"] == [0.1, 0.2]
+    assert captured[1]["body"]["points"][0]["payload"]["visibility_state"] == "draft"
+
+
+def test_qdrant_vector_index_writer_creates_missing_collection(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    def _urlopen(request, timeout):
+        captured.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        if request.get_method() == "GET":
+            raise HTTPError(
+                request.full_url,
+                404,
+                "not found",
+                hdrs={},
+                fp=BytesIO(b'{"status":{"error":"not found"}}'),
+            )
+        return _Response({"result": {"status": "acknowledged"}})
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    QdrantVectorIndexWriter(
+        base_url="http://qdrant:6333",
+        embedding_client=_EmbeddingClient(),
+    ).upsert_draft_points((_draft_point(),))
+
+    assert [item["method"] for item in captured] == ["GET", "PUT", "PUT"]
+    assert captured[1]["url"] == "http://qdrant:6333/collections/little_bear_p0"
+    assert captured[1]["body"] == {"vectors": {"size": 2, "distance": "Cosine"}}
+    assert captured[2]["url"] == "http://qdrant:6333/collections/little_bear_p0/points"
 
 
 def test_qdrant_vector_index_writer_wraps_embedding_failure(monkeypatch) -> None:

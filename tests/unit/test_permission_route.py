@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from app.main import create_app
-from app.modules.admin.schemas import AdminPermissionPolicy
+from app.modules.admin.schemas import (
+    AdminKnowledgeBaseAccessRule,
+    AdminKnowledgeBasePermissionPolicy,
+    AdminPermissionPolicy,
+)
 from app.modules.auth.schemas import AuthContext, AuthDepartment, AuthRole, AuthUser
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
@@ -122,10 +126,19 @@ def test_put_knowledge_base_permissions_requires_confirmation(monkeypatch) -> No
 
     def replace_knowledge_base_permissions(_self, _session, **kwargs):
         seen.update(kwargs)
-        return AdminPermissionPolicy(
+        return AdminKnowledgeBasePermissionPolicy(
             resource_type="knowledge_base",
             resource_id=kwargs["kb_id"],
-            visibility=kwargs["visibility"],
+            kb_visibility=kwargs["kb_visibility"],
+            default_document_visibility=kwargs["default_document_visibility"],
+            default_document_owner_department_id=kwargs["default_document_owner_department_id"],
+            access_rules=(
+                AdminKnowledgeBaseAccessRule(
+                    subject_type="department",
+                    subject_id="department_1",
+                    permission="query",
+                ),
+            ),
             permission_version=22,
         )
 
@@ -144,10 +157,26 @@ def test_put_knowledge_base_permissions_requires_confirmation(monkeypatch) -> No
     response = client.put(
         "/internal/v1/knowledge-bases/kb_1/permissions",
         headers={"authorization": "Bearer access.jwt"},
-        json={"visibility": "department"},
+        json={
+            "kb_visibility": "department_acl",
+            "default_document_visibility": "department",
+            "default_document_owner_department_id": "department_1",
+            "access_rules": [
+                {
+                    "subject_type": "department",
+                    "subject_id": "department_1",
+                    "permission": "query",
+                }
+            ],
+        },
     )
 
     assert response.status_code == 200
     assert seen["kb_id"] == "kb_1"
+    assert seen["kb_visibility"] == "department_acl"
+    assert seen["default_document_visibility"] == "department"
+    assert seen["default_document_owner_department_id"] == "department_1"
     assert seen["confirmed"] is False
+    assert seen["access_rules"][0].subject_id == "department_1"
     assert response.json()["data"]["resource_type"] == "knowledge_base"
+    assert response.json()["data"]["kb_visibility"] == "department_acl"

@@ -110,7 +110,7 @@ class PermissionService:
         kb_ids: list[str] | tuple[str, ...] | None = None,
         active_index_version_ids: list[str] | tuple[str, ...] | None = None,
         required_scope: str | None = None,
-        fail_closed_on_stale_index: bool = True,
+        fail_closed_on_stale_index: bool = False,
     ) -> PermissionFilter:
         if required_scope:
             self.require_scope(context, required_scope)
@@ -302,16 +302,6 @@ class PermissionService:
                 "PERM_ACCESS_BLOCKED",
                 "candidate chunk is not active",
                 chunk_status=candidate.chunk_status,
-            )
-        if (
-            candidate.indexed_permission_version is not None
-            and candidate.indexed_permission_version < context.permission_version
-        ):
-            return _gate_denied(
-                "PERM_VERSION_STALE",
-                "candidate indexed permission version is stale",
-                indexed_permission_version=candidate.indexed_permission_version,
-                permission_version=context.permission_version,
             )
         if candidate.visibility == "enterprise":
             return CandidateGateResult(allowed=True, reason="enterprise_visible")

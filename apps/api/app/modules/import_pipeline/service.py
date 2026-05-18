@@ -734,12 +734,23 @@ class ImportService:
         error_code: str,
         error_message: str,
         retryable: bool,
+        error_details: dict[str, Any] | None = None,
         retry_delay_seconds: int = 60,
     ) -> ImportJob:
         row = self._load_claimed_job(session, job_id=job_id, worker_id=worker_id)
         should_retry = retryable and int(row["attempt_count"]) < int(row["max_attempts"])
         status = "retrying" if should_retry else "failed"
         next_retry_at = datetime.now(UTC) + timedelta(seconds=max(retry_delay_seconds, 1))
+        error_details_json = json.dumps(
+            {
+                "error_code": error_code,
+                "error_message": error_message[:500],
+                "retryable": retryable,
+                "details": error_details or {},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         updated = session.execute(
             text(
                 """
@@ -750,6 +761,12 @@ class ImportService:
                     next_retry_at = :next_retry_at,
                     error_code = :error_code,
                     error_message = :error_message,
+                    result_json = jsonb_set(
+                        COALESCE(result_json, '{}'::jsonb),
+                        '{last_error}',
+                        CAST(:error_details_json AS jsonb),
+                        true
+                    ),
                     finished_at = CASE WHEN :status = 'failed' THEN now() ELSE finished_at END,
                     updated_at = now()
                 WHERE id = CAST(:job_id AS uuid)
@@ -769,6 +786,7 @@ class ImportService:
                 "next_retry_at": next_retry_at if should_retry else None,
                 "error_code": error_code,
                 "error_message": error_message[:500],
+                "error_details_json": error_details_json,
             },
         ).one()
         job = _job_from_mapping(updated._mapping)
@@ -782,6 +800,7 @@ class ImportService:
                 "status": status,
                 "error_code": error_code,
                 "retryable": retryable,
+                "details": error_details or {},
             },
         )
         return job

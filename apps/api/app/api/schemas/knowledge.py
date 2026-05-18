@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -101,6 +101,30 @@ class ChunkListResponse(BaseModel):
 
     request_id: str
     data: list[ChunkData]
+
+
+class CitationSourceData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    doc_id: str
+    document_version_id: str
+    title: str
+    text: str
+    text_preview: str
+    page_start: int | None = None
+    page_end: int | None = None
+    ordinal: int
+    heading_path: str | None = None
+    source_offsets: dict[str, Any] | None = None
+    text_status: Literal["object", "preview_only", "object_unavailable"]
+
+
+class CitationSourceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: CitationSourceData
 
 
 class DocumentPreviewData(BaseModel):

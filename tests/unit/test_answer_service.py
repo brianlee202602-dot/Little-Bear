@@ -50,6 +50,29 @@ class _ChatClient:
         )
 
 
+class _ThinkingChatClient:
+    def complete(self, *, messages, temperature, max_tokens) -> ChatCompletionResult:
+        return ChatCompletionResult(
+            content="<think>先分析内部资料。</think>\n员工年假需要提前申请。[source:chunk_1]",
+            token_usage={"prompt_tokens": 12, "completion_tokens": 12},
+        )
+
+    def stream_complete(self, *, messages, temperature, max_tokens):
+        yield ChatCompletionChunk(content_delta="<thi")
+        yield ChatCompletionChunk(content_delta="nk>先分析")
+        yield ChatCompletionChunk(content_delta="内部资料。</think>\n员工")
+        yield ChatCompletionChunk(content_delta="年假需要提前申请。")
+        yield ChatCompletionChunk(content_delta="[source:chunk_1]")
+
+
+class _ThinkingOnlyChatClient:
+    def complete(self, *, messages, temperature, max_tokens) -> ChatCompletionResult:
+        return ChatCompletionResult(
+            content="<think>只有内部推理，没有最终答案。</think>",
+            token_usage={"prompt_tokens": 12, "completion_tokens": 8},
+        )
+
+
 def test_answer_service_generates_answer_from_query_context() -> None:
     chat_client = _ChatClient()
 
@@ -67,8 +90,31 @@ def test_answer_service_generates_answer_from_query_context() -> None:
     messages = chat_client.calls[0]["messages"]
     assert isinstance(messages[0], ChatMessage)
     assert "只能基于用户可访问的资料回答" in messages[0].content
+    assert "不要输出 [source:无相关资料]" in messages[0].content
+    assert "本次允许引用的 source id：chunk_1" in messages[1].content
     assert "[source:chunk_1]" in messages[1].content
     assert "员工年假需要提前申请" in messages[1].content
+
+
+def test_answer_service_strips_thinking_blocks_from_answer() -> None:
+    result = AnswerService(chat_client=_ThinkingChatClient()).generate(
+        query_context=_query_context()
+    )
+
+    assert result.answer == "员工年假需要提前申请。[source:chunk_1]"
+    assert "<think>" not in result.answer
+    assert "先分析" not in result.answer
+
+
+def test_answer_service_degrades_when_filtered_answer_is_empty() -> None:
+    result = AnswerService(chat_client=_ThinkingOnlyChatClient()).generate(
+        query_context=_query_context()
+    )
+
+    assert result.answer == ""
+    assert result.degraded is True
+    assert result.degrade_reason == "LLM_PROVIDER_RESPONSE_INVALID"
+    assert result.token_usage == {"prompt_tokens": 12, "completion_tokens": 8}
 
 
 def test_answer_service_streams_answer_from_query_context() -> None:
@@ -87,6 +133,20 @@ def test_answer_service_streams_answer_from_query_context() -> None:
     assert runner.result.degraded is False
     assert runner.result.token_usage == {"prompt_tokens": 12, "completion_tokens": 6}
     assert chat_client.calls[0]["stream"] is True
+
+
+def test_answer_service_stream_filters_thinking_blocks() -> None:
+    runner = AnswerService(chat_client=_ThinkingChatClient()).stream(
+        query_context=_query_context()
+    )
+
+    tokens = list(runner.stream_tokens())
+
+    assert "".join(tokens) == "员工年假需要提前申请。[source:chunk_1]"
+    assert runner.result is not None
+    assert runner.result.answer == "员工年假需要提前申请。[source:chunk_1]"
+    assert "<think>" not in runner.result.answer
+    assert "先分析" not in runner.result.answer
 
 
 def test_answer_service_degrades_without_context_or_llm_client() -> None:

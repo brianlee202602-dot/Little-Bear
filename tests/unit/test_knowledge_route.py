@@ -6,6 +6,7 @@ from app.main import create_app
 from app.modules.auth.schemas import AuthContext, AuthRole, AuthUser
 from app.modules.knowledge import (
     AccessibleChunk,
+    AccessibleCitationSource,
     AccessibleDocument,
     AccessibleDocumentList,
     AccessibleDocumentPreview,
@@ -325,3 +326,49 @@ def test_get_document_preview_route_returns_preview(monkeypatch) -> None:
     assert response.status_code == 200
     assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
     assert response.json()["data"]["preview"] == "员工年假需要提前申请"
+
+
+def test_get_document_source_route_returns_verifiable_source(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def get_document_source(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AccessibleCitationSource(
+            source_id=kwargs["source_id"],
+            doc_id=kwargs["document_id"],
+            document_version_id="55555555-5555-5555-5555-555555555555",
+            title="员工手册",
+            text="员工年假需要提前申请。",
+            text_preview="员工年假需要提前申请",
+            page_start=1,
+            page_end=2,
+            ordinal=1,
+            heading_path="制度/请假",
+            source_offsets={"chunk_ordinal": 1},
+            text_status="object",
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        lambda *_args, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.knowledge.KnowledgeService.get_document_source",
+        get_document_source,
+    )
+
+    response = TestClient(_create_test_app()).get(
+        (
+            "/internal/v1/documents/44444444-4444-4444-4444-444444444444"
+            "/sources/66666666-6666-6666-6666-666666666666"
+        ),
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
+    assert seen["source_id"] == "66666666-6666-6666-6666-666666666666"
+    assert response.json()["data"]["text"] == "员工年假需要提前申请。"
+    assert response.json()["data"]["text_status"] == "object"

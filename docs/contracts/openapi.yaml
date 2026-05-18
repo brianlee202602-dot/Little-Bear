@@ -472,6 +472,27 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /internal/v1/documents/{doc_id}/sources/{source_id}:
+    get:
+      tags: [KnowledgeBase]
+      summary: Get verifiable citation source
+      operationId: getDocumentSource
+      x-token-type: access
+      x-required-scope: document:read
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+        - $ref: "#/components/parameters/SourceId"
+      responses:
+        "200":
+          description: Citation source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CitationSourceResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
   /internal/v1/import-jobs/{job_id}:
     get:
       tags: [Import]
@@ -2064,6 +2085,12 @@ components:
       required: true
       schema:
         type: string
+    SourceId:
+      name: source_id
+      in: path
+      required: true
+      schema:
+        type: string
     FolderId:
       name: folder_id
       in: path
@@ -2876,6 +2903,51 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Chunk"
+    CitationSource:
+      type: object
+      required:
+        - source_id
+        - doc_id
+        - document_version_id
+        - title
+        - text
+        - text_preview
+        - ordinal
+        - text_status
+      properties:
+        source_id:
+          type: string
+        doc_id:
+          type: string
+        document_version_id:
+          type: string
+        title:
+          type: string
+        text:
+          type: string
+        text_preview:
+          type: string
+        page_start:
+          type: [integer, "null"]
+        page_end:
+          type: [integer, "null"]
+        ordinal:
+          type: integer
+        heading_path:
+          type: [string, "null"]
+        source_offsets:
+          type: [object, "null"]
+          additionalProperties: true
+        text_status:
+          type: string
+          enum: [object, preview_only, object_unavailable]
+    CitationSourceResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/CitationSource"
     DocumentPreviewResponse:
       type: object
       properties:

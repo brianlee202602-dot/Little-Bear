@@ -17,7 +17,7 @@ from app.modules.models import (
     ModelGatewayEmbeddingClient,
     ModelGatewayRerankClient,
 )
-from app.modules.query.service import QueryService
+from app.modules.query.service import DEFAULT_RERANK_MIN_SCORE, QueryService
 from app.modules.retrieval import (
     ModelCandidateReranker,
     NoopCandidateReranker,
@@ -60,6 +60,7 @@ def build_query_service(session: Session) -> QueryService:
         vector_retriever=vector_retriever,
         candidate_reranker=candidate_reranker,
         rerank_input_top_k=_rerank_input_top_k(config),
+        rerank_min_score=_rerank_min_score(config),
         context_builder=_build_context_builder(config),
         answer_service=answer_service,
     )
@@ -164,7 +165,7 @@ def _build_candidate_reranker(session: Session, config: dict[str, Any]):
         auth_token=_secret_value(session, provider_auth_ref),
         timeout_seconds=_timeout_seconds(
             json_int(timeout_config, "rerank_ms"),
-            default_ms=800,
+            default_ms=3000,
         ),
     )
     return ModelCandidateReranker(rerank_client=rerank_client)
@@ -181,6 +182,15 @@ def _rerank_path(provider: dict[str, Any]) -> str:
 def _rerank_input_top_k(config: dict[str, Any]) -> int:
     retrieval_config = as_dict(config.get("retrieval"))
     return json_int(retrieval_config, "rerank_input_top_k") or 20
+
+
+def _rerank_min_score(config: dict[str, Any]) -> float:
+    retrieval_config = as_dict(config.get("retrieval"))
+    return _json_float(
+        retrieval_config,
+        "rerank_min_score",
+        default=DEFAULT_RERANK_MIN_SCORE,
+    )
 
 
 def _build_context_builder(config: dict[str, Any]) -> ContextBuilder:

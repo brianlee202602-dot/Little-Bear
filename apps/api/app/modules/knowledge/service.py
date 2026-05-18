@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.modules.knowledge.errors import KnowledgeServiceError
 from app.modules.knowledge.schemas import (
     AccessibleChunk,
+    AccessibleCitationSource,
     AccessibleDocument,
     AccessibleDocumentList,
     AccessibleDocumentPreview,
@@ -18,14 +20,21 @@ from app.modules.knowledge.schemas import (
 from app.modules.permissions import PermissionService, PermissionServiceError
 from app.modules.permissions.schemas import PermissionContext
 from app.modules.permissions.service import knowledge_base_access_where_sql
+from app.modules.storage.service import ObjectStorage
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 
 class KnowledgeService:
-    def __init__(self, *, permission_service: PermissionService | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        permission_service: PermissionService | None = None,
+        object_storage: ObjectStorage | None = None,
+    ) -> None:
         self.permission_service = permission_service or PermissionService()
+        self.object_storage = object_storage
 
     def list_knowledge_bases(
         self,
@@ -443,6 +452,128 @@ class KnowledgeService:
             citations=tuple(citations),
         )
 
+    def get_document_source(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        enterprise_id: str,
+        document_id: str,
+        source_id: str,
+        request_id: str | None = None,
+    ) -> AccessibleCitationSource:
+        context = self._permission_context(
+            session,
+            user_id=user_id,
+            enterprise_id=enterprise_id,
+            request_id=request_id,
+            required_scope="document:read",
+        )
+        document_kb_id = self._load_document_kb_id(
+            session,
+            enterprise_id=context.enterprise_id,
+            document_id=document_id,
+        )
+        self._ensure_queryable_knowledge_base(session, context, kb_id=document_kb_id)
+        active_index_ids = self._load_active_index_versions(
+            session,
+            enterprise_id=context.enterprise_id,
+            kb_ids=(document_kb_id,),
+        )
+        if not active_index_ids:
+            raise KnowledgeServiceError(
+                "KNOWLEDGE_SOURCE_NOT_FOUND",
+                "source is not accessible",
+                status_code=404,
+                details={"document_id": document_id, "source_id": source_id},
+            )
+        permission_filter = self.permission_service.build_filter(
+            context,
+            kb_ids=(document_kb_id,),
+            active_index_version_ids=active_index_ids,
+            required_scope="document:read",
+        )
+        params = dict(permission_filter.params)
+        params.update({"document_id": document_id, "source_id": source_id})
+        try:
+            row = session.execute(
+                text(
+                    f"""
+                    SELECT DISTINCT
+                        c.id::text AS chunk_id,
+                        c.document_id::text AS document_id,
+                        c.document_version_id::text AS document_version_id,
+                        c.text_object_key,
+                        c.text_preview,
+                        c.heading_path,
+                        c.source_offsets,
+                        c.page_start,
+                        c.page_end,
+                        c.status,
+                        c.ordinal,
+                        d.title
+                    FROM documents d
+                    JOIN chunks c ON c.document_id = d.id
+                    JOIN chunk_index_refs cir ON cir.chunk_id = c.id
+                    WHERE {permission_filter.metadata_where_sql}
+                      AND d.id = CAST(:document_id AS uuid)
+                      AND c.id = CAST(:source_id AS uuid)
+                    LIMIT 1
+                    """
+                ),
+                params,
+            ).one_or_none()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "KNOWLEDGE_SOURCE_UNAVAILABLE",
+                "source cannot be read",
+                exc,
+            ) from exc
+        if row is None:
+            raise KnowledgeServiceError(
+                "KNOWLEDGE_SOURCE_NOT_FOUND",
+                "source is not accessible",
+                status_code=404,
+                details={"document_id": document_id, "source_id": source_id},
+            )
+        return self._source_from_mapping(row._mapping)
+
+    def _source_from_mapping(self, row: Any) -> AccessibleCitationSource:
+        text_preview = str(row["text_preview"])
+        object_key = _optional_str(row.get("text_object_key"))
+        text, text_status = self._read_source_text(
+            object_key=object_key,
+            text_preview=text_preview,
+        )
+        return AccessibleCitationSource(
+            source_id=str(row["chunk_id"]),
+            doc_id=str(row["document_id"]),
+            document_version_id=str(row["document_version_id"]),
+            title=str(row["title"]),
+            text=text,
+            text_preview=text_preview,
+            page_start=_optional_int(row.get("page_start")),
+            page_end=_optional_int(row.get("page_end")),
+            ordinal=int(row["ordinal"]),
+            heading_path=_optional_str(row.get("heading_path")),
+            source_offsets=_json_mapping(row.get("source_offsets")),
+            text_status=text_status,
+        )
+
+    def _read_source_text(
+        self,
+        *,
+        object_key: str | None,
+        text_preview: str,
+    ) -> tuple[str, str]:
+        if not object_key or self.object_storage is None:
+            return text_preview, "preview_only"
+        try:
+            content = self.object_storage.get_object(object_key=object_key)
+        except (KeyError, OSError):
+            return text_preview, "object_unavailable"
+        return content.decode("utf-8", errors="replace"), "object"
+
     def _permission_context(
         self,
         session: Session,
@@ -629,6 +760,18 @@ def _optional_str(value: Any) -> str | None:
 
 def _optional_int(value: Any) -> int | None:
     return value if isinstance(value, int) else None
+
+
+def _json_mapping(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 def _database_error(

@@ -11,7 +11,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from app.modules.answer import AnswerService
@@ -46,6 +46,11 @@ from sqlalchemy.orm import Session
 MAX_QUERY_LENGTH = 4000
 SUPPORTED_FILTERS = {"department_scope", "updated_after", "source_type", "tags"}
 SOURCE_REF_PATTERN = re.compile(r"\[source:([^\]\s]+)\]")
+SOURCE_ID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+DEFAULT_RERANK_MIN_SCORE = 0.05
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,12 @@ class _QueryAuditEvent:
     risk_level: Literal["medium", "high", "critical"]
     error_code: str | None
     summary: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _CurrentCandidateFacts:
+    candidate: RetrievalCandidate
+    access_blocked: bool
 
 
 @dataclass(frozen=True)
@@ -109,6 +120,7 @@ class QueryService:
         vector_retriever: VectorRetriever | None = None,
         candidate_reranker: CandidateReranker | None = None,
         rerank_input_top_k: int = 20,
+        rerank_min_score: float = DEFAULT_RERANK_MIN_SCORE,
         fusion_service: ReciprocalRankFusion | None = None,
         context_builder: ContextBuilder | None = None,
         answer_service: AnswerService | None = None,
@@ -117,6 +129,7 @@ class QueryService:
         self.vector_retriever = vector_retriever or UnavailableVectorRetriever()
         self.candidate_reranker = candidate_reranker or NoopCandidateReranker()
         self.rerank_input_top_k = max(rerank_input_top_k, 1)
+        self.rerank_min_score = max(float(rerank_min_score), 0.0)
         self.fusion_service = fusion_service or ReciprocalRankFusion()
         self.context_builder = context_builder or ContextBuilder()
         self.answer_service = answer_service or AnswerService()
@@ -203,6 +216,7 @@ class QueryService:
                     limit=normalized_top_k * 3,
                 )
                 allowed_candidates = self._gate_candidates(
+                    session,
                     context,
                     candidates,
                     allowed_kb_ids=queryable_kb_ids,
@@ -235,9 +249,15 @@ class QueryService:
                 rerank_model_call = rerank_result.model_call
                 if rerank_model_call is not None and model_route_hash is None:
                     model_route_hash = rerank_model_call.model_route_hash
-                allowed_candidates = _allowed_candidates_from_retrieval(
-                    rerank_result.candidates
+                relevant_candidates, relevance_audit_event = _apply_relevance_gate(
+                    rerank_result,
+                    min_score=self.rerank_min_score,
+                    candidate_count=len(allowed_candidates),
                 )
+                if relevance_audit_event is not None:
+                    degrade_reasons.append("retrieval_relevance_too_low")
+                    audit_events.append(relevance_audit_event)
+                allowed_candidates = _allowed_candidates_from_retrieval(relevant_candidates)
                 citations = (
                     tuple(item.citation for item in allowed_candidates)
                     if include_sources
@@ -289,15 +309,32 @@ class QueryService:
                         ),
                     )
                     if not citation_validation.valid:
-                        answer = ""
-                        degrade_reasons.append(citation_validation.degrade_reason)
+                        citation_degrade_reason = citation_validation.degrade_reason
+                        if citation_validation.degrade_reason == "citation_missing":
+                            repaired_answer = _append_reference_sources(
+                                answer,
+                                allowed_candidates=allowed_candidates,
+                            )
+                            if repaired_answer != answer:
+                                answer = repaired_answer
+                                citation_degrade_reason = "citation_auto_attached"
+                            else:
+                                answer = ""
+                        else:
+                            answer = ""
+                        degrade_reasons.append(citation_degrade_reason)
                         audit_events.append(
                             _QueryAuditEvent(
                                 event_name="query.citation_validation_failed",
                                 result="failure",
-                                risk_level="high",
-                                error_code=citation_validation.degrade_reason,
-                                summary=citation_validation.summary(),
+                                risk_level=_citation_validation_risk_level(
+                                    citation_degrade_reason
+                                ),
+                                error_code=citation_degrade_reason,
+                                summary=_citation_validation_summary(
+                                    citation_validation,
+                                    final_degrade_reason=citation_degrade_reason,
+                                ),
                             )
                         )
             if mode == "answer" and not answer and degrade_reasons:
@@ -491,6 +528,7 @@ class QueryService:
                     limit=normalized_top_k * 3,
                 )
                 allowed_candidates = self._gate_candidates(
+                    session,
                     context,
                     candidates,
                     allowed_kb_ids=queryable_kb_ids,
@@ -523,9 +561,15 @@ class QueryService:
                 rerank_model_call = rerank_result.model_call
                 if rerank_model_call is not None:
                     model_route_hash = rerank_model_call.model_route_hash
-                allowed_candidates = _allowed_candidates_from_retrieval(
-                    rerank_result.candidates
+                relevant_candidates, relevance_audit_event = _apply_relevance_gate(
+                    rerank_result,
+                    min_score=self.rerank_min_score,
+                    candidate_count=len(allowed_candidates),
                 )
+                if relevance_audit_event is not None:
+                    degrade_reasons.append("retrieval_relevance_too_low")
+                    audit_events.append(relevance_audit_event)
+                allowed_candidates = _allowed_candidates_from_retrieval(relevant_candidates)
                 citations = (
                     tuple(item.citation for item in allowed_candidates)
                     if include_sources
@@ -644,15 +688,32 @@ class QueryService:
                 ),
             )
             if not citation_validation.valid:
-                answer = ""
-                degrade_reasons.append(citation_validation.degrade_reason)
+                citation_degrade_reason = citation_validation.degrade_reason
+                if citation_validation.degrade_reason == "citation_missing":
+                    repaired_answer = _append_reference_sources(
+                        answer,
+                        allowed_candidates=plan.allowed_candidates,
+                    )
+                    if repaired_answer != answer:
+                        answer = repaired_answer
+                        citation_degrade_reason = "citation_auto_attached"
+                    else:
+                        answer = ""
+                else:
+                    answer = ""
+                degrade_reasons.append(citation_degrade_reason)
                 audit_events.append(
                     _QueryAuditEvent(
                         event_name="query.citation_validation_failed",
                         result="failure",
-                        risk_level="high",
-                        error_code=citation_validation.degrade_reason,
-                        summary=citation_validation.summary(),
+                        risk_level=_citation_validation_risk_level(
+                            citation_degrade_reason
+                        ),
+                        error_code=citation_degrade_reason,
+                        summary=_citation_validation_summary(
+                            citation_validation,
+                            final_degrade_reason=citation_degrade_reason,
+                        ),
                     )
                 )
         if plan.mode == "answer" and not answer and degrade_reasons:
@@ -874,6 +935,7 @@ class QueryService:
 
     def _gate_candidates(
         self,
+        session: Session,
         context: PermissionContext,
         candidates: tuple[RetrievalCandidate, ...],
         *,
@@ -882,7 +944,12 @@ class QueryService:
         limit: int,
     ) -> tuple[QueryAllowedCandidate, ...]:
         allowed: list[QueryAllowedCandidate] = []
+        current_facts = self._load_current_candidate_facts(session, candidates)
         for candidate in candidates:
+            facts = current_facts.get((candidate.chunk_id, candidate.index_version_id))
+            if facts is None:
+                continue
+            candidate = facts.candidate
             gate_result = self.permission_service.gate_candidate(
                 context,
                 CandidateMetadata(
@@ -898,7 +965,7 @@ class QueryService:
                     visibility_state=candidate.visibility_state,
                     index_version_id=candidate.index_version_id,
                     indexed_permission_version=candidate.indexed_permission_version,
-                    access_blocked=False,
+                    access_blocked=facts.access_blocked,
                 ),
                 allowed_kb_ids=allowed_kb_ids,
                 active_index_version_ids=active_index_version_ids,
@@ -914,6 +981,119 @@ class QueryService:
             if len(allowed) >= limit:
                 break
         return tuple(allowed)
+
+    def _load_current_candidate_facts(
+        self,
+        session: Session,
+        candidates: tuple[RetrievalCandidate, ...],
+    ) -> dict[tuple[str, str], _CurrentCandidateFacts]:
+        if not candidates:
+            return {}
+        chunk_ids = [candidate.chunk_id for candidate in candidates]
+        index_version_ids = [candidate.index_version_id for candidate in candidates]
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    WITH requested AS (
+                        SELECT *
+                        FROM unnest(
+                            CAST(:chunk_ids AS uuid[]),
+                            CAST(:index_version_ids AS uuid[])
+                        ) AS item(chunk_id, index_version_id)
+                    )
+                    SELECT
+                        c.id::text AS chunk_id,
+                        d.enterprise_id::text AS enterprise_id,
+                        d.kb_id::text AS kb_id,
+                        d.id::text AS document_id,
+                        c.document_version_id::text AS document_version_id,
+                        d.title,
+                        d.owner_department_id::text AS owner_department_id,
+                        d.visibility,
+                        d.lifecycle_status AS document_lifecycle_status,
+                        d.index_status AS document_index_status,
+                        c.status AS chunk_status,
+                        cir.visibility_state,
+                        iv.id::text AS index_version_id,
+                        cir.indexed_permission_version,
+                        c.page_start,
+                        c.page_end,
+                        EXISTS (
+                            SELECT 1
+                            FROM access_blocks ab
+                            WHERE ab.enterprise_id = d.enterprise_id
+                              AND (
+                                  (ab.resource_type = 'knowledge_base'
+                                      AND ab.resource_id = d.kb_id)
+                                  OR (ab.resource_type = 'folder'
+                                      AND ab.resource_id = d.folder_id)
+                                  OR (ab.resource_type = 'document'
+                                      AND ab.resource_id = d.id)
+                                  OR (ab.resource_type = 'chunk'
+                                      AND ab.resource_id = c.id)
+                              )
+                              AND ab.status = 'active'
+                              AND (ab.expires_at IS NULL OR ab.expires_at > now())
+                        ) AS access_blocked
+                    FROM requested r
+                    JOIN chunks c
+                      ON c.id = r.chunk_id
+                     AND c.deleted_at IS NULL
+                    JOIN documents d
+                      ON d.id = c.document_id
+                     AND d.deleted_at IS NULL
+                    JOIN index_versions iv
+                      ON iv.id = r.index_version_id
+                     AND iv.document_id = d.id
+                     AND iv.document_version_id = c.document_version_id
+                     AND iv.status = 'active'
+                    JOIN chunk_index_refs cir
+                      ON cir.chunk_id = c.id
+                     AND cir.index_version_id = iv.id
+                    """
+                ),
+                {"chunk_ids": chunk_ids, "index_version_ids": index_version_ids},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "QUERY_CANDIDATE_METADATA_UNAVAILABLE",
+                "query candidate metadata cannot be loaded",
+                exc,
+            ) from exc
+        by_candidate = {
+            (candidate.chunk_id, candidate.index_version_id): candidate
+            for candidate in candidates
+        }
+        facts: dict[tuple[str, str], _CurrentCandidateFacts] = {}
+        for row in rows:
+            mapping = row._mapping
+            key = (str(mapping["chunk_id"]), str(mapping["index_version_id"]))
+            original = by_candidate.get(key)
+            if original is None:
+                continue
+            facts[key] = _CurrentCandidateFacts(
+                candidate=replace(
+                    original,
+                    enterprise_id=str(mapping["enterprise_id"]),
+                    kb_id=str(mapping["kb_id"]),
+                    document_id=str(mapping["document_id"]),
+                    document_version_id=str(mapping["document_version_id"]),
+                    title=str(mapping["title"]),
+                    owner_department_id=str(mapping["owner_department_id"]),
+                    visibility=str(mapping["visibility"]),
+                    document_lifecycle_status=str(mapping["document_lifecycle_status"]),
+                    document_index_status=str(mapping["document_index_status"]),
+                    chunk_status=str(mapping["chunk_status"]),
+                    visibility_state=str(mapping["visibility_state"]),
+                    index_version_id=str(mapping["index_version_id"]),
+                    indexed_permission_version=int(mapping["indexed_permission_version"]),
+                    page_start=_optional_int(mapping["page_start"]),
+                    page_end=_optional_int(mapping["page_end"]),
+                ),
+                access_blocked=bool(mapping["access_blocked"]),
+            )
+        return facts
 
     def _rerank_allowed_candidates(
         self,
@@ -1408,6 +1588,47 @@ def _allowed_candidates_from_retrieval(
     )
 
 
+def _apply_relevance_gate(
+    rerank_result: RerankResult,
+    *,
+    min_score: float,
+    candidate_count: int,
+) -> tuple[tuple[RetrievalCandidate, ...], _QueryAuditEvent | None]:
+    candidates = rerank_result.candidates
+    model_call = rerank_result.model_call
+    if (
+        min_score <= 0
+        or not candidates
+        or rerank_result.degraded
+        or model_call is None
+        or model_call.status != "success"
+        or model_call.degraded
+    ):
+        return candidates, None
+
+    relevant = tuple(candidate for candidate in candidates if candidate.score >= min_score)
+    if relevant:
+        return relevant, None
+
+    top_score = max((candidate.score for candidate in candidates), default=0.0)
+    return (
+        (),
+        _QueryAuditEvent(
+            event_name="query.relevance_gate_failed",
+            result="failure",
+            risk_level="medium",
+            error_code="retrieval_relevance_too_low",
+            summary={
+                "degrade_reason": "retrieval_relevance_too_low",
+                "min_score": min_score,
+                "top_score": top_score,
+                "candidate_count": candidate_count,
+                "reranked_count": len(candidates),
+            },
+        ),
+    )
+
+
 def _candidate_rerank_text(candidate: RetrievalCandidate, text_preview: str | None) -> str:
     if isinstance(text_preview, str) and text_preview.strip():
         return text_preview.strip()
@@ -1436,6 +1657,17 @@ def _validate_answer_citations(
             invalid_source_ids=(),
             allowed_source_count=len(allowed),
         )
+    invalid_format = tuple(
+        source_id for source_id in referenced if not SOURCE_ID_PATTERN.fullmatch(source_id)
+    )
+    if invalid_format:
+        return _CitationValidationResult(
+            valid=False,
+            degrade_reason="citation_invalid_format",
+            referenced_source_ids=referenced,
+            invalid_source_ids=invalid_format,
+            allowed_source_count=len(allowed),
+        )
     invalid = tuple(source_id for source_id in referenced if source_id not in allowed)
     if invalid:
         return _CitationValidationResult(
@@ -1452,6 +1684,44 @@ def _validate_answer_citations(
         invalid_source_ids=(),
         allowed_source_count=len(allowed),
     )
+
+
+def _append_reference_sources(
+    answer: str,
+    *,
+    allowed_candidates: tuple[QueryAllowedCandidate, ...],
+    max_sources: int = 3,
+) -> str:
+    answer = answer.strip()
+    if not answer or not allowed_candidates:
+        return answer
+    source_ids: list[str] = []
+    seen: set[str] = set()
+    for allowed in allowed_candidates:
+        source_id = allowed.candidate.chunk_id
+        if source_id in seen:
+            continue
+        seen.add(source_id)
+        source_ids.append(source_id)
+        if len(source_ids) >= max_sources:
+            break
+    if not source_ids:
+        return answer
+    source_refs = " ".join(f"[source:{source_id}]" for source_id in source_ids)
+    return f"{answer}\n\n参考来源：{source_refs}"
+
+
+def _citation_validation_summary(
+    validation: _CitationValidationResult,
+    *,
+    final_degrade_reason: str,
+) -> dict[str, object]:
+    summary = validation.summary()
+    if final_degrade_reason != validation.degrade_reason:
+        summary["original_degrade_reason"] = validation.degrade_reason
+        summary["degrade_reason"] = final_degrade_reason
+        summary["auto_attached_sources"] = True
+    return summary
 
 
 def _degraded_answer(
@@ -1511,6 +1781,10 @@ def _degrade_reason_message(reason: str) -> str:
         return "流式回答结束时没有得到有效的模型输出"
     if reason == "citation_missing":
         return "模型生成的回答缺少可验证引用，系统已拦截原回答"
+    if reason == "citation_auto_attached":
+        return "模型生成的回答缺少引用标记，系统已自动附加本次已授权来源"
+    if reason == "citation_invalid_format":
+        return "模型生成的回答使用了不存在的引用占位符，系统已拦截原回答"
     if reason == "citation_unauthorized":
         return "模型生成的回答引用了本次查询未授权或未命中的资料，系统已拦截原回答"
     if reason in {
@@ -1525,6 +1799,8 @@ def _degrade_reason_message(reason: str) -> str:
         return "问题向量化失败，本次只能依赖关键词检索"
     if reason == "vector_search_failed":
         return "向量数据库检索失败，本次只能依赖关键词检索"
+    if reason == "retrieval_relevance_too_low":
+        return "召回片段与问题相关性过低，系统未将这些片段交给模型生成答案"
     if reason in {
         "RERANK_PROVIDER_UNAVAILABLE",
         "RERANK_PROVIDER_HTTP_ERROR",
@@ -1540,6 +1816,12 @@ def _degrade_reason_message(reason: str) -> str:
     }:
         return "回答生成模型不可用、超时或返回异常"
     return f"系统降级原因代码为 {reason}"
+
+
+def _citation_validation_risk_level(reason: str) -> Literal["medium", "high", "critical"]:
+    if reason == "citation_unauthorized":
+        return "high"
+    return "medium"
 
 
 def _brief_query(query_text: str, *, limit: int = 80) -> str:

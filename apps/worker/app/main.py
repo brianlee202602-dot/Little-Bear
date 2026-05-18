@@ -89,6 +89,7 @@ def main() -> None:
                             error_code=exc.error_code,
                             error_message=exc.message,
                             retryable=exc.retryable,
+                            error_details=exc.details,
                         )
                     LOGGER.warning(
                         "import job marked failed",
@@ -99,6 +100,7 @@ def main() -> None:
                             "stage": job.stage,
                             "error_code": exc.error_code,
                             "retryable": exc.retryable,
+                            "details": exc.details,
                         },
                     )
                     break

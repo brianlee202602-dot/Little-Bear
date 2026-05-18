@@ -122,7 +122,7 @@ def test_build_filter_generates_qdrant_and_sql_permission_conditions() -> None:
     assert permission_filter.params["department_ids"] == [DEPARTMENT_ID]
     assert "kie.visibility_state = 'active'" in permission_filter.keyword_where_sql
     assert "d.lifecycle_status = 'active'" in permission_filter.keyword_where_sql
-    assert "kie.indexed_permission_version >= :permission_version" in (
+    assert "kie.indexed_permission_version >= :permission_version" not in (
         permission_filter.keyword_where_sql
     )
     assert "owner_department_id = ANY" in permission_filter.keyword_where_sql
@@ -175,7 +175,7 @@ def test_gate_candidate_allows_enterprise_and_own_department() -> None:
     assert department_result.allowed is True
 
 
-def test_gate_candidate_rejects_other_department_stale_version_and_access_block() -> None:
+def test_gate_candidate_rejects_other_department_and_access_block() -> None:
     service = PermissionService()
     context = _permission_context(permission_version=42)
 
@@ -183,13 +183,10 @@ def test_gate_candidate_rejects_other_department_stale_version_and_access_block(
         context,
         _candidate(visibility="department", owner_department_id=OTHER_DEPARTMENT_ID),
     )
-    stale = service.gate_candidate(context, _candidate(indexed_permission_version=41))
     blocked = service.gate_candidate(context, _candidate(access_blocked=True))
 
     assert other_department.allowed is False
     assert other_department.error_code == "PERM_DENIED"
-    assert stale.allowed is False
-    assert stale.error_code == "PERM_VERSION_STALE"
     assert blocked.allowed is False
     assert blocked.error_code == "PERM_ACCESS_BLOCKED"
 

@@ -601,6 +601,7 @@ const modelSection: FieldSection = {
     { key: "vectorTopK", label: "向量召回数量", input: "number", hint: "向量检索阶段返回的候选片段数量。", min: 1, step: 1 },
     { key: "keywordTopK", label: "关键词召回数量", input: "number", hint: "关键词检索阶段返回的候选片段数量。", min: 1, step: 1 },
     { key: "rerankInputTopK", label: "重排输入数量", input: "number", hint: "进入 rerank 阶段的候选片段数量，应结合模型延迟和召回质量设定。", min: 1, step: 1 },
+    { key: "rerankMinScore", label: "重排最低分", input: "number", hint: "重排成功后低于该分数的片段不会进入答案上下文。", min: 0, step: 0.01 },
     { key: "finalContextTopK", label: "最终上下文数量", input: "number", hint: "进入答案生成上下文的最终片段数量。", min: 1, step: 1 },
     { key: "maxContextTokens", label: "最大上下文 Token 数", input: "number", min: 1, step: 1 },
   ],
@@ -808,7 +809,7 @@ const configSectionDefinitions: ConfigSectionFormDefinition[] = [
     key: "retrieval",
     label: "检索策略",
     description: "向量/关键词召回、重排和最终上下文预算。",
-    fields: setupFields("vectorTopK", "keywordTopK", "rerankInputTopK", "finalContextTopK", "maxContextTokens"),
+    fields: setupFields("vectorTopK", "keywordTopK", "rerankInputTopK", "rerankMinScore", "finalContextTopK", "maxContextTokens"),
   },
   {
     key: "chunk",
@@ -4400,6 +4401,7 @@ function hydrateConfigForm(target: SetupFormModel, config: Record<string, unknow
   target.vectorTopK = asNumber(retrieval?.vector_top_k, target.vectorTopK);
   target.keywordTopK = asNumber(retrieval?.keyword_top_k, target.keywordTopK);
   target.rerankInputTopK = asNumber(retrieval?.rerank_input_top_k, target.rerankInputTopK);
+  target.rerankMinScore = asNumber(retrieval?.rerank_min_score, target.rerankMinScore);
   target.finalContextTopK = asNumber(retrieval?.final_context_top_k, target.finalContextTopK);
   target.maxContextTokens = asNumber(retrieval?.max_context_tokens, target.maxContextTokens);
   target.chunkDefaultSizeTokens = asNumber(chunk?.default_size_tokens, target.chunkDefaultSizeTokens);
@@ -4862,6 +4864,9 @@ function validateLocalForm(
   }
   if (current.rerankInputTopK > current.vectorTopK + current.keywordTopK) {
     add("warning", "模型与检索", "重排输入数量大于向量和关键词召回总量。", "rerankInputTopK");
+  }
+  if (!Number.isFinite(current.rerankMinScore) || current.rerankMinScore < 0) {
+    add("error", "模型与检索", "重排最低分必须是非负数字。", "rerankMinScore");
   }
 
   if (!Number.isInteger(current.chunkDefaultSizeTokens) || current.chunkDefaultSizeTokens <= 0) {

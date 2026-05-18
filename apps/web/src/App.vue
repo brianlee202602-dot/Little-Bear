@@ -6,11 +6,13 @@ import {
   createSession,
   createQuery,
   deleteCurrentSession,
+  getCitationSource,
   getCurrentUser,
   listDocumentChunks,
   listKnowledgeBases,
   refreshSession,
   streamQuery,
+  type CitationSourceData,
   type CitationData,
   type ChunkData,
   type CurrentUserData,
@@ -78,6 +80,7 @@ const authTokens = ref<AuthTokenState | null>(loadStoredAuthTokens());
 const currentUser = ref<CurrentUserData | null>(null);
 const authFeedback = ref("");
 const knowledgeBases = ref<KnowledgeBaseData[]>([]);
+const sourceDetail = ref<CitationSourceData | null>(null);
 const sourceChunks = ref<ChunkData[]>([]);
 const highlightedSourceId = ref("");
 const sourceTitle = ref("");
@@ -406,7 +409,25 @@ function clearKnowledgeBaseSelection(): void {
 }
 
 async function openCitationSource(citation: CitationData): Promise<void> {
-  await openDocumentSource(citation.doc_id, citation.title, citation.source_id);
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    sourceFeedback.value = "请先登录。";
+    return;
+  }
+  browserBusy.loadingSource = true;
+  sourceFeedback.value = "";
+  highlightedSourceId.value = citation.source_id;
+  sourceTitle.value = citation.title;
+  sourceDetail.value = null;
+  sourceChunks.value = [];
+  try {
+    const response = await getCitationSource(citation.doc_id, citation.source_id, accessToken);
+    sourceDetail.value = response.data;
+  } catch (error) {
+    sourceFeedback.value = readableError(error);
+  } finally {
+    browserBusy.loadingSource = false;
+  }
 }
 
 async function openDocumentSource(
@@ -423,6 +444,7 @@ async function openDocumentSource(
   sourceFeedback.value = "";
   highlightedSourceId.value = sourceId;
   sourceTitle.value = title;
+  sourceDetail.value = null;
   try {
     const response = await listDocumentChunks(documentId, accessToken);
     sourceChunks.value = response.data;
@@ -445,6 +467,11 @@ function resetResult(): void {
   metadata.value = null;
   lastResponse.value = null;
   errorMessage.value = "";
+  sourceDetail.value = null;
+  sourceChunks.value = [];
+  highlightedSourceId.value = "";
+  sourceTitle.value = "";
+  sourceFeedback.value = "";
 }
 
 function buildPayload(queryText: string, kbIds: string[]): QueryRequest {
@@ -519,6 +546,7 @@ function clearAuthSession(): void {
   authTokens.value = null;
   currentUser.value = null;
   knowledgeBases.value = [];
+  sourceDetail.value = null;
   sourceChunks.value = [];
   highlightedSourceId.value = "";
   sourceTitle.value = "";
@@ -552,6 +580,7 @@ function selectChatRecord(record: ChatRecord): void {
   lastResponse.value = null;
   status.value = record.status;
   sourceChunks.value = [];
+  sourceDetail.value = null;
   highlightedSourceId.value = "";
   sourceTitle.value = "";
 }
@@ -668,6 +697,24 @@ function formatRecordStatus(value: ChatRecordStatus): string {
     cancelled: "已取消",
   };
   return labels[value] ?? value;
+}
+
+function formatSourceTextStatus(value: CitationSourceData["text_status"]): string {
+  const labels: Record<CitationSourceData["text_status"], string> = {
+    object: "原文对象",
+    preview_only: "预览文本",
+    object_unavailable: "对象不可用",
+  };
+  return labels[value] ?? value;
+}
+
+function formatSourceOffsets(value: Record<string, unknown> | null): string {
+  if (!value || !Object.keys(value).length) {
+    return "无";
+  }
+  return Object.entries(value)
+    .map(([key, item]) => `${key}: ${String(item)}`)
+    .join(" · ");
 }
 </script>
 
@@ -885,12 +932,45 @@ function formatRecordStatus(value: ChatRecordStatus): string {
             </div>
           </article>
 
-          <section v-if="sourceChunks.length || sourceFeedback" class="source-panel">
+          <section v-if="sourceDetail || sourceChunks.length || sourceFeedback" class="source-panel">
             <header>
               <h2>来源内容</h2>
               <span v-if="sourceTitle">{{ sourceTitle }}</span>
             </header>
             <p v-if="sourceFeedback" class="inline-error">{{ sourceFeedback }}</p>
+            <article v-if="sourceDetail" class="source-detail">
+              <header>
+                <div>
+                  <strong>{{ sourceDetail.title }}</strong>
+                  <span>
+                    页 {{ sourceDetail.page_start ?? 0 }}-{{ sourceDetail.page_end ?? sourceDetail.page_start ?? 0 }}
+                    · Chunk {{ sourceDetail.ordinal }}
+                  </span>
+                </div>
+                <span :class="['pill', sourceDetail.text_status === 'object' ? 'pill--success' : 'pill--warning']">
+                  {{ formatSourceTextStatus(sourceDetail.text_status) }}
+                </span>
+              </header>
+              <dl class="source-proof">
+                <div>
+                  <dt>Source ID</dt>
+                  <dd>{{ sourceDetail.source_id }}</dd>
+                </div>
+                <div>
+                  <dt>版本</dt>
+                  <dd>{{ sourceDetail.document_version_id }}</dd>
+                </div>
+                <div>
+                  <dt>标题路径</dt>
+                  <dd>{{ sourceDetail.heading_path || "无" }}</dd>
+                </div>
+                <div>
+                  <dt>定位</dt>
+                  <dd>{{ formatSourceOffsets(sourceDetail.source_offsets) }}</dd>
+                </div>
+              </dl>
+              <p>{{ sourceDetail.text }}</p>
+            </article>
             <article
               v-for="chunk in sourceChunks"
               :key="chunk.id"
@@ -1562,6 +1642,64 @@ button:disabled {
 .source-panel > header span {
   color: #737373;
   font-size: 13px;
+}
+
+.source-detail {
+  border: 1px solid #d9e8e1;
+  border-radius: 8px;
+  background: #fbfefd;
+  padding: 14px;
+}
+
+.source-detail > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.source-detail > header div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.source-detail > header strong {
+  overflow-wrap: anywhere;
+}
+
+.source-detail > header span {
+  color: #737373;
+  font-size: 12px;
+}
+
+.source-proof {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 12px 0;
+  font-size: 12px;
+}
+
+.source-proof div {
+  min-width: 0;
+}
+
+.source-proof dt {
+  color: #737373;
+  margin-bottom: 3px;
+}
+
+.source-proof dd {
+  margin: 0;
+  color: #333333;
+  overflow-wrap: anywhere;
+}
+
+.source-detail p {
+  line-height: 1.72;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .source-chunk {

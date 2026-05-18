@@ -45,6 +45,7 @@ def test_build_query_service_wires_llm_provider_from_active_config(monkeypatch) 
     assert rerank_client.auth_token == "value-for-secret://rerank"
     assert rerank_client.timeout_seconds == 0.7
     assert service.rerank_input_top_k == 20
+    assert service.rerank_min_score == 0.05
     assert service.context_builder.max_chunks == 4
     assert service.context_builder.max_chars == 1800
     assert "secret://llm" in secrets
@@ -94,6 +95,7 @@ def _active_config() -> dict[str, object]:
         },
         "retrieval": {
             "rerank_input_top_k": 20,
+            "rerank_min_score": 0.05,
             "final_context_top_k": 4,
             "max_context_tokens": 900,
         },

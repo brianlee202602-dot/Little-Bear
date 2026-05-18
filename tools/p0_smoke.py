@@ -259,6 +259,35 @@ def _run_authenticated_smoke(
         f"degraded={query_response.get('degraded')} citations={len(citations)} "
         f"trace_id={query_response.get('trace_id')}"
     )
+    if citations:
+        first_citation = _object(citations[0], "queries.citations[0]")
+        source_id = _required_str(first_citation, "source_id")
+        doc_id = _required_str(first_citation, "doc_id")
+        source_response = _request_json(
+            "GET",
+            f"{config.base_url}/internal/v1/documents/{doc_id}/sources/{source_id}",
+            bearer_token=access_token,
+            timeout_seconds=config.timeout_seconds,
+        )
+        source_data = _object(source_response.get("data"), "citation-source.data")
+        source_text = _required_str(source_data, "text")
+        recorder.step(
+            "citation_source",
+            {
+                "source_id": source_data.get("source_id"),
+                "doc_id": source_data.get("doc_id"),
+                "document_version_id": source_data.get("document_version_id"),
+                "title": source_data.get("title"),
+                "text_status": source_data.get("text_status"),
+                "text_length": len(source_text),
+            },
+        )
+        print(
+            "citation-source=ok "
+            f"source_id={source_data.get('source_id')} "
+            f"text_status={source_data.get('text_status')} "
+            f"text_length={len(source_text)}"
+        )
 
     stream_text = _request_text(
         "POST",

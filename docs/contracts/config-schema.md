@@ -421,6 +421,11 @@ P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embeddi
   "retry_policy": {
     "max_retries": 0,
     "backoff_ms": 0
+  },
+  "openai_extra_body": {
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    }
   }
 }
 ```
@@ -458,8 +463,9 @@ P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embeddi
     "low_ocr_penalty": 0.8
   },
   "rerank_input_top_k": 20,
+  "rerank_min_score": 0.05,
   "final_context_top_k": 8,
-  "max_context_tokens": 6000,
+  "max_context_tokens": 1500,
   "rewrite_enabled": false,
   "expansion_enabled": false
 }
@@ -589,10 +595,10 @@ P0 默认关闭最终答案缓存，降低串权风险。
   "query_total_ms": 8000,
   "auth_permission_ms": 100,
   "rewrite_ms": 300,
-  "embedding_ms": 500,
+  "embedding_ms": 3000,
   "vector_search_ms": 500,
   "keyword_search_ms": 500,
-  "rerank_ms": 800,
+  "rerank_ms": 3000,
   "context_ms": 200,
   "postprocess_ms": 300
 }

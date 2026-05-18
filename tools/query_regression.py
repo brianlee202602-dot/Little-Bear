@@ -45,11 +45,16 @@ class QueryCase:
     mode: str
     top_k: int
     include_sources: bool
+    expect_answer: bool
     min_citations: int
+    max_citations: int | None
     allow_degraded: bool
+    expected_degrade_reasons: list[str]
     expected_answer_terms: list[str]
+    forbidden_answer_terms: list[str]
     expected_citation_title_terms: list[str]
     expected_doc_ids: list[str]
+    expected_source_ids: list[str]
     run_stream: bool
 
 
@@ -91,11 +96,12 @@ def _run_regression(config: RegressionConfig) -> list[dict[str, Any]]:
     access_token = _required_str(token_response, "access_token")
     print(f"login=ok cases={len(cases)}")
     try:
-        default_kb_ids = _resolve_default_kb_ids(config, access_token)
+        knowledge_bases = _load_knowledge_bases(config, access_token)
+        default_kb_ids = _resolve_default_kb_ids(config, knowledge_bases)
         results: list[dict[str, Any]] = []
         failures = 0
         for raw_case in cases:
-            query_case = _case_from_mapping(raw_case, default_kb_ids)
+            query_case = _case_from_mapping(raw_case, default_kb_ids, knowledge_bases)
             result = _run_case(config, access_token, query_case)
             results.append(result)
             if result["status"] != "passed":
@@ -104,7 +110,8 @@ def _run_regression(config: RegressionConfig) -> list[dict[str, Any]]:
                 "case="
                 f"{query_case.case_id} status={result['status']} "
                 f"citations={result.get('citation_count', 0)} "
-                f"degraded={result.get('degraded')}"
+                f"degraded={result.get('degraded')} "
+                f"degrade_reason={result.get('degrade_reason')}"
             )
         if failures:
             raise RegressionError(f"{failures}/{len(results)} query regression cases failed")
@@ -150,8 +157,12 @@ def _run_case(
                 "degraded": response.get("degraded"),
                 "degrade_reason": response.get("degrade_reason"),
                 "confidence": response.get("confidence"),
+                "answer_preview": str(response.get("answer") or "")[:500],
                 "citation_count": len(citations),
                 "citation_doc_ids": [_safe_str(citation, "doc_id") for citation in citations],
+                "citation_source_ids": [
+                    _safe_str(citation, "source_id") for citation in citations
+                ],
                 "citation_titles": [_safe_str(citation, "title") for citation in citations],
             }
         )
@@ -190,9 +201,26 @@ def _run_stream_case(
             f"{query_case.case_id}: stream citation events {len(citation_events)} "
             f"< expected {query_case.min_citations}"
         )
+    if query_case.max_citations is not None and len(citation_events) > query_case.max_citations:
+        raise RegressionError(
+            f"{query_case.case_id}: stream citation events {len(citation_events)} "
+            f"> expected {query_case.max_citations}"
+        )
+    done_events = [event for event in events if event["event"] == "done"]
+    done_payload = done_events[-1]["data"] if done_events else {}
+    if isinstance(done_payload, dict):
+        done_citations = _list(
+            done_payload.get("citations", citation_events),
+            f"{query_case.case_id}.stream.done.citations",
+        )
+        _validate_query_response(query_case, done_payload, done_citations)
     return {
         "event_names": event_names,
         "citation_event_count": len(citation_events),
+        "done_degraded": done_payload.get("degraded") if isinstance(done_payload, dict) else None,
+        "done_degrade_reason": (
+            done_payload.get("degrade_reason") if isinstance(done_payload, dict) else None
+        ),
     }
 
 
@@ -205,10 +233,28 @@ def _validate_query_response(
         raise RegressionError(
             f"{query_case.case_id}: query degraded: {response.get('degrade_reason')}"
         )
+    if not query_case.expect_answer and response.get("degraded") is not True:
+        raise RegressionError(f"{query_case.case_id}: expected degraded no-answer response")
+
+    missing_degrade_reasons = [
+        reason
+        for reason in query_case.expected_degrade_reasons
+        if reason not in _degrade_reasons(response.get("degrade_reason"))
+    ]
+    if missing_degrade_reasons:
+        raise RegressionError(
+            f"{query_case.case_id}: degrade_reason missing {missing_degrade_reasons}"
+        )
+
     if len(citations) < query_case.min_citations:
         raise RegressionError(
             f"{query_case.case_id}: citations {len(citations)} "
             f"< expected {query_case.min_citations}"
+        )
+    if query_case.max_citations is not None and len(citations) > query_case.max_citations:
+        raise RegressionError(
+            f"{query_case.case_id}: citations {len(citations)} "
+            f"> expected {query_case.max_citations}"
         )
 
     answer = str(response.get("answer") or "")
@@ -219,12 +265,29 @@ def _validate_query_response(
         raise RegressionError(
             f"{query_case.case_id}: answer missing terms {missing_answer_terms}"
         )
+    forbidden_answer_terms = [
+        term for term in query_case.forbidden_answer_terms if term in answer
+    ]
+    if forbidden_answer_terms:
+        raise RegressionError(
+            f"{query_case.case_id}: answer unexpectedly contains terms "
+            f"{forbidden_answer_terms}"
+        )
 
     citation_doc_ids = {_safe_str(citation, "doc_id") for citation in citations}
     if query_case.expected_doc_ids and citation_doc_ids.isdisjoint(query_case.expected_doc_ids):
         raise RegressionError(
             f"{query_case.case_id}: citations did not include expected docs "
             f"{query_case.expected_doc_ids}"
+        )
+
+    citation_source_ids = {_safe_str(citation, "source_id") for citation in citations}
+    if query_case.expected_source_ids and citation_source_ids.isdisjoint(
+        query_case.expected_source_ids
+    ):
+        raise RegressionError(
+            f"{query_case.case_id}: citations did not include expected sources "
+            f"{query_case.expected_source_ids}"
         )
 
     citation_titles = [_safe_str(citation, "title") for citation in citations]
@@ -264,16 +327,19 @@ def _logout(config: RegressionConfig, access_token: str) -> None:
         print("logout=ok")
 
 
-def _resolve_default_kb_ids(config: RegressionConfig, access_token: str) -> list[str]:
-    if config.default_kb_id:
-        return [config.default_kb_id]
+def _load_knowledge_bases(config: RegressionConfig, access_token: str) -> list[Any]:
     kb_response = _request_json(
         "GET",
         f"{config.base_url}/internal/v1/knowledge-bases?page=1&page_size=100",
         bearer_token=access_token,
         timeout_seconds=config.timeout_seconds,
     )
-    knowledge_bases = _list(kb_response.get("data"), "knowledge-bases.data")
+    return _list(kb_response.get("data"), "knowledge-bases.data")
+
+
+def _resolve_default_kb_ids(config: RegressionConfig, knowledge_bases: list[Any]) -> list[str]:
+    if config.default_kb_id:
+        return [config.default_kb_id]
     return [_first_id(knowledge_bases, "knowledge base")]
 
 
@@ -295,12 +361,31 @@ def _load_cases(path: str) -> list[dict[str, Any]]:
     return cases
 
 
-def _case_from_mapping(data: dict[str, Any], default_kb_ids: list[str]) -> QueryCase:
+def _case_from_mapping(
+    data: dict[str, Any],
+    default_kb_ids: list[str],
+    knowledge_bases: list[Any],
+) -> QueryCase:
     query = data.get("query")
     if not isinstance(query, str) or not query.strip():
         raise RegressionError(f"{data.get('case_id')}: query is required")
-    kb_ids = _string_list(data.get("kb_ids"), default=default_kb_ids)
+    kb_ids = _case_kb_ids(data, default_kb_ids, knowledge_bases)
     min_citations = max(_int_value(data.get("min_citations"), 0), 0)
+    expected_answer_terms = _merge_string_lists(
+        _string_list(data.get("expected_answer_terms"), default=[]),
+        _string_list(data.get("required_keywords"), default=[]),
+    )
+    forbidden_answer_terms = _merge_string_lists(
+        _string_list(data.get("forbidden_answer_terms"), default=[]),
+        _string_list(data.get("forbidden_keywords"), default=[]),
+    )
+    expected_degrade_reasons = _string_list(data.get("expected_degrade_reasons"), default=[])
+    expected_degrade_reason = data.get("expected_degrade_reason")
+    if isinstance(expected_degrade_reason, str) and expected_degrade_reason.strip():
+        expected_degrade_reasons = _merge_string_lists(
+            expected_degrade_reasons,
+            [expected_degrade_reason.strip()],
+        )
     return QueryCase(
         case_id=str(data.get("case_id")),
         query=query.strip(),
@@ -308,16 +393,52 @@ def _case_from_mapping(data: dict[str, Any], default_kb_ids: list[str]) -> Query
         mode=_enum_value(data.get("mode"), {"answer", "search"}, "answer"),
         top_k=max(_int_value(data.get("top_k"), 8), 1),
         include_sources=_bool_value(data.get("include_sources"), True),
+        expect_answer=_bool_value(data.get("expect_answer"), True),
         min_citations=min_citations,
+        max_citations=_optional_int_value(data.get("max_citations")),
         allow_degraded=_bool_value(data.get("allow_degraded"), False),
-        expected_answer_terms=_string_list(data.get("expected_answer_terms"), default=[]),
+        expected_degrade_reasons=expected_degrade_reasons,
+        expected_answer_terms=expected_answer_terms,
+        forbidden_answer_terms=forbidden_answer_terms,
         expected_citation_title_terms=_string_list(
             data.get("expected_citation_title_terms"),
             default=[],
         ),
         expected_doc_ids=_string_list(data.get("expected_doc_ids"), default=[]),
+        expected_source_ids=_string_list(data.get("expected_source_ids"), default=[]),
         run_stream=_bool_value(data.get("run_stream"), False),
     )
+
+
+def _case_kb_ids(
+    data: dict[str, Any],
+    default_kb_ids: list[str],
+    knowledge_bases: list[Any],
+) -> list[str]:
+    explicit_ids = data.get("kb_ids")
+    if explicit_ids is not None:
+        return _string_list(explicit_ids, default=default_kb_ids)
+
+    name_terms = _string_list(data.get("kb_name_terms"), default=[])
+    if not name_terms:
+        return list(default_kb_ids)
+
+    matched: list[str] = []
+    for knowledge_base in knowledge_bases:
+        if not isinstance(knowledge_base, dict):
+            continue
+        kb_id = knowledge_base.get("id")
+        name = knowledge_base.get("name")
+        if not isinstance(kb_id, str) or not isinstance(name, str):
+            continue
+        if any(term in name for term in name_terms):
+            matched.append(kb_id)
+    if not matched:
+        raise RegressionError(
+            f"{data.get('case_id')}: no accessible knowledge base matched "
+            f"kb_name_terms={name_terms}"
+        )
+    return matched
 
 
 def _parse_args(argv: Sequence[str] | None) -> RegressionConfig:
@@ -436,6 +557,12 @@ def _int_value(value: Any, default: int) -> int:
         raise RegressionError(f"expected integer, got {value!r}") from exc
 
 
+def _optional_int_value(value: Any) -> int | None:
+    if value is None:
+        return None
+    return max(_int_value(value, 0), 0)
+
+
 def _bool_value(value: Any, default: bool) -> bool:
     if value is None:
         return default
@@ -457,6 +584,23 @@ def _safe_str(value: Any, key: str) -> str:
         item = value.get(key)
         return item if isinstance(item, str) else ""
     return ""
+
+
+def _merge_string_lists(first: list[str], second: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*first, *second]:
+        if item in seen:
+            continue
+        merged.append(item)
+        seen.add(item)
+    return merged
+
+
+def _degrade_reasons(value: Any) -> set[str]:
+    if not isinstance(value, str):
+        return set()
+    return {item.strip() for item in value.split(";") if item.strip()}
 
 
 def _utc_now() -> str:

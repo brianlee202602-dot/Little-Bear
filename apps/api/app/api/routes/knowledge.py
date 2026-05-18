@@ -9,6 +9,8 @@ from starlette.responses import JSONResponse
 from app.api.schemas.knowledge import (
     ChunkData,
     ChunkListResponse,
+    CitationSourceData,
+    CitationSourceResponse,
     DocumentData,
     DocumentListResponse,
     DocumentPreviewData,
@@ -24,8 +26,11 @@ from app.api.schemas.query import CitationData
 from app.db.session import session_scope
 from app.modules.auth.errors import AuthServiceError
 from app.modules.auth.service import AuthService
+from app.modules.config.errors import ConfigServiceError
+from app.modules.config.service import ConfigService
 from app.modules.knowledge import (
     AccessibleChunk,
+    AccessibleCitationSource,
     AccessibleDocument,
     AccessibleDocumentPreview,
     AccessibleDocumentVersion,
@@ -33,7 +38,11 @@ from app.modules.knowledge import (
     KnowledgeService,
     KnowledgeServiceError,
 )
+from app.modules.secrets.service import SecretStoreError, SecretStoreService
+from app.modules.storage import MinioObjectStorage
+from app.modules.storage.service import ObjectStorage
 from app.shared.context import get_request_context
+from app.shared.json_utils import as_dict, json_str
 
 router = APIRouter(prefix="/internal/v1", tags=["knowledge"])
 
@@ -222,6 +231,37 @@ async def get_document_preview(
     return DocumentPreviewResponse(request_id=_request_id(), data=_document_preview_data(preview))
 
 
+@router.get(
+    "/documents/{doc_id}/sources/{source_id}",
+    response_model=CitationSourceResponse,
+)
+async def get_document_source(
+    doc_id: str,
+    source_id: str,
+    authorization: str | None = Header(default=None),
+) -> CitationSourceResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:read")
+            service = KnowledgeService(object_storage=_object_storage_or_none(session))
+            source = service.get_document_source(
+                session,
+                user_id=auth_context.user.id,
+                enterprise_id=auth_context.user.enterprise_id,
+                document_id=doc_id,
+                source_id=source_id,
+                request_id=_request_id(),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="document_source")
+    except KnowledgeServiceError as exc:
+        return _knowledge_error_response(exc, stage="document_source")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="document_source")
+    return CitationSourceResponse(request_id=_request_id(), data=_citation_source_data(source))
+
+
 def _authenticate(session: object, token: str | None, *, required_scope: str):
     return AuthService().authenticate_access_token(
         session,
@@ -297,6 +337,48 @@ def _document_preview_data(item: AccessibleDocumentPreview) -> DocumentPreviewDa
             for citation in item.citations
         ],
     )
+
+
+def _citation_source_data(item: AccessibleCitationSource) -> CitationSourceData:
+    return CitationSourceData(
+        source_id=item.source_id,
+        doc_id=item.doc_id,
+        document_version_id=item.document_version_id,
+        title=item.title,
+        text=item.text,
+        text_preview=item.text_preview,
+        page_start=item.page_start,
+        page_end=item.page_end,
+        ordinal=item.ordinal,
+        heading_path=item.heading_path,
+        source_offsets=item.source_offsets,
+        text_status=item.text_status,
+    )
+
+
+def _object_storage_or_none(session: object) -> ObjectStorage | None:
+    try:
+        snapshot = ConfigService().load_active_config(session, validate_schema=False)  # type: ignore[arg-type]
+        storage_config = as_dict(snapshot.config.get("storage"))
+        if json_str(storage_config, "provider") != "minio":
+            return None
+        endpoint = json_str(storage_config, "minio_endpoint")
+        bucket = json_str(storage_config, "bucket")
+        access_key_ref = json_str(storage_config, "access_key_ref")
+        secret_key_ref = json_str(storage_config, "secret_key_ref")
+        if not endpoint or not bucket or not access_key_ref or not secret_key_ref:
+            return None
+        secret_store = SecretStoreService()
+        return MinioObjectStorage(
+            endpoint=endpoint,
+            bucket=bucket,
+            access_key=secret_store.get_secret_value(session, secret_ref=access_key_ref),  # type: ignore[arg-type]
+            secret_key=secret_store.get_secret_value(session, secret_ref=secret_key_ref),  # type: ignore[arg-type]
+            region=json_str(storage_config, "region", default="us-east-1") or "us-east-1",
+            object_key_prefix=json_str(storage_config, "object_key_prefix", default="") or "",
+        )
+    except (ConfigServiceError, SecretStoreError, SQLAlchemyError, AttributeError, TypeError):
+        return None
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
