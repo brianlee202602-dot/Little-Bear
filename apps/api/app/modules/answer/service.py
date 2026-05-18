@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 
 from app.modules.answer.schemas import AnswerGenerationResult
 from app.modules.context.schemas import QueryContext
-from app.modules.models import ChatCompletionClient, ChatMessage, ModelClientError
+from app.modules.models import (
+    ChatCompletionChunk,
+    ChatCompletionClient,
+    ChatMessage,
+    ModelClientError,
+)
 from app.shared.json_utils import stable_json_hash
 
 SYSTEM_PROMPT = """你是企业内部知识库问答助手。
@@ -87,6 +93,117 @@ class AnswerService:
             output_hash=stable_json_hash({"answer": result.content}),
         )
 
+    def stream(self, *, query_context: QueryContext | None) -> AnswerStreamRunner:
+        return AnswerStreamRunner(
+            query_context=query_context,
+            chat_client=self.chat_client,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+
+
+class AnswerStreamRunner:
+    """执行一次 LLM 流式生成，并在结束后暴露可写日志的汇总结果。"""
+
+    def __init__(
+        self,
+        *,
+        query_context: QueryContext | None,
+        chat_client: ChatCompletionClient | None,
+        temperature: float,
+        max_tokens: int,
+    ) -> None:
+        self.query_context = query_context
+        self.chat_client = chat_client
+        self.temperature = temperature
+        self.max_tokens = max(max_tokens, 1)
+        self.result: AnswerGenerationResult | None = None
+
+    def stream_tokens(self) -> Iterator[str]:
+        if self.query_context is None or not self.query_context.chunks:
+            self.result = AnswerGenerationResult(
+                answer="",
+                degraded=True,
+                degrade_reason="llm_context_empty",
+            )
+            return
+        if self.chat_client is None:
+            self.result = AnswerGenerationResult(
+                answer="",
+                degraded=True,
+                degrade_reason="llm_runtime_config_unavailable",
+            )
+            return
+
+        messages = _messages_for_context(self.query_context)
+        started_at = time.monotonic()
+        prompt_hash = _messages_hash(messages)
+        input_hash = _context_input_hash(self.query_context)
+        model_name = _model_name(self.chat_client)
+        model_route_hash = _model_route_hash(self.chat_client)
+        answer_parts: list[str] = []
+        token_usage: dict[str, int] | None = None
+        try:
+            stream_complete = getattr(self.chat_client, "stream_complete", None)
+            if callable(stream_complete):
+                for chunk in stream_complete(
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                ):
+                    if not isinstance(chunk, ChatCompletionChunk):
+                        continue
+                    if chunk.token_usage is not None:
+                        token_usage = chunk.token_usage
+                    if not chunk.content_delta:
+                        continue
+                    answer_parts.append(chunk.content_delta)
+                    yield chunk.content_delta
+                answer = "".join(answer_parts).strip()
+            else:
+                result = self.chat_client.complete(
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+                answer = result.content
+                token_usage = result.token_usage
+                if answer:
+                    yield answer
+            if not answer:
+                raise ModelClientError(
+                    "LLM_PROVIDER_RESPONSE_INVALID",
+                    "LLM provider stream did not contain answer content",
+                )
+        except ModelClientError as exc:
+            self.result = AnswerGenerationResult(
+                answer="",
+                degraded=True,
+                degrade_reason=exc.error_code,
+                model_call_attempted=True,
+                model_name=model_name,
+                model_route_hash=model_route_hash,
+                latency_ms=_elapsed_ms(started_at),
+                prompt_hash=prompt_hash,
+                input_hash=input_hash,
+                error_message=exc.message,
+            )
+            return
+
+        self.result = AnswerGenerationResult(
+            answer=answer,
+            degraded=False,
+            degrade_reason=None,
+            token_usage=token_usage,
+            model_call_attempted=True,
+            model_name=model_name,
+            model_route_hash=model_route_hash,
+            latency_ms=_elapsed_ms(started_at),
+            prompt_hash=prompt_hash,
+            input_hash=input_hash,
+            output_hash=stable_json_hash({"answer": answer}),
+        )
+
 
 def _user_prompt(query_context: QueryContext) -> str:
     context_blocks = []
@@ -110,6 +227,13 @@ def _user_prompt(query_context: QueryContext) -> str:
             "\n\n".join(context_blocks),
             "请基于以上资料回答，并在关键结论后使用 [source:...] 标注引用。",
         ]
+    )
+
+
+def _messages_for_context(query_context: QueryContext) -> tuple[ChatMessage, ...]:
+    return (
+        ChatMessage(role="system", content=SYSTEM_PROMPT),
+        ChatMessage(role="user", content=_user_prompt(query_context)),
     )
 
 

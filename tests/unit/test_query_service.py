@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 from app.modules.answer import AnswerService
+from app.modules.answer.schemas import AnswerGenerationResult
 from app.modules.models import ChatCompletionResult, ChatMessage, ModelClientError
 from app.modules.query.errors import QueryServiceError
 from app.modules.query.service import QueryService
@@ -213,6 +214,7 @@ def test_create_query_returns_fused_permission_gated_citations_and_logs() -> Non
                     )
                 ]
             ),
+            _Result(all_rows=[_Row({"kb_id": KB_ID})]),
             _Result(
                 all_rows=[
                     _Row(
@@ -420,6 +422,7 @@ def test_create_query_without_active_index_returns_empty_keyword_only_result() -
                     )
                 ]
             ),
+            _Result(all_rows=[_Row({"kb_id": KB_ID})]),
             _Result(all_rows=[]),
             _Result(),
         ]
@@ -440,6 +443,8 @@ def test_create_query_without_active_index_returns_empty_keyword_only_result() -
     )
 
     assert result.citations == ()
+    assert "没有在当前账号可访问" in result.answer
+    assert "没有可用于生成答案的上下文" in result.answer
     assert result.degraded is True
     assert result.degrade_reason == "llm_context_empty"
     assert session.executed[-1][1]["candidate_count"] == 0
@@ -517,7 +522,8 @@ def test_create_query_degrades_and_audits_unauthorized_llm_citation() -> None:
         trace_id="trace_query",
     )
 
-    assert result.answer == ""
+    assert "未授权或未命中的资料" in result.answer
+    assert "系统已拦截原回答" in result.answer
     assert result.degraded is True
     assert result.degrade_reason == "citation_unauthorized"
     audit_params = next(
@@ -552,10 +558,47 @@ def test_create_query_degrades_when_llm_provider_fails() -> None:
         trace_id="trace_query",
     )
 
-    assert result.answer == ""
+    assert "回答生成模型不可用" in result.answer
+    assert "系统找到了 1 条当前账号可访问的引用资料" in result.answer
     assert result.degraded is True
     assert result.degrade_reason == "vector_retriever_unavailable;LLM_PROVIDER_UNAVAILABLE"
     assert result.citations[0].source_id == CHUNK_ID
+
+
+def test_finalize_query_stream_returns_degraded_answer_when_llm_provider_fails() -> None:
+    session = _session_with_one_keyword_candidate(context_chunks=True)
+    service = QueryService()
+    plan = service.create_query_stream_plan(
+        session,
+        user_id=USER_ID,
+        enterprise_id=ENTERPRISE_ID,
+        kb_ids=[KB_ID],
+        query_text="员工手册",
+        mode="answer",
+        filters={},
+        top_k=3,
+        include_sources=True,
+        request_id="req_query",
+        trace_id="trace_query",
+    )
+
+    result = service.finalize_query_stream(
+        session,
+        plan=plan,
+        answer_result=AnswerGenerationResult(
+            answer="",
+            degraded=True,
+            degrade_reason="LLM_PROVIDER_UNAVAILABLE",
+            model_call_attempted=True,
+            model_name="qwen",
+            model_route_hash="llm-route",
+        ),
+    )
+
+    assert "回答生成模型不可用" in result.answer
+    assert "系统找到了 1 条当前账号可访问的引用资料" in result.answer
+    assert result.degraded is True
+    assert result.degrade_reason == "vector_retriever_unavailable;LLM_PROVIDER_UNAVAILABLE"
 
 
 def test_create_query_rejects_unsupported_filter() -> None:
@@ -621,6 +664,7 @@ def _session_with_one_keyword_candidate(
                 )
             ]
         ),
+        _Result(all_rows=[_Row({"kb_id": KB_ID})]),
         _Result(
             all_rows=[
                 _Row(

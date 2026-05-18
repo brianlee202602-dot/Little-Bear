@@ -219,22 +219,36 @@ export interface AdminKnowledgeBaseData {
   name: string;
   status: "active" | "disabled" | "archived";
   owner_department_id: string;
-  default_visibility: "department" | "enterprise";
+  kb_visibility: "enterprise" | "department_acl" | "private";
+  default_document_visibility: "department" | "enterprise";
+  default_document_owner_department_id: string;
+  access_rules: KnowledgeBaseAccessRuleData[];
   config_scope_id: string | null;
   policy_version: number;
+}
+
+export interface KnowledgeBaseAccessRuleData {
+  subject_type: "department" | "user" | "role";
+  subject_id: string;
+  permission: "discover" | "query" | "manage";
 }
 
 export interface AdminKnowledgeBaseCreateRequest {
   name: string;
   owner_department_id: string;
-  default_visibility: "department" | "enterprise";
+  kb_visibility: "enterprise" | "department_acl" | "private";
+  default_document_visibility: "department" | "enterprise";
+  default_document_owner_department_id?: string | null;
+  access_rules?: KnowledgeBaseAccessRuleData[];
   config_scope_id?: string | null;
 }
 
 export interface AdminKnowledgeBasePatchRequest {
   name?: string;
   status?: "active" | "disabled" | "archived";
-  default_visibility?: "department" | "enterprise";
+  kb_visibility?: "enterprise" | "department_acl" | "private";
+  default_document_visibility?: "department" | "enterprise";
+  default_document_owner_department_id?: string | null;
   config_scope_id?: string | null;
 }
 
@@ -334,12 +348,32 @@ export interface ResourcePermissionPutRequest {
   owner_department_id?: string | null;
 }
 
+export interface KnowledgeBasePermissionPutRequest {
+  kb_visibility: "enterprise" | "department_acl" | "private";
+  default_document_visibility: "department" | "enterprise";
+  default_document_owner_department_id: string;
+  access_rules: KnowledgeBaseAccessRuleData[];
+}
+
 export interface PermissionPolicyResponse {
   request_id: string;
   data: {
-    resource_type: "knowledge_base" | "document";
+    resource_type: "document";
     resource_id: string;
     visibility: "department" | "enterprise";
+    permission_version: number;
+  };
+}
+
+export interface KnowledgeBasePermissionPolicyResponse {
+  request_id: string;
+  data: {
+    resource_type: "knowledge_base";
+    resource_id: string;
+    kb_visibility: "enterprise" | "department_acl" | "private";
+    default_document_visibility: "department" | "enterprise";
+    default_document_owner_department_id: string;
+    access_rules: KnowledgeBaseAccessRuleData[];
     permission_version: number;
   };
 }
@@ -1087,11 +1121,11 @@ export async function listAdminDocumentChunks(
 
 export async function putKnowledgeBasePermissions(
   kbId: string,
-  payload: ResourcePermissionPutRequest,
+  payload: KnowledgeBasePermissionPutRequest,
   accessToken: string,
   confirmed: boolean,
-): Promise<PermissionPolicyResponse> {
-  return requestJson<PermissionPolicyResponse>(
+): Promise<KnowledgeBasePermissionPolicyResponse> {
+  return requestJson<KnowledgeBasePermissionPolicyResponse>(
     `/internal/v1/knowledge-bases/${encodeURIComponent(kbId)}/permissions`,
     {
       method: "PUT",

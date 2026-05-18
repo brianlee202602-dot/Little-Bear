@@ -160,7 +160,9 @@ def _knowledge_base() -> AdminKnowledgeBase:
         name="制度知识库",
         status="active",
         owner_department_id="department_1",
-        default_visibility="department",
+        kb_visibility="department_acl",
+        default_document_visibility="department",
+        default_document_owner_department_id="department_1",
         config_scope_id=None,
     )
 
@@ -377,7 +379,11 @@ def test_knowledge_base_create_route_passes_confirmation_header(monkeypatch) -> 
             name=kwargs["name"],
             status="active",
             owner_department_id=kwargs["owner_department_id"],
-            default_visibility=kwargs["default_visibility"],
+            kb_visibility=kwargs["kb_visibility"],
+            default_document_visibility=kwargs["default_document_visibility"],
+            default_document_owner_department_id=kwargs[
+                "default_document_owner_department_id"
+            ],
             config_scope_id=kwargs["config_scope_id"],
             policy_version=1,
         )
@@ -403,7 +409,9 @@ def test_knowledge_base_create_route_passes_confirmation_header(monkeypatch) -> 
         json={
             "name": "制度知识库",
             "owner_department_id": "department_1",
-            "default_visibility": "enterprise",
+            "kb_visibility": "enterprise",
+            "default_document_visibility": "department",
+            "default_document_owner_department_id": "department_1",
             "config_scope_id": "kb-default",
         },
     )
@@ -457,7 +465,11 @@ def test_knowledge_base_patch_route_passes_visibility_confirmation(monkeypatch) 
             name=kwargs["name"],
             status=kwargs["status"],
             owner_department_id="department_1",
-            default_visibility=kwargs["default_visibility"],
+            kb_visibility=kwargs["kb_visibility"],
+            default_document_visibility=kwargs["default_document_visibility"],
+            default_document_owner_department_id=kwargs[
+                "default_document_owner_department_id"
+            ],
             config_scope_id=None,
             policy_version=2,
         )
@@ -483,7 +495,9 @@ def test_knowledge_base_patch_route_passes_visibility_confirmation(monkeypatch) 
         json={
             "name": "制度知识库",
             "status": "active",
-            "default_visibility": "enterprise",
+            "kb_visibility": "enterprise",
+            "default_document_visibility": "department",
+            "default_document_owner_department_id": "department_1",
         },
     )
 

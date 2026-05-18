@@ -25,6 +25,7 @@ from app.api.schemas.admin import (
     FolderListResponse,
     FolderPatchRequest,
     FolderResponse,
+    KnowledgeBaseAccessRuleData,
     KnowledgeBaseCreateRequest,
     KnowledgeBaseData,
     KnowledgeBaseListResponse,
@@ -61,6 +62,8 @@ from app.modules.admin.schemas import (
     AdminDocumentVersion,
     AdminFolder,
     AdminKnowledgeBase,
+    AdminKnowledgeBaseAccessRule,
+    AdminKnowledgeBaseAccessRuleInput,
     AdminRole,
     AdminRoleBinding,
     AdminUser,
@@ -551,7 +554,19 @@ async def create_knowledge_base(
                 actor_user_id=auth_context.user.id,
                 name=payload.name,
                 owner_department_id=payload.owner_department_id,
-                default_visibility=payload.default_visibility,
+                kb_visibility=payload.kb_visibility,
+                default_document_visibility=payload.default_document_visibility,
+                default_document_owner_department_id=(
+                    payload.default_document_owner_department_id
+                ),
+                access_rules=[
+                    AdminKnowledgeBaseAccessRuleInput(
+                        subject_type=rule.subject_type,
+                        subject_id=rule.subject_id,
+                        permission=rule.permission,
+                    )
+                    for rule in payload.access_rules
+                ],
                 config_scope_id=payload.config_scope_id,
                 confirmed_enterprise_visibility=(
                     x_knowledge_base_confirm == "enterprise-visible"
@@ -617,7 +632,11 @@ async def patch_knowledge_base(
                 kb_id=kb_id,
                 name=payload.name,
                 status=payload.status,
-                default_visibility=payload.default_visibility,
+                kb_visibility=payload.kb_visibility,
+                default_document_visibility=payload.default_document_visibility,
+                default_document_owner_department_id=(
+                    payload.default_document_owner_department_id
+                ),
                 config_scope_id=payload.config_scope_id,
                 confirmed_visibility_expand=(
                     x_knowledge_base_confirm == "visibility-expand"
@@ -1207,6 +1226,7 @@ def _actor_context(auth_context: AuthContext) -> AdminActorContext:
         user_id=auth_context.user.id,
         scopes=auth_context.user.scopes,
         department_ids=tuple(department.id for department in auth_context.user.departments),
+        role_ids=tuple(role.id for role in auth_context.user.roles),
         knowledge_base_ids=knowledge_base_ids,
         can_manage_all_knowledge_bases=can_manage_all_knowledge_bases,
     )
@@ -1252,9 +1272,24 @@ def _knowledge_base_data(knowledge_base: AdminKnowledgeBase) -> KnowledgeBaseDat
         name=knowledge_base.name,
         status=knowledge_base.status,
         owner_department_id=knowledge_base.owner_department_id,
-        default_visibility=knowledge_base.default_visibility,
+        kb_visibility=knowledge_base.kb_visibility,
+        default_document_visibility=knowledge_base.default_document_visibility,
+        default_document_owner_department_id=knowledge_base.default_document_owner_department_id,
+        access_rules=[
+            _knowledge_base_access_rule_data(rule) for rule in knowledge_base.access_rules
+        ],
         config_scope_id=knowledge_base.config_scope_id,
         policy_version=knowledge_base.policy_version,
+    )
+
+
+def _knowledge_base_access_rule_data(
+    rule: AdminKnowledgeBaseAccessRule,
+) -> KnowledgeBaseAccessRuleData:
+    return KnowledgeBaseAccessRuleData(
+        subject_type=rule.subject_type,
+        subject_id=rule.subject_id,
+        permission=rule.permission,
     )
 
 

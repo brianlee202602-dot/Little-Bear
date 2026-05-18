@@ -45,6 +45,13 @@ class DraftVectorPoint:
 
 
 @dataclass(frozen=True)
+class VectorPayloadUpdate:
+    collection_name: str
+    vector_id: str
+    payload: dict[str, object]
+
+
+@dataclass(frozen=True)
 class ReadyIndexVersion:
     enterprise_id: str
     kb_id: str

@@ -23,7 +23,10 @@ from app.modules.admin.schemas import (
     AdminFolder,
     AdminFolderList,
     AdminKnowledgeBase,
+    AdminKnowledgeBaseAccessRule,
+    AdminKnowledgeBaseAccessRuleInput,
     AdminKnowledgeBaseList,
+    AdminKnowledgeBasePermissionPolicy,
     AdminPermissionPolicy,
     AdminRole,
     AdminRoleBinding,
@@ -48,6 +51,9 @@ HIGH_RISK_SCOPE_EXACT = {
     "permission:manage",
 }
 HIGH_RISK_SCOPE_PREFIXES = ("config:", "user:", "role:", "permission:")
+SUPPORTED_KB_VISIBILITIES = {"enterprise", "department_acl", "private"}
+SUPPORTED_KB_ACCESS_SUBJECT_TYPES = {"department", "user", "role"}
+SUPPORTED_KB_ACCESS_PERMISSIONS = {"discover", "query", "manage"}
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,7 @@ class AdminActorContext:
     user_id: str
     scopes: tuple[str, ...]
     department_ids: tuple[str, ...] = ()
+    role_ids: tuple[str, ...] = ()
     knowledge_base_ids: tuple[str, ...] = ()
     can_manage_all_knowledge_bases: bool = False
 
@@ -288,6 +295,13 @@ class AdminService:
             if actor_context.knowledge_base_ids:
                 resource_conditions.append("id = ANY(CAST(:actor_kb_ids AS uuid[]))")
                 params["actor_kb_ids"] = list(actor_context.knowledge_base_ids)
+            acl_condition = _actor_kb_manage_acl_sql(
+                actor_context,
+                params,
+                kb_id_expr="knowledge_bases.id",
+            )
+            if acl_condition:
+                resource_conditions.append(acl_condition)
             if resource_conditions:
                 conditions.append(f"({' OR '.join(resource_conditions)})")
             else:
@@ -303,7 +317,11 @@ class AdminService:
                         name,
                         status,
                         owner_department_id::text AS owner_department_id,
-                        default_visibility,
+                        kb_visibility,
+                        default_document_visibility,
+                        default_document_owner_department_id::text
+                            AS default_document_owner_department_id,
+                        {_knowledge_base_access_rules_sql("knowledge_bases.id")},
                         config_scope_id,
                         policy_version
                     FROM knowledge_bases
@@ -351,7 +369,10 @@ class AdminService:
         actor_user_id: str,
         name: str,
         owner_department_id: str,
-        default_visibility: str,
+        kb_visibility: str,
+        default_document_visibility: str,
+        default_document_owner_department_id: str | None = None,
+        access_rules: list[AdminKnowledgeBaseAccessRuleInput] | None = None,
         config_scope_id: str | None = None,
         confirmed_enterprise_visibility: bool,
         actor_context: AdminActorContext | None = None,
@@ -368,8 +389,9 @@ class AdminService:
                 "knowledge base name and owner department are required",
                 status_code=400,
             )
+        _validate_kb_visibility(kb_visibility)
         try:
-            _validate_visibility(default_visibility)
+            _validate_visibility(default_document_visibility)
         except PermissionServiceError as exc:
             raise AdminServiceError(
                 exc.error_code,
@@ -378,12 +400,12 @@ class AdminService:
                 retryable=exc.retryable,
                 details=exc.details,
             ) from exc
-        if default_visibility == "enterprise" and not confirmed_enterprise_visibility:
+        if kb_visibility == "enterprise" and not confirmed_enterprise_visibility:
             raise AdminServiceError(
                 "ADMIN_CONFIRMATION_REQUIRED",
                 "enterprise visible knowledge base requires confirmation",
                 status_code=428,
-                details={"default_visibility": default_visibility},
+                details={"kb_visibility": kb_visibility},
             )
 
         owner_department = self._resolve_department(
@@ -392,6 +414,22 @@ class AdminService:
             department_id=owner_department_id,
         )
         self._ensure_actor_can_manage_kb_owner(actor_context, owner_department.id)
+        default_document_owner = self._resolve_department(
+            session,
+            enterprise_id=enterprise_id,
+            department_id=default_document_owner_department_id or owner_department.id,
+        )
+        normalized_access_rules = _normalize_kb_access_rules(
+            access_rules or [],
+            kb_visibility=kb_visibility,
+            owner_department_id=owner_department.id,
+        )
+        self._ensure_default_document_permission_within_kb_access(
+            kb_visibility=kb_visibility,
+            access_rules=normalized_access_rules,
+            default_document_visibility=default_document_visibility,
+            default_document_owner_department_id=default_document_owner.id,
+        )
 
         kb_id = str(uuid.uuid4())
         policy_version = 1
@@ -401,12 +439,15 @@ class AdminService:
                     """
                     INSERT INTO knowledge_bases(
                         id, enterprise_id, name, status, owner_department_id,
-                        default_visibility, policy_version, config_scope_id,
+                        kb_visibility, default_document_visibility,
+                        default_document_owner_department_id, policy_version, config_scope_id,
                         created_by, updated_by
                     )
                     VALUES (
                         CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :name, 'active',
-                        CAST(:owner_department_id AS uuid), :default_visibility, :policy_version,
+                        CAST(:owner_department_id AS uuid), :kb_visibility,
+                        :default_document_visibility,
+                        CAST(:default_document_owner_department_id AS uuid), :policy_version,
                         :config_scope_id, CAST(:actor_user_id AS uuid),
                         CAST(:actor_user_id AS uuid)
                     )
@@ -417,11 +458,20 @@ class AdminService:
                     "enterprise_id": enterprise_id,
                     "name": name,
                     "owner_department_id": owner_department.id,
-                    "default_visibility": default_visibility,
+                    "kb_visibility": kb_visibility,
+                    "default_document_visibility": default_document_visibility,
+                    "default_document_owner_department_id": default_document_owner.id,
                     "policy_version": policy_version,
                     "config_scope_id": config_scope_id,
                     "actor_user_id": actor_user_id,
                 },
+            )
+            self._replace_knowledge_base_access_rules(
+                session,
+                enterprise_id=enterprise_id,
+                kb_id=kb_id,
+                access_rules=normalized_access_rules,
+                actor_user_id=actor_user_id,
             )
             permission_version = self._bump_permission_version(session, enterprise_id)
             policy_id = self._replace_resource_policy(
@@ -430,7 +480,7 @@ class AdminService:
                 resource_type="knowledge_base",
                 resource_id=kb_id,
                 owner_department_id=owner_department.id,
-                visibility=default_visibility,
+                visibility=_kb_visibility_policy_visibility(kb_visibility),
                 policy_version=policy_version,
                 actor_user_id=actor_user_id,
             )
@@ -440,7 +490,7 @@ class AdminService:
                 resource_type="knowledge_base",
                 resource_id=kb_id,
                 owner_department_id=owner_department.id,
-                visibility=default_visibility,
+                visibility=_kb_visibility_policy_visibility(kb_visibility),
                 permission_version=permission_version,
                 policy_version=policy_version,
                 policy_id=policy_id,
@@ -458,7 +508,10 @@ class AdminService:
                 summary={
                     "kb_id": kb_id,
                     "name": name,
-                    "default_visibility": default_visibility,
+                    "kb_visibility": kb_visibility,
+                    "default_document_visibility": default_document_visibility,
+                    "default_document_owner_department_id": default_document_owner.id,
+                    "access_rules": [rule.__dict__ for rule in normalized_access_rules],
                     "owner_department_id": owner_department.id,
                     "permission_version": permission_version,
                     "policy_version": policy_version,
@@ -492,9 +545,19 @@ class AdminService:
             name=name,
             status="active",
             owner_department_id=owner_department.id,
-            default_visibility=default_visibility,
+            kb_visibility=kb_visibility,
+            default_document_visibility=default_document_visibility,
+            default_document_owner_department_id=default_document_owner.id,
             config_scope_id=config_scope_id,
             policy_version=policy_version,
+            access_rules=tuple(
+                AdminKnowledgeBaseAccessRule(
+                    subject_type=rule.subject_type,
+                    subject_id=rule.subject_id,
+                    permission=rule.permission,
+                )
+                for rule in normalized_access_rules
+            ),
         )
 
     def patch_knowledge_base(
@@ -506,7 +569,9 @@ class AdminService:
         kb_id: str,
         name: str | None = None,
         status: str | None = None,
-        default_visibility: str | None = None,
+        kb_visibility: str | None = None,
+        default_document_visibility: str | None = None,
+        default_document_owner_department_id: str | None = None,
         config_scope_id: str | None = None,
         confirmed_visibility_expand: bool,
         actor_context: AdminActorContext | None = None,
@@ -529,8 +594,11 @@ class AdminService:
         before = {
             "name": current.name,
             "status": current.status,
-            "default_visibility": current.default_visibility,
+            "kb_visibility": current.kb_visibility,
+            "default_document_visibility": current.default_document_visibility,
+            "default_document_owner_department_id": current.default_document_owner_department_id,
             "owner_department_id": current.owner_department_id,
+            "access_rules": [rule.__dict__ for rule in current.access_rules],
             "config_scope_id": current.config_scope_id,
             "policy_version": current.policy_version,
         }
@@ -554,14 +622,14 @@ class AdminService:
                 )
             updates.append("status = :status")
             params["status"] = status
-        visibility_changed = (
-            default_visibility is not None
-            and default_visibility != current.default_visibility
-        )
-        next_policy_version = current.policy_version
-        if default_visibility is not None:
+        next_kb_visibility = current.kb_visibility
+        if kb_visibility is not None:
+            _validate_kb_visibility(kb_visibility)
+            next_kb_visibility = kb_visibility
+        next_default_document_visibility = current.default_document_visibility
+        if default_document_visibility is not None:
             try:
-                _validate_visibility(default_visibility)
+                _validate_visibility(default_document_visibility)
             except PermissionServiceError as exc:
                 raise AdminServiceError(
                     exc.error_code,
@@ -570,25 +638,78 @@ class AdminService:
                     retryable=exc.retryable,
                     details=exc.details,
                 ) from exc
-            if visibility_changed and _visibility_expands(
-                current.default_visibility,
-                default_visibility,
+            next_default_document_visibility = default_document_visibility
+        next_default_document_owner_department_id = current.default_document_owner_department_id
+        if default_document_owner_department_id is not None:
+            next_default_document_owner_department_id = self._resolve_department(
+                session,
+                enterprise_id=enterprise_id,
+                department_id=default_document_owner_department_id,
+            ).id
+
+        visibility_changed = next_kb_visibility != current.kb_visibility
+        default_document_permission_changed = (
+            next_default_document_visibility != current.default_document_visibility
+            or next_default_document_owner_department_id
+            != current.default_document_owner_department_id
+        )
+        effective_access_rules = current.access_rules
+        if next_kb_visibility != "enterprise":
+            effective_access_rules = _normalize_kb_access_rules(
+                [
+                    AdminKnowledgeBaseAccessRuleInput(
+                        subject_type=rule.subject_type,
+                        subject_id=rule.subject_id,
+                        permission=rule.permission,
+                    )
+                    for rule in current.access_rules
+                ],
+                kb_visibility=next_kb_visibility,
+                owner_department_id=current.owner_department_id,
+            )
+        access_rules_changed = (
+            _kb_access_rule_key(effective_access_rules)
+            != _kb_access_rule_key(current.access_rules)
+        )
+        next_policy_version = current.policy_version
+        if kb_visibility is not None:
+            if visibility_changed and _kb_visibility_expands(
+                current.kb_visibility,
+                next_kb_visibility,
             ) and not confirmed_visibility_expand:
                 raise AdminServiceError(
                     "ADMIN_CONFIRMATION_REQUIRED",
                     "expanding knowledge base visibility requires confirmation",
                     status_code=428,
                     details={
-                        "previous_visibility": current.default_visibility,
-                        "next_visibility": default_visibility,
+                        "previous_visibility": current.kb_visibility,
+                        "next_visibility": next_kb_visibility,
                     },
                 )
-            updates.append("default_visibility = :default_visibility")
-            params["default_visibility"] = default_visibility
+            updates.append("kb_visibility = :kb_visibility")
+            params["kb_visibility"] = next_kb_visibility
             if visibility_changed:
                 next_policy_version = current.policy_version + 1
                 updates.append("policy_version = :policy_version")
                 params["policy_version"] = next_policy_version
+        if default_document_visibility is not None:
+            updates.append("default_document_visibility = :default_document_visibility")
+            params["default_document_visibility"] = next_default_document_visibility
+        if default_document_owner_department_id is not None:
+            updates.append(
+                "default_document_owner_department_id = "
+                "CAST(:default_document_owner_department_id AS uuid)"
+            )
+            params["default_document_owner_department_id"] = (
+                next_default_document_owner_department_id
+            )
+        if visibility_changed or default_document_permission_changed:
+            self._ensure_default_document_permission_within_kb_access(
+                kb_visibility=next_kb_visibility,
+                access_rules=effective_access_rules,
+                default_document_visibility=next_default_document_visibility,
+                default_document_owner_department_id=next_default_document_owner_department_id,
+            )
         if config_scope_id is not None:
             config_scope_id = config_scope_id.strip() or None
             updates.append("config_scope_id = :config_scope_id")
@@ -613,14 +734,23 @@ class AdminService:
             )
             permission_version = self._bump_permission_version(session, enterprise_id)
             snapshot_id = None
-            if visibility_changed and default_visibility is not None:
+            refresh_job_id = None
+            if access_rules_changed:
+                self._replace_knowledge_base_access_rules(
+                    session,
+                    enterprise_id=enterprise_id,
+                    kb_id=kb_id,
+                    access_rules=effective_access_rules,
+                    actor_user_id=actor_user_id,
+                )
+            if visibility_changed:
                 policy_id = self._replace_resource_policy(
                     session,
                     enterprise_id=enterprise_id,
                     resource_type="knowledge_base",
                     resource_id=kb_id,
                     owner_department_id=current.owner_department_id,
-                    visibility=default_visibility,
+                    visibility=_kb_visibility_policy_visibility(next_kb_visibility),
                     policy_version=next_policy_version,
                     actor_user_id=actor_user_id,
                 )
@@ -630,27 +760,23 @@ class AdminService:
                     resource_type="knowledge_base",
                     resource_id=kb_id,
                     owner_department_id=current.owner_department_id,
-                    visibility=default_visibility,
+                    visibility=_kb_visibility_policy_visibility(next_kb_visibility),
                     permission_version=permission_version,
                     policy_version=next_policy_version,
                     policy_id=policy_id,
                 )
                 snapshot_id = snapshot["snapshot_id"]
-                if _visibility_tightens(current.default_visibility, default_visibility):
-                    self._insert_access_block(
-                        session,
-                        enterprise_id=enterprise_id,
-                        resource_type="knowledge_base",
-                        resource_id=kb_id,
-                        reason="permission_tightened",
-                        block_level="query",
-                        actor_user_id=actor_user_id,
-                        metadata={
-                            "previous_visibility": current.default_visibility,
-                            "next_visibility": default_visibility,
-                            "permission_version": permission_version,
-                        },
-                    )
+                refresh_job_id = self._enqueue_permission_refresh_job(
+                    session,
+                    enterprise_id=enterprise_id,
+                    kb_id=kb_id,
+                    doc_id=None,
+                    actor_user_id=actor_user_id,
+                    reason="knowledge_base_permission_changed",
+                    permission_snapshot_id=snapshot_id,
+                    permission_version=permission_version,
+                    resource_type="knowledge_base",
+                )
             after = self._load_knowledge_base(session, kb_id, enterprise_id=enterprise_id)
             event_name, action, risk_level = _knowledge_base_update_event(
                 before_status=current.status,
@@ -672,8 +798,13 @@ class AdminService:
                     "after": {
                         "name": after.name,
                         "status": after.status,
-                        "default_visibility": after.default_visibility,
+                        "kb_visibility": after.kb_visibility,
+                        "default_document_visibility": after.default_document_visibility,
+                        "default_document_owner_department_id": (
+                            after.default_document_owner_department_id
+                        ),
                         "owner_department_id": after.owner_department_id,
+                        "access_rules": [rule.__dict__ for rule in after.access_rules],
                         "config_scope_id": after.config_scope_id,
                         "policy_version": after.policy_version,
                     },
@@ -684,6 +815,7 @@ class AdminService:
                     ],
                     "permission_version": permission_version,
                     "permission_snapshot_id": snapshot_id,
+                    "refresh_job_id": refresh_job_id,
                 },
             )
         except PermissionServiceError as exc:
@@ -1424,11 +1556,13 @@ class AdminService:
         enterprise_id: str,
         actor_user_id: str,
         kb_id: str,
-        visibility: str,
-        owner_department_id: str | None,
+        kb_visibility: str,
+        default_document_visibility: str,
+        default_document_owner_department_id: str,
+        access_rules: list[AdminKnowledgeBaseAccessRuleInput],
         confirmed: bool,
         actor_context: AdminActorContext | None = None,
-    ) -> AdminPermissionPolicy:
+    ) -> AdminKnowledgeBasePermissionPolicy:
         """独立替换知识库权限策略。"""
 
         self._ensure_actor_can_manage_permissions(actor_context)
@@ -1439,8 +1573,10 @@ class AdminService:
                 status_code=428,
             )
         current = self._load_knowledge_base(session, kb_id, enterprise_id=enterprise_id)
+        self._ensure_actor_can_access_knowledge_base(actor_context, current)
+        _validate_kb_visibility(kb_visibility)
         try:
-            _validate_visibility(visibility)
+            _validate_visibility(default_document_visibility)
         except PermissionServiceError as exc:
             raise AdminServiceError(
                 exc.error_code,
@@ -1449,22 +1585,37 @@ class AdminService:
                 retryable=exc.retryable,
                 details=exc.details,
             ) from exc
-        next_owner_department_id = current.owner_department_id
-        if owner_department_id is not None:
-            next_owner_department_id = self._resolve_department(
-                session,
-                enterprise_id=enterprise_id,
-                department_id=owner_department_id,
-            ).id
+        default_document_owner = self._resolve_department(
+            session,
+            enterprise_id=enterprise_id,
+            department_id=default_document_owner_department_id,
+        )
+        normalized_access_rules = _normalize_kb_access_rules(
+            access_rules,
+            kb_visibility=kb_visibility,
+            owner_department_id=current.owner_department_id,
+        )
+        self._ensure_default_document_permission_within_kb_access(
+            kb_visibility=kb_visibility,
+            access_rules=normalized_access_rules,
+            default_document_visibility=default_document_visibility,
+            default_document_owner_department_id=default_document_owner.id,
+        )
         permission_changed = (
-            visibility != current.default_visibility
-            or next_owner_department_id != current.owner_department_id
+            kb_visibility != current.kb_visibility
+            or default_document_visibility != current.default_document_visibility
+            or default_document_owner.id != current.default_document_owner_department_id
+            or _kb_access_rule_key(normalized_access_rules)
+            != _kb_access_rule_key(current.access_rules)
         )
         if not permission_changed:
-            return AdminPermissionPolicy(
+            return AdminKnowledgeBasePermissionPolicy(
                 resource_type="knowledge_base",
                 resource_id=current.id,
-                visibility=current.default_visibility,
+                kb_visibility=current.kb_visibility,
+                default_document_visibility=current.default_document_visibility,
+                default_document_owner_department_id=current.default_document_owner_department_id,
+                access_rules=current.access_rules,
                 permission_version=self._load_resource_permission_version(
                     session,
                     enterprise_id=enterprise_id,
@@ -1473,19 +1624,24 @@ class AdminService:
                 ),
             )
 
-        permission_tightened = _visibility_tightens(current.default_visibility, visibility) or (
-            visibility == "department" and next_owner_department_id != current.owner_department_id
-        )
+        permission_tightened = _kb_visibility_tightens(current.kb_visibility, kb_visibility)
         next_policy_version = current.policy_version + 1
         try:
+            self._replace_knowledge_base_access_rules(
+                session,
+                enterprise_id=enterprise_id,
+                kb_id=kb_id,
+                access_rules=normalized_access_rules,
+                actor_user_id=actor_user_id,
+            )
             permission_version = self._bump_permission_version(session, enterprise_id)
             policy_id = self._replace_resource_policy(
                 session,
                 enterprise_id=enterprise_id,
                 resource_type="knowledge_base",
                 resource_id=kb_id,
-                owner_department_id=next_owner_department_id,
-                visibility=visibility,
+                owner_department_id=current.owner_department_id,
+                visibility=_kb_visibility_policy_visibility(kb_visibility),
                 policy_version=next_policy_version,
                 actor_user_id=actor_user_id,
             )
@@ -1494,36 +1650,31 @@ class AdminService:
                 enterprise_id=enterprise_id,
                 resource_type="knowledge_base",
                 resource_id=kb_id,
-                owner_department_id=next_owner_department_id,
-                visibility=visibility,
+                owner_department_id=current.owner_department_id,
+                visibility=_kb_visibility_policy_visibility(kb_visibility),
                 permission_version=permission_version,
                 policy_version=next_policy_version,
                 policy_id=policy_id,
             )
-            access_block_id = None
-            if permission_tightened:
-                access_block_id = self._insert_access_block(
-                    session,
-                    enterprise_id=enterprise_id,
-                    resource_type="knowledge_base",
-                    resource_id=kb_id,
-                    reason="permission_tightened",
-                    block_level="query",
-                    actor_user_id=actor_user_id,
-                    metadata={
-                        "previous_visibility": current.default_visibility,
-                        "next_visibility": visibility,
-                        "previous_owner_department_id": current.owner_department_id,
-                        "next_owner_department_id": next_owner_department_id,
-                        "permission_version": permission_version,
-                    },
-                )
+            refresh_job_id = self._enqueue_permission_refresh_job(
+                session,
+                enterprise_id=enterprise_id,
+                kb_id=kb_id,
+                doc_id=None,
+                actor_user_id=actor_user_id,
+                reason="knowledge_base_permission_changed",
+                permission_snapshot_id=snapshot["snapshot_id"],
+                permission_version=permission_version,
+                resource_type="knowledge_base",
+            )
             session.execute(
                 text(
                     """
                     UPDATE knowledge_bases
-                    SET owner_department_id = CAST(:owner_department_id AS uuid),
-                        default_visibility = :visibility,
+                    SET kb_visibility = :kb_visibility,
+                        default_document_visibility = :default_document_visibility,
+                        default_document_owner_department_id =
+                            CAST(:default_document_owner_department_id AS uuid),
                         policy_version = :policy_version,
                         updated_by = CAST(:actor_user_id AS uuid),
                         updated_at = now()
@@ -1535,8 +1686,9 @@ class AdminService:
                 {
                     "kb_id": kb_id,
                     "enterprise_id": enterprise_id,
-                    "owner_department_id": next_owner_department_id,
-                    "visibility": visibility,
+                    "kb_visibility": kb_visibility,
+                    "default_document_visibility": default_document_visibility,
+                    "default_document_owner_department_id": default_document_owner.id,
                     "policy_version": next_policy_version,
                     "actor_user_id": actor_user_id,
                 },
@@ -1557,13 +1709,25 @@ class AdminService:
                 risk_level="critical" if permission_tightened else "high",
                 summary={
                     "kb_id": kb_id,
-                    "previous_visibility": current.default_visibility,
-                    "next_visibility": visibility,
-                    "previous_owner_department_id": current.owner_department_id,
-                    "next_owner_department_id": next_owner_department_id,
+                    "previous_kb_visibility": current.kb_visibility,
+                    "next_kb_visibility": kb_visibility,
+                    "previous_default_document_visibility": (
+                        current.default_document_visibility
+                    ),
+                    "next_default_document_visibility": default_document_visibility,
+                    "previous_default_document_owner_department_id": (
+                        current.default_document_owner_department_id
+                    ),
+                    "next_default_document_owner_department_id": default_document_owner.id,
+                    "previous_access_rules": [
+                        rule.__dict__ for rule in current.access_rules
+                    ],
+                    "next_access_rules": [
+                        rule.__dict__ for rule in normalized_access_rules
+                    ],
                     "permission_version": permission_version,
                     "permission_snapshot_id": snapshot["snapshot_id"],
-                    "access_block_id": access_block_id,
+                    "refresh_job_id": refresh_job_id,
                 },
             )
         except PermissionServiceError as exc:
@@ -1580,10 +1744,20 @@ class AdminService:
                 "knowledge base permissions cannot be updated",
                 exc,
             ) from exc
-        return AdminPermissionPolicy(
+        return AdminKnowledgeBasePermissionPolicy(
             resource_type="knowledge_base",
             resource_id=kb_id,
-            visibility=visibility,
+            kb_visibility=kb_visibility,
+            default_document_visibility=default_document_visibility,
+            default_document_owner_department_id=default_document_owner.id,
+            access_rules=tuple(
+                AdminKnowledgeBaseAccessRule(
+                    subject_type=rule.subject_type,
+                    subject_id=rule.subject_id,
+                    permission=rule.permission,
+                )
+                for rule in normalized_access_rules
+            ),
             permission_version=permission_version,
         )
 
@@ -1772,6 +1946,14 @@ class AdminService:
             next_owner_department_id != current.owner_department_id
             or next_visibility != current.visibility
         )
+        if permission_changed:
+            self._ensure_document_permission_within_parent_knowledge_base(
+                session,
+                enterprise_id=enterprise_id,
+                document=current,
+                next_visibility=next_visibility,
+                next_owner_department_id=next_owner_department_id,
+            )
         permission_tightened = _document_permission_tightens(
             previous_visibility=current.visibility,
             next_visibility=next_visibility,
@@ -3341,13 +3523,17 @@ class AdminService:
         try:
             row = session.execute(
                 text(
-                    """
+                    f"""
                     SELECT
                         id::text AS kb_id,
                         name,
                         status,
                         owner_department_id::text AS owner_department_id,
-                        default_visibility,
+                        kb_visibility,
+                        default_document_visibility,
+                        default_document_owner_department_id::text
+                            AS default_document_owner_department_id,
+                        {_knowledge_base_access_rules_sql("knowledge_bases.id")},
                         config_scope_id,
                         policy_version
                     FROM knowledge_bases
@@ -4035,6 +4221,8 @@ class AdminService:
             return
         if knowledge_base.owner_department_id in actor_context.department_ids:
             return
+        if _actor_has_kb_access_rule(actor_context, knowledge_base.access_rules, "manage"):
+            return
         raise AdminServiceError(
             "ADMIN_RESOURCE_FORBIDDEN",
             "knowledge base is outside actor management scope",
@@ -4061,6 +4249,119 @@ class AdminService:
             status_code=403,
             details={"kb_id": kb_id, "owner_department_id": owner_department_id},
         )
+
+    def _ensure_default_document_permission_within_kb_access(
+        self,
+        *,
+        kb_visibility: str,
+        access_rules: tuple[AdminKnowledgeBaseAccessRuleInput, ...]
+        | tuple[AdminKnowledgeBaseAccessRule, ...],
+        default_document_visibility: str,
+        default_document_owner_department_id: str,
+    ) -> None:
+        if default_document_visibility == "enterprise":
+            return
+        if kb_visibility == "enterprise":
+            return
+        if _rules_include_query_for_department(
+            access_rules,
+            default_document_owner_department_id,
+        ):
+            return
+        raise AdminServiceError(
+            "ADMIN_DEFAULT_DOCUMENT_PERMISSION_OUTSIDE_KB_SCOPE",
+            "default document owner department must be able to query parent knowledge base",
+            status_code=409,
+            details={
+                "kb_visibility": kb_visibility,
+                "default_document_visibility": default_document_visibility,
+                "default_document_owner_department_id": default_document_owner_department_id,
+            },
+        )
+
+    def _replace_knowledge_base_access_rules(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        kb_id: str,
+        access_rules: tuple[AdminKnowledgeBaseAccessRuleInput, ...],
+        actor_user_id: str,
+    ) -> None:
+        session.execute(
+            text(
+                """
+                UPDATE knowledge_base_accesses
+                SET status = 'revoked',
+                    updated_by = CAST(:actor_user_id AS uuid),
+                    updated_at = now()
+                WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                  AND kb_id = CAST(:kb_id AS uuid)
+                  AND status = 'active'
+                """
+            ),
+            {
+                "enterprise_id": enterprise_id,
+                "kb_id": kb_id,
+                "actor_user_id": actor_user_id,
+            },
+        )
+        for rule in access_rules:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO knowledge_base_accesses(
+                        id, enterprise_id, kb_id, subject_type, subject_id,
+                        permission, status, created_by, updated_by
+                    )
+                    VALUES (
+                        CAST(:id AS uuid), CAST(:enterprise_id AS uuid), CAST(:kb_id AS uuid),
+                        :subject_type, CAST(:subject_id AS uuid), :permission, 'active',
+                        CAST(:actor_user_id AS uuid), CAST(:actor_user_id AS uuid)
+                    )
+                    """
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "enterprise_id": enterprise_id,
+                    "kb_id": kb_id,
+                    "subject_type": rule.subject_type,
+                    "subject_id": rule.subject_id,
+                    "permission": rule.permission,
+                    "actor_user_id": actor_user_id,
+                },
+            )
+
+    def _ensure_document_permission_within_parent_knowledge_base(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        document: AdminDocument,
+        next_visibility: str,
+        next_owner_department_id: str,
+    ) -> None:
+        knowledge_base = self._load_knowledge_base(
+            session,
+            document.kb_id,
+            enterprise_id=enterprise_id,
+        )
+        if next_visibility == "enterprise":
+            return
+        if not _department_can_query_knowledge_base(knowledge_base, next_owner_department_id):
+            raise AdminServiceError(
+                "ADMIN_DOCUMENT_PERMISSION_OUTSIDE_KB_SCOPE",
+                "document owner department must be able to access parent knowledge base",
+                status_code=409,
+                details={
+                    "kb_id": knowledge_base.id,
+                    "kb_visibility": knowledge_base.kb_visibility,
+                    "kb_owner_department_id": knowledge_base.owner_department_id,
+                    "document_id": document.id,
+                    "document_visibility": next_visibility,
+                    "document_owner_department_id": next_owner_department_id,
+                },
+            )
 
     def _ensure_actor_can_manage_role_target_user(
         self,
@@ -4640,20 +4941,22 @@ class AdminService:
         *,
         enterprise_id: str,
         kb_id: str,
-        doc_id: str,
+        doc_id: str | None,
         actor_user_id: str,
         reason: str,
         permission_snapshot_id: str,
         permission_version: int,
+        resource_type: str = "document",
     ) -> str:
         job_id = str(uuid.uuid4())
         request_json = {
+            "enterprise_id": enterprise_id,
             "document_id": doc_id,
             "kb_id": kb_id,
             "permission_snapshot_id": permission_snapshot_id,
             "permission_version": permission_version,
             "reason": reason,
-            "resource_type": "document",
+            "resource_type": resource_type,
         }
         session.execute(
             text(
@@ -4751,16 +5054,65 @@ def _department_from_mapping(row: Any) -> AdminDepartment:
     )
 
 
+def _knowledge_base_access_rules_sql(kb_id_expr: str) -> str:
+    return f"""
+                        COALESCE(
+                            (
+                                SELECT jsonb_agg(
+                                    jsonb_build_object(
+                                        'subject_type', kba.subject_type,
+                                        'subject_id', kba.subject_id::text,
+                                        'permission', kba.permission
+                                    )
+                                    ORDER BY kba.subject_type, kba.subject_id::text, kba.permission
+                                )
+                                FROM knowledge_base_accesses kba
+                                WHERE kba.enterprise_id = knowledge_bases.enterprise_id
+                                  AND kba.kb_id = {kb_id_expr}
+                                  AND kba.status = 'active'
+                            ),
+                            '[]'::jsonb
+                        ) AS access_rules
+""".strip()
+
+
 def _knowledge_base_from_mapping(row: Any) -> AdminKnowledgeBase:
     return AdminKnowledgeBase(
         id=row["kb_id"],
         name=row["name"],
         status=row["status"],
         owner_department_id=row["owner_department_id"],
-        default_visibility=row["default_visibility"],
+        kb_visibility=row["kb_visibility"],
+        default_document_visibility=row["default_document_visibility"],
+        default_document_owner_department_id=row["default_document_owner_department_id"],
         config_scope_id=row["config_scope_id"],
         policy_version=int(row["policy_version"]) if "policy_version" in row else 1,
+        access_rules=_kb_access_rules_from_value(row.get("access_rules")),
     )
+
+
+def _kb_access_rules_from_value(value: Any) -> tuple[AdminKnowledgeBaseAccessRule, ...]:
+    if value is None:
+        return ()
+    items = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(items, list):
+        return ()
+    rules: list[AdminKnowledgeBaseAccessRule] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        subject_type = str(item.get("subject_type") or "").strip()
+        subject_id = str(item.get("subject_id") or "").strip()
+        permission = str(item.get("permission") or "").strip()
+        if subject_type and subject_id and permission:
+            rules.append(
+                AdminKnowledgeBaseAccessRule(
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    permission=permission,
+                )
+            )
+    return tuple(rules)
 
 
 def _folder_from_mapping(row: Any) -> AdminFolder:
@@ -4902,6 +5254,7 @@ def _permission_admin_actor_context(
         user_id=actor_context.user_id,
         scopes=tuple(sorted(scopes)),
         department_ids=actor_context.department_ids,
+        role_ids=actor_context.role_ids,
         knowledge_base_ids=actor_context.knowledge_base_ids,
         can_manage_all_knowledge_bases=True,
     )
@@ -4911,6 +5264,136 @@ def _validate_visibility(visibility: str) -> None:
     PermissionService().validate_visibility_policy(
         {"owner_department_id": "00000000-0000-0000-0000-000000000000", "visibility": visibility}
     )
+
+
+def _validate_kb_visibility(kb_visibility: str) -> None:
+    if kb_visibility not in SUPPORTED_KB_VISIBILITIES:
+        raise AdminServiceError(
+            "ADMIN_KB_VISIBILITY_INVALID",
+            "knowledge base visibility is invalid",
+            status_code=400,
+            details={
+                "kb_visibility": kb_visibility,
+                "supported": sorted(SUPPORTED_KB_VISIBILITIES),
+            },
+        )
+
+
+def _normalize_kb_access_rules(
+    access_rules: list[AdminKnowledgeBaseAccessRuleInput],
+    *,
+    kb_visibility: str,
+    owner_department_id: str,
+) -> tuple[AdminKnowledgeBaseAccessRuleInput, ...]:
+    normalized: dict[tuple[str, str, str], AdminKnowledgeBaseAccessRuleInput] = {}
+    for rule in access_rules:
+        subject_type = rule.subject_type.strip()
+        subject_id = rule.subject_id.strip()
+        permission = rule.permission.strip()
+        if subject_type not in SUPPORTED_KB_ACCESS_SUBJECT_TYPES:
+            raise AdminServiceError(
+                "ADMIN_KB_ACCESS_SUBJECT_INVALID",
+                "knowledge base access subject type is invalid",
+                status_code=400,
+                details={"subject_type": subject_type},
+            )
+        if permission not in SUPPORTED_KB_ACCESS_PERMISSIONS:
+            raise AdminServiceError(
+                "ADMIN_KB_ACCESS_PERMISSION_INVALID",
+                "knowledge base access permission is invalid",
+                status_code=400,
+                details={"permission": permission},
+            )
+        if not subject_id:
+            raise AdminServiceError(
+                "ADMIN_KB_ACCESS_SUBJECT_INVALID",
+                "knowledge base access subject id is required",
+                status_code=400,
+            )
+        normalized[(subject_type, subject_id, permission)] = AdminKnowledgeBaseAccessRuleInput(
+            subject_type=subject_type,
+            subject_id=subject_id,
+            permission=permission,
+        )
+    if kb_visibility != "enterprise" and not _rules_include_query_for_department(
+        normalized.values(),
+        owner_department_id,
+    ):
+        for permission in ("discover", "query", "manage"):
+            normalized[("department", owner_department_id, permission)] = (
+                AdminKnowledgeBaseAccessRuleInput(
+                    subject_type="department",
+                    subject_id=owner_department_id,
+                    permission=permission,
+                )
+            )
+    return tuple(normalized[key] for key in sorted(normalized))
+
+
+def _rules_include_query_for_department(
+    access_rules: Any,
+    department_id: str,
+) -> bool:
+    return any(
+        rule.subject_type == "department"
+        and rule.subject_id == department_id
+        and rule.permission in {"query", "manage"}
+        for rule in access_rules
+    )
+
+
+def _kb_access_rule_key(access_rules: Any) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        sorted(
+            (rule.subject_type, rule.subject_id, rule.permission)
+            for rule in access_rules
+        )
+    )
+
+
+def _kb_visibility_policy_visibility(kb_visibility: str) -> str:
+    return "enterprise" if kb_visibility == "enterprise" else "department"
+
+
+def _kb_visibility_rank(kb_visibility: str) -> int:
+    return {"private": 0, "department_acl": 1, "enterprise": 2}[kb_visibility]
+
+
+def _kb_visibility_expands(previous: str, next_visibility: str) -> bool:
+    return _kb_visibility_rank(next_visibility) > _kb_visibility_rank(previous)
+
+
+def _kb_visibility_tightens(previous: str, next_visibility: str) -> bool:
+    return _kb_visibility_rank(next_visibility) < _kb_visibility_rank(previous)
+
+
+def _department_can_query_knowledge_base(
+    knowledge_base: AdminKnowledgeBase,
+    department_id: str,
+) -> bool:
+    if knowledge_base.kb_visibility == "enterprise":
+        return True
+    return _rules_include_query_for_department(knowledge_base.access_rules, department_id)
+
+
+def _actor_has_kb_access_rule(
+    actor_context: AdminActorContext,
+    access_rules: tuple[AdminKnowledgeBaseAccessRule, ...],
+    permission: str,
+) -> bool:
+    implied_permissions = {permission}
+    if permission in {"discover", "query"}:
+        implied_permissions.add("manage")
+    for rule in access_rules:
+        if rule.permission not in implied_permissions:
+            continue
+        if rule.subject_type == "user" and rule.subject_id == actor_context.user_id:
+            return True
+        if rule.subject_type == "department" and rule.subject_id in actor_context.department_ids:
+            return True
+        if rule.subject_type == "role" and rule.subject_id in actor_context.role_ids:
+            return True
+    return False
 
 
 def _visibility_expands(previous: str, next_visibility: str) -> bool:
@@ -5080,6 +5563,41 @@ def _actor_has_knowledge_base_scope(
     if kb_id is None:
         return False
     return kb_id in actor_context.knowledge_base_ids
+
+
+def _actor_kb_manage_acl_sql(
+    actor_context: AdminActorContext,
+    params: dict[str, Any],
+    *,
+    kb_id_expr: str,
+) -> str:
+    subject_conditions = [
+        "(kba.subject_type = 'user' AND kba.subject_id = CAST(:actor_user_id AS uuid))"
+    ]
+    params["actor_user_id"] = actor_context.user_id
+    if actor_context.department_ids:
+        subject_conditions.append(
+            "(kba.subject_type = 'department' "
+            "AND kba.subject_id = ANY(CAST(:actor_department_ids AS uuid[])))"
+        )
+        params["actor_department_ids"] = list(actor_context.department_ids)
+    if actor_context.role_ids:
+        subject_conditions.append(
+            "(kba.subject_type = 'role' "
+            "AND kba.subject_id = ANY(CAST(:actor_role_ids AS uuid[])))"
+        )
+        params["actor_role_ids"] = list(actor_context.role_ids)
+    return f"""
+EXISTS (
+    SELECT 1
+    FROM knowledge_base_accesses kba
+    WHERE kba.enterprise_id = CAST(:enterprise_id AS uuid)
+      AND kba.kb_id = {kb_id_expr}
+      AND kba.status = 'active'
+      AND kba.permission = 'manage'
+      AND ({' OR '.join(subject_conditions)})
+)
+""".strip()
 
 
 def _mask_username(username: str) -> str:

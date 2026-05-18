@@ -24,7 +24,9 @@ class KnowledgeBaseData(BaseModel):
     name: str
     status: Literal["active", "disabled", "archived"]
     owner_department_id: str
-    default_visibility: Literal["department", "enterprise"]
+    kb_visibility: Literal["enterprise", "department_acl", "private"]
+    default_document_visibility: Literal["department", "enterprise"]
+    default_document_owner_department_id: str
     config_scope_id: str | None = None
     policy_version: int = 1
 

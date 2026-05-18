@@ -214,6 +214,7 @@ async function submitQuery(): Promise<void> {
             updateChatRecord(record.id, { citations: citations.value }, false);
           },
           onDone: (event) => {
+            answer.value = event.answer;
             metadata.value = {
               request_id: event.request_id,
               trace_id: event.trace_id,
@@ -224,6 +225,7 @@ async function submitQuery(): Promise<void> {
             citations.value = event.citations;
             updateChatRecord(record.id, {
               status: "done",
+              answer: event.answer,
               citations: event.citations,
               confidence: event.confidence,
               degraded: event.degraded,

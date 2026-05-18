@@ -184,13 +184,17 @@ export interface QueryResponse {
 export type QueryStreamMetadata = Pick<
   QueryResponse,
   "request_id" | "trace_id" | "confidence" | "degraded" | "degrade_reason"
->;
+> & {
+  streaming?: boolean;
+};
+
+export type QueryStreamDone = QueryResponse;
 
 export interface QueryStreamHandlers {
   onMetadata?: (metadata: QueryStreamMetadata) => void;
   onToken?: (delta: string) => void;
   onCitation?: (citation: CitationData) => void;
-  onDone?: (result: Omit<QueryResponse, "answer">) => void;
+  onDone?: (result: QueryStreamDone) => void;
 }
 
 export async function getLiveStatus(): Promise<unknown> {
@@ -456,7 +460,9 @@ function dispatchEventFrame(frame: string, handlers: QueryStreamHandlers): void 
   } else if (eventName === "citation") {
     handlers.onCitation?.(data as unknown as CitationData);
   } else if (eventName === "done") {
-    handlers.onDone?.(data as unknown as Omit<QueryResponse, "answer">);
+    handlers.onDone?.(data as unknown as QueryStreamDone);
+  } else if (eventName === "error") {
+    throw new ApiRequestError(0, data as unknown as ApiErrorPayload, "流式查询失败");
   }
 }
 

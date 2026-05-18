@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.modules.indexing.errors import IndexingServiceError
@@ -16,6 +17,7 @@ from app.modules.indexing.schemas import (
     DraftVectorPoint,
     IndexTarget,
     ReadyIndexVersion,
+    VectorPayloadUpdate,
 )
 from app.shared.context import get_request_context
 from app.shared.json_utils import stable_json_hash
@@ -28,6 +30,29 @@ DEFAULT_MODEL_VERSION = "p0"
 DEFAULT_DIMENSION = 0
 DEFAULT_COLLECTION = "little_bear_p0"
 VECTOR_ID_NAMESPACE = uuid.UUID("93b57e36-2c2a-4f74-9f56-e9cdb2a9c3c2")
+
+
+@dataclass(frozen=True)
+class _PermissionRefreshTarget:
+    enterprise_id: str
+    kb_id: str
+    document_id: str
+    document_version_id: str
+    index_version_id: str
+    collection_name: str
+    vector_id: str
+    keyword_id: str | None
+    chunk_id: str
+    title: str
+    owner_department_id: str
+    visibility: str
+    indexed_permission_version: int
+    index_payload_hash: str
+    document_status: str
+    document_index_status: str
+    chunk_status: str
+    page_start: int | None
+    page_end: int | None
 
 
 class VectorIndexWriter(Protocol):
@@ -45,6 +70,9 @@ class VectorIndexWriter(Protocol):
     ) -> None:
         ...
 
+    def update_payloads(self, updates: tuple[VectorPayloadUpdate, ...]) -> None:
+        ...
+
 
 class NoopVectorIndexWriter:
     """本地最小链路默认不触碰外部 VectorStore。"""
@@ -59,6 +87,9 @@ class NoopVectorIndexWriter:
         vector_ids: tuple[str, ...],
         permission_version: int,
     ) -> None:
+        return None
+
+    def update_payloads(self, updates: tuple[VectorPayloadUpdate, ...]) -> None:
         return None
 
 
@@ -207,6 +238,69 @@ class IndexingService:
             )
             published.append(version.index_version_id)
         return published
+
+    def refresh_permission_payloads(
+        self,
+        session: Session,
+        *,
+        request_json: dict[str, Any],
+    ) -> dict[str, int]:
+        """刷新已发布索引的权限 payload，不重算 embedding。"""
+
+        enterprise_id = _required_str(request_json, "enterprise_id")
+        resource_type = _required_str(request_json, "resource_type")
+        permission_version = _required_int(request_json, "permission_version")
+        if resource_type not in {"document", "knowledge_base"}:
+            raise IndexingServiceError(
+                "INDEX_PERMISSION_REFRESH_RESOURCE_INVALID",
+                "permission refresh resource type is invalid",
+                status_code=409,
+                details={"resource_type": resource_type},
+            )
+        document_id = _optional_str(request_json, "document_id")
+        kb_id = _optional_str(request_json, "kb_id")
+        if resource_type == "document" and not document_id:
+            raise IndexingServiceError(
+                "INDEX_PERMISSION_REFRESH_DOCUMENT_REQUIRED",
+                "permission refresh request does not include document_id",
+                status_code=409,
+            )
+        if resource_type == "knowledge_base" and not kb_id:
+            raise IndexingServiceError(
+                "INDEX_PERMISSION_REFRESH_KB_REQUIRED",
+                "permission refresh request does not include kb_id",
+                status_code=409,
+            )
+
+        targets = self._load_permission_refresh_targets(
+            session,
+            enterprise_id=enterprise_id,
+            resource_type=resource_type,
+            resource_id=document_id if resource_type == "document" else kb_id,
+            permission_version=permission_version,
+        )
+        self._update_index_permission_payloads(session, targets=targets)
+        self._release_permission_tightened_blocks(
+            session,
+            enterprise_id=enterprise_id,
+            resource_type=resource_type,
+            resource_id=document_id if resource_type == "document" else kb_id,
+        )
+        self._update_vector_permission_payloads(targets)
+        self._insert_audit_log(
+            session,
+            enterprise_id=enterprise_id,
+            event_name="index_permission_payload.refreshed",
+            resource_id=document_id or kb_id or "unknown",
+            summary={
+                "resource_type": resource_type,
+                "resource_id": document_id or kb_id,
+                "permission_version": permission_version,
+                "chunk_count": len(targets),
+                "vector_payload_count": len(targets),
+            },
+        )
+        return {"chunk_count": len(targets), "vector_payload_count": len(targets)}
 
     def _load_index_targets(
         self,
@@ -931,6 +1025,221 @@ class IndexingService:
             },
         )
 
+    def _load_permission_refresh_targets(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        resource_type: str,
+        resource_id: str | None,
+        permission_version: int,
+    ) -> list[_PermissionRefreshTarget]:
+        if resource_id is None:
+            return []
+        resource_predicate = (
+            "d.id = CAST(:resource_id AS uuid)"
+            if resource_type == "document"
+            else "d.kb_id = CAST(:resource_id AS uuid)"
+        )
+        try:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT
+                        d.enterprise_id::text AS enterprise_id,
+                        d.kb_id::text AS kb_id,
+                        d.id::text AS document_id,
+                        c.document_version_id::text AS document_version_id,
+                        iv.id::text AS index_version_id,
+                        iv.collection_name,
+                        cir.vector_id,
+                        cir.keyword_id::text AS keyword_id,
+                        c.id::text AS chunk_id,
+                        d.title,
+                        d.owner_department_id::text AS owner_department_id,
+                        d.visibility,
+                        GREATEST(ps.permission_version, :permission_version)::integer
+                            AS indexed_permission_version,
+                        iv.payload_hash AS index_payload_hash,
+                        d.lifecycle_status AS document_status,
+                        d.index_status AS document_index_status,
+                        c.status AS chunk_status,
+                        c.page_start,
+                        c.page_end
+                    FROM documents d
+                    JOIN permission_snapshots ps ON ps.id = d.permission_snapshot_id
+                    JOIN index_versions iv
+                      ON iv.document_id = d.id
+                     AND iv.status = 'active'
+                    JOIN chunks c
+                      ON c.document_id = d.id
+                     AND c.document_version_id = iv.document_version_id
+                     AND c.status = 'active'
+                    JOIN chunk_index_refs cir
+                      ON cir.chunk_id = c.id
+                     AND cir.index_version_id = iv.id
+                     AND cir.visibility_state IN ('active', 'blocked')
+                    WHERE d.enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND {resource_predicate}
+                      AND d.deleted_at IS NULL
+                      AND d.lifecycle_status != 'deleted'
+                    ORDER BY d.id, c.ordinal
+                    """
+                ),
+                {
+                    "enterprise_id": enterprise_id,
+                    "resource_id": resource_id,
+                    "permission_version": permission_version,
+                },
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "INDEX_PERMISSION_REFRESH_TARGETS_UNAVAILABLE",
+                "permission refresh targets cannot be read",
+                exc,
+            ) from exc
+        return [
+            _PermissionRefreshTarget(
+                enterprise_id=row._mapping["enterprise_id"],
+                kb_id=row._mapping["kb_id"],
+                document_id=row._mapping["document_id"],
+                document_version_id=row._mapping["document_version_id"],
+                index_version_id=row._mapping["index_version_id"],
+                collection_name=row._mapping["collection_name"],
+                vector_id=row._mapping["vector_id"],
+                keyword_id=row._mapping["keyword_id"],
+                chunk_id=row._mapping["chunk_id"],
+                title=row._mapping["title"],
+                owner_department_id=row._mapping["owner_department_id"],
+                visibility=row._mapping["visibility"],
+                indexed_permission_version=int(row._mapping["indexed_permission_version"]),
+                index_payload_hash=row._mapping["index_payload_hash"],
+                document_status=row._mapping["document_status"],
+                document_index_status=row._mapping["document_index_status"],
+                chunk_status=row._mapping["chunk_status"],
+                page_start=_optional_int(row._mapping["page_start"]),
+                page_end=_optional_int(row._mapping["page_end"]),
+            )
+            for row in rows
+        ]
+
+    def _update_vector_permission_payloads(
+        self,
+        targets: list[_PermissionRefreshTarget],
+    ) -> None:
+        if isinstance(self.vector_index_writer, NoopVectorIndexWriter):
+            return
+        updates = tuple(_vector_payload_update(target) for target in targets)
+        if not updates:
+            return
+        try:
+            self.vector_index_writer.update_payloads(updates)
+        except Exception as exc:
+            raise IndexingServiceError(
+                "INDEX_PERMISSION_VECTOR_REFRESH_FAILED",
+                "vector permission payload cannot be refreshed",
+                status_code=503,
+                retryable=True,
+                details={
+                    "point_count": len(updates),
+                    "source_error": _source_error(exc),
+                },
+            ) from exc
+
+    def _update_index_permission_payloads(
+        self,
+        session: Session,
+        *,
+        targets: list[_PermissionRefreshTarget],
+    ) -> None:
+        document_ids = sorted({target.document_id for target in targets})
+        if document_ids:
+            session.execute(
+                text(
+                    """
+                    UPDATE chunks c
+                    SET permission_snapshot_id = d.permission_snapshot_id,
+                        updated_at = now()
+                    FROM documents d
+                    WHERE c.document_id = d.id
+                      AND d.id = ANY(CAST(:document_ids AS uuid[]))
+                      AND c.status = 'active'
+                    """
+                ),
+                {"document_ids": document_ids},
+            )
+        for target in targets:
+            payload_hash = _permission_refresh_payload_hash(target)
+            if target.keyword_id:
+                session.execute(
+                    text(
+                        """
+                        UPDATE keyword_index_entries
+                        SET owner_department_id = CAST(:owner_department_id AS uuid),
+                            visibility = :visibility,
+                            visibility_state = 'active',
+                            indexed_permission_version = :indexed_permission_version,
+                            payload_hash = :payload_hash,
+                            updated_at = now()
+                        WHERE id = CAST(:keyword_id AS uuid)
+                        """
+                    ),
+                    {
+                        "keyword_id": target.keyword_id,
+                        "owner_department_id": target.owner_department_id,
+                        "visibility": target.visibility,
+                        "indexed_permission_version": target.indexed_permission_version,
+                        "payload_hash": payload_hash,
+                    },
+                )
+            session.execute(
+                text(
+                    """
+                    UPDATE chunk_index_refs
+                    SET visibility_state = 'active',
+                        indexed_permission_version = :indexed_permission_version,
+                        payload_hash = :payload_hash,
+                        updated_at = now()
+                    WHERE vector_id = :vector_id
+                    """
+                ),
+                {
+                    "vector_id": target.vector_id,
+                    "indexed_permission_version": target.indexed_permission_version,
+                    "payload_hash": payload_hash,
+                },
+            )
+
+    def _release_permission_tightened_blocks(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        resource_type: str,
+        resource_id: str | None,
+    ) -> None:
+        if resource_id is None:
+            return
+        session.execute(
+            text(
+                """
+                UPDATE access_blocks
+                SET status = 'released',
+                    released_at = now()
+                WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                  AND resource_type = :resource_type
+                  AND resource_id = CAST(:resource_id AS uuid)
+                  AND reason = 'permission_tightened'
+                  AND status = 'active'
+                """
+            ),
+            {
+                "enterprise_id": enterprise_id,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+            },
+        )
+
     def _insert_audit_log(
         self,
         session: Session,
@@ -1014,6 +1323,36 @@ def _draft_vector_point(chunk: DraftIndexChunk) -> DraftVectorPoint:
     )
 
 
+def _vector_payload_update(target: _PermissionRefreshTarget) -> VectorPayloadUpdate:
+    payload_hash = _permission_refresh_payload_hash(target)
+    return VectorPayloadUpdate(
+        collection_name=target.collection_name,
+        vector_id=target.vector_id,
+        payload={
+            "enterprise_id": target.enterprise_id,
+            "kb_id": target.kb_id,
+            "document_id": target.document_id,
+            "doc_id": target.document_id,
+            "document_version_id": target.document_version_id,
+            "chunk_id": target.chunk_id,
+            "index_version_id": target.index_version_id,
+            "title": target.title,
+            "visibility_state": "active",
+            "document_status": target.document_status,
+            "document_index_status": target.document_index_status,
+            "chunk_status": target.chunk_status,
+            "owner_department_id": target.owner_department_id,
+            "visibility": target.visibility,
+            "permission_version": target.indexed_permission_version,
+            "indexed_permission_version": target.indexed_permission_version,
+            "is_deleted": False,
+            "page_start": target.page_start,
+            "page_end": target.page_end,
+            "payload_hash": payload_hash,
+        },
+    )
+
+
 def _chunk_index_payload_hash(chunk: DraftIndexChunk) -> str:
     return stable_json_hash(
         {
@@ -1024,6 +1363,48 @@ def _chunk_index_payload_hash(chunk: DraftIndexChunk) -> str:
             "indexed_permission_version": chunk.indexed_permission_version,
             "index_payload_hash": chunk.index_payload_hash,
         }
+    )
+
+
+def _permission_refresh_payload_hash(target: _PermissionRefreshTarget) -> str:
+    return stable_json_hash(
+        {
+            "chunk_id": target.chunk_id,
+            "index_version_id": target.index_version_id,
+            "owner_department_id": target.owner_department_id,
+            "visibility": target.visibility,
+            "indexed_permission_version": target.indexed_permission_version,
+            "index_payload_hash": target.index_payload_hash,
+        }
+    )
+
+
+def _required_str(mapping: dict[str, Any], key: str) -> str:
+    value = mapping.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    raise IndexingServiceError(
+        "INDEX_PERMISSION_REFRESH_REQUEST_INVALID",
+        "permission refresh request is missing required field",
+        status_code=409,
+        details={"field": key},
+    )
+
+
+def _optional_str(mapping: dict[str, Any], key: str) -> str | None:
+    value = mapping.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _required_int(mapping: dict[str, Any], key: str) -> int:
+    value = mapping.get(key)
+    if isinstance(value, int):
+        return value
+    raise IndexingServiceError(
+        "INDEX_PERMISSION_REFRESH_REQUEST_INVALID",
+        "permission refresh request is missing required integer field",
+        status_code=409,
+        details={"field": key},
     )
 
 

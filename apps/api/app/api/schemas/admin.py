@@ -128,9 +128,28 @@ class KnowledgeBaseData(BaseModel):
     name: str
     status: Literal["active", "disabled", "archived"]
     owner_department_id: str
-    default_visibility: Literal["department", "enterprise"]
+    kb_visibility: Literal["enterprise", "department_acl", "private"]
+    default_document_visibility: Literal["department", "enterprise"]
+    default_document_owner_department_id: str
+    access_rules: list[KnowledgeBaseAccessRuleData] = Field(default_factory=list)
     config_scope_id: str | None = None
     policy_version: int = 1
+
+
+class KnowledgeBaseAccessRuleData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject_type: Literal["department", "user", "role"]
+    subject_id: str
+    permission: Literal["discover", "query", "manage"]
+
+
+class KnowledgeBaseAccessRuleInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject_type: Literal["department", "user", "role"]
+    subject_id: str = Field(min_length=1)
+    permission: Literal["discover", "query", "manage"]
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
@@ -138,7 +157,10 @@ class KnowledgeBaseCreateRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=128)
     owner_department_id: str = Field(min_length=1)
-    default_visibility: Literal["department", "enterprise"]
+    kb_visibility: Literal["enterprise", "department_acl", "private"] = "enterprise"
+    default_document_visibility: Literal["department", "enterprise"] = "department"
+    default_document_owner_department_id: str | None = Field(default=None, min_length=1)
+    access_rules: list[KnowledgeBaseAccessRuleInput] = Field(default_factory=list)
     config_scope_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
@@ -147,7 +169,9 @@ class KnowledgeBasePatchRequest(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=128)
     status: Literal["active", "disabled", "archived"] | None = None
-    default_visibility: Literal["department", "enterprise"] | None = None
+    kb_visibility: Literal["enterprise", "department_acl", "private"] | None = None
+    default_document_visibility: Literal["department", "enterprise"] | None = None
+    default_document_owner_department_id: str | None = Field(default=None, min_length=1)
     config_scope_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from app.modules.answer import AnswerService
 from app.modules.context.schemas import ContextChunk, QueryContext
-from app.modules.models import ChatCompletionResult, ChatMessage, ModelClientError
+from app.modules.models import (
+    ChatCompletionChunk,
+    ChatCompletionResult,
+    ChatMessage,
+    ModelClientError,
+)
 
 
 class _ChatClient:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, stream: bool = False) -> None:
         self.fail = fail
+        self.stream = stream
         self.calls: list[dict[str, object]] = []
 
     def complete(self, *, messages, temperature, max_tokens) -> ChatCompletionResult:
@@ -22,6 +28,24 @@ class _ChatClient:
             raise ModelClientError("LLM_PROVIDER_UNAVAILABLE", "provider unavailable")
         return ChatCompletionResult(
             content="员工年假需要提前申请。[source:chunk_1]",
+            token_usage={"prompt_tokens": 12, "completion_tokens": 6},
+        )
+
+    def stream_complete(self, *, messages, temperature, max_tokens):
+        self.calls.append(
+            {
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+        )
+        if self.fail:
+            raise ModelClientError("LLM_PROVIDER_UNAVAILABLE", "provider unavailable")
+        yield ChatCompletionChunk(content_delta="员工年假")
+        yield ChatCompletionChunk(content_delta="需要提前申请。")
+        yield ChatCompletionChunk(
+            content_delta="[source:chunk_1]",
             token_usage={"prompt_tokens": 12, "completion_tokens": 6},
         )
 
@@ -45,6 +69,24 @@ def test_answer_service_generates_answer_from_query_context() -> None:
     assert "只能基于用户可访问的资料回答" in messages[0].content
     assert "[source:chunk_1]" in messages[1].content
     assert "员工年假需要提前申请" in messages[1].content
+
+
+def test_answer_service_streams_answer_from_query_context() -> None:
+    chat_client = _ChatClient(stream=True)
+    runner = AnswerService(
+        chat_client=chat_client,
+        temperature=0.2,
+        max_tokens=256,
+    ).stream(query_context=_query_context())
+
+    tokens = list(runner.stream_tokens())
+
+    assert tokens == ["员工年假", "需要提前申请。", "[source:chunk_1]"]
+    assert runner.result is not None
+    assert runner.result.answer == "员工年假需要提前申请。[source:chunk_1]"
+    assert runner.result.degraded is False
+    assert runner.result.token_usage == {"prompt_tokens": 12, "completion_tokens": 6}
+    assert chat_client.calls[0]["stream"] is True
 
 
 def test_answer_service_degrades_without_context_or_llm_client() -> None:

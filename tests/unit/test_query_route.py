@@ -3,9 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from app.main import create_app
+from app.modules.answer.schemas import AnswerGenerationResult
 from app.modules.auth.schemas import AuthContext, AuthRole, AuthUser
+from app.modules.context.schemas import ContextChunk, QueryContext
+from app.modules.permissions.schemas import PermissionContext
 from app.modules.query.errors import QueryServiceError
 from app.modules.query.schemas import QueryCitation, QueryResult
+from app.modules.query.service import QueryStreamPlan
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
 
@@ -24,6 +28,93 @@ class _FakeQueryService:
 
     def create_query(self, session, **kwargs):
         return self.handler(self, session, **kwargs)
+
+
+class _FakeAnswerRunner:
+    def __init__(self) -> None:
+        self.result: AnswerGenerationResult | None = None
+
+    def stream_tokens(self):
+        yield "员工年假"
+        yield "需要提前申请。[source:chunk_1]"
+        self.result = AnswerGenerationResult(
+            answer="员工年假需要提前申请。[source:chunk_1]",
+            degraded=False,
+            degrade_reason=None,
+        )
+
+
+class _FakeStreamingAnswerService:
+    def stream(self, *, query_context):
+        assert query_context is not None
+        return _FakeAnswerRunner()
+
+
+class _FakeStreamingQueryService:
+    def __init__(self, captured: dict[str, object]) -> None:
+        self.answer_service = _FakeStreamingAnswerService()
+        self.captured = captured
+
+    def create_query_stream_plan(self, _session, **kwargs):
+        self.captured.update(kwargs)
+        return QueryStreamPlan(
+            request_id=kwargs["request_id"],
+            trace_id=kwargs["trace_id"],
+            mode=kwargs["mode"],
+            started_at=1.0,
+            normalized_query=kwargs["query_text"],
+            normalized_kb_ids=tuple(kwargs["kb_ids"]),
+            config_version=1,
+            context=PermissionContext(
+                enterprise_id=kwargs["enterprise_id"],
+                user_id=kwargs["user_id"],
+                username="alice",
+                status="active",
+                department_ids=(),
+                departments=(),
+                roles=(),
+                scopes=("rag:query",),
+                permission_version=1,
+                org_version=1,
+                permission_filter_hash="permission_hash",
+                request_id=kwargs["request_id"],
+            ),
+            query_context=_query_context(),
+            allowed_candidates=(),
+            citations=(
+                QueryCitation(
+                    source_id="chunk_1",
+                    doc_id="44444444-4444-4444-4444-444444444444",
+                    document_version_id="55555555-5555-5555-5555-555555555555",
+                    title="员工手册",
+                    page_start=1,
+                    page_end=2,
+                    score=0.9,
+                ),
+            ),
+            confidence="low",
+            pre_degrade_reasons=(),
+            audit_events=(),
+            rerank_model_call=None,
+            model_route_hash=None,
+            candidate_count=1,
+            permission_filter_hash="permission_hash",
+            permission_version=1,
+            index_version_hash="index_hash",
+        )
+
+    def finalize_query_stream(self, _session, *, plan, answer_result):
+        self.captured["final_answer"] = answer_result.answer
+        return QueryResult(
+            request_id=plan.request_id,
+            answer=answer_result.answer,
+            citations=plan.citations,
+            confidence=plan.confidence,
+            degraded=answer_result.degraded,
+            degrade_reason=answer_result.degrade_reason,
+            trace_id=plan.trace_id,
+            context=plan.query_context,
+        )
 
 
 def _create_test_app():
@@ -192,6 +283,46 @@ def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
     assert captured["required_scope"] == "rag:query"
 
 
+def test_create_query_stream_route_uses_provider_token_stream(monkeypatch) -> None:
+    app = _create_test_app()
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.query.session_scope", lambda: _FakeSession())
+    captured: dict[str, object] = {}
+
+    def _authenticate(*_args, **kwargs):
+        captured.update(kwargs)
+        return _auth_context()
+
+    monkeypatch.setattr(
+        "app.api.routes.query.AuthService.authenticate_access_token",
+        _authenticate,
+    )
+    monkeypatch.setattr(
+        "app.api.routes.query.build_query_service",
+        lambda _session: _FakeStreamingQueryService(captured),
+    )
+
+    response = TestClient(app).post(
+        "/internal/v1/query-streams",
+        headers={"Authorization": "Bearer token", "x-request-id": "req_stream"},
+        json={
+            "kb_ids": ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            "query": "员工手册",
+            "mode": "answer",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert '"streaming":true' in response.text
+    assert 'data: {"delta":"员工年假"}' in response.text
+    assert 'data: {"delta":"需要提前申请。[source:chunk_1]"}' in response.text
+    assert "event: citation" in response.text
+    assert "event: done" in response.text
+    assert captured["required_scope"] == "rag:query"
+    assert captured["final_answer"] == "员工年假需要提前申请。[source:chunk_1]"
+
+
 def test_create_query_route_returns_service_error(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
@@ -221,3 +352,25 @@ def test_create_query_route_returns_service_error(monkeypatch) -> None:
 
     assert response.status_code == 400
     assert response.json()["error_code"] == "QUERY_FILTER_UNSUPPORTED"
+
+
+def _query_context() -> QueryContext:
+    return QueryContext(
+        query_text="员工手册",
+        chunks=(
+            ContextChunk(
+                chunk_id="chunk_1",
+                document_id="44444444-4444-4444-4444-444444444444",
+                document_version_id="55555555-5555-5555-5555-555555555555",
+                title="员工手册",
+                content="员工年假需要提前申请。",
+                heading_path="制度/请假",
+                page_start=1,
+                page_end=2,
+                score=0.9,
+                rank=1,
+            ),
+        ),
+        estimated_tokens=10,
+        truncated=False,
+    )

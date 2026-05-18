@@ -37,6 +37,7 @@ class PermissionContext:
     permission_version: int
     org_version: int
     permission_filter_hash: str
+    role_ids: tuple[str, ...] = field(default_factory=tuple)
     request_id: str | None = None
 
     def has_scope(self, required_scope: str) -> bool:

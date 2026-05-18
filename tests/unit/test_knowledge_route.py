@@ -88,7 +88,11 @@ def test_list_knowledge_bases_route_requires_read_scope(monkeypatch) -> None:
                     name="制度知识库",
                     status="active",
                     owner_department_id="22222222-2222-2222-2222-222222222222",
-                    default_visibility="enterprise",
+                    kb_visibility="enterprise",
+                    default_document_visibility="department",
+                    default_document_owner_department_id=(
+                        "22222222-2222-2222-2222-222222222222"
+                    ),
                     config_scope_id=None,
                     policy_version=1,
                 )

@@ -1,6 +1,7 @@
 """模型网关客户端模块。"""
 
 from app.modules.models.chat import (
+    ChatCompletionChunk,
     ChatCompletionClient,
     ChatCompletionResult,
     ChatMessage,
@@ -17,6 +18,7 @@ from app.modules.models.rerank import (
 
 __all__ = [
     "ChatCompletionClient",
+    "ChatCompletionChunk",
     "ChatCompletionResult",
     "ChatMessage",
     "EmbeddingClient",

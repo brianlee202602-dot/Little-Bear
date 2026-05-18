@@ -22,7 +22,8 @@ def _run(sql: str) -> None:
 
 
 def upgrade() -> None:
-    # knowledge_bases 是文档组织边界，也承载默认可见性和归属部门。
+    # knowledge_bases 是文档组织容器；owner_department_id 仅表示管理归属，不再等同访问边界。
+    # kb_visibility 控制知识库是否可发现/可选择，文档可读性由 documents.visibility 继续控制。
     _run(
         """
         CREATE TABLE knowledge_bases (
@@ -31,7 +32,9 @@ def upgrade() -> None:
             name text NOT NULL,
             status text NOT NULL CHECK (status IN ('active','disabled','archived','deleted')),
             owner_department_id uuid NOT NULL REFERENCES departments(id),
-            default_visibility text NOT NULL CHECK (default_visibility IN ('department','enterprise')),
+            kb_visibility text NOT NULL CHECK (kb_visibility IN ('enterprise','department_acl','private')),
+            default_document_visibility text NOT NULL CHECK (default_document_visibility IN ('department','enterprise')),
+            default_document_owner_department_id uuid NOT NULL REFERENCES departments(id),
             policy_version integer NOT NULL DEFAULT 1,
             config_scope_id text NULL,
             created_by uuid NULL REFERENCES users(id),
@@ -46,6 +49,13 @@ def upgrade() -> None:
     _run("CREATE INDEX idx_kb_name ON knowledge_bases(name)")
     _run("CREATE INDEX idx_kb_status ON knowledge_bases(status)")
     _run("CREATE INDEX idx_kb_owner_department_id ON knowledge_bases(owner_department_id)")
+    _run("CREATE INDEX idx_kb_visibility ON knowledge_bases(kb_visibility)")
+    _run(
+        """
+        CREATE INDEX idx_kb_default_document_owner_department_id
+        ON knowledge_bases(default_document_owner_department_id)
+        """
+    )
     _run("CREATE INDEX idx_kb_policy_version ON knowledge_bases(policy_version)")
     _run("CREATE INDEX idx_kb_config_scope_id ON knowledge_bases(config_scope_id)")
     _run("CREATE INDEX idx_kb_deleted_at ON knowledge_bases(deleted_at)")
@@ -53,7 +63,40 @@ def upgrade() -> None:
     _run(
         """
         CREATE INDEX idx_kb_owner_visibility
-        ON knowledge_bases(enterprise_id, owner_department_id, default_visibility)
+        ON knowledge_bases(enterprise_id, owner_department_id, kb_visibility)
+        """
+    )
+
+    _run(
+        """
+        CREATE TABLE knowledge_base_accesses (
+            id uuid PRIMARY KEY,
+            enterprise_id uuid NOT NULL REFERENCES enterprises(id),
+            kb_id uuid NOT NULL REFERENCES knowledge_bases(id),
+            subject_type text NOT NULL CHECK (subject_type IN ('department','user','role')),
+            subject_id uuid NOT NULL,
+            permission text NOT NULL CHECK (permission IN ('discover','query','manage')),
+            status text NOT NULL CHECK (status IN ('active','revoked')),
+            created_by uuid NULL REFERENCES users(id),
+            updated_by uuid NULL REFERENCES users(id),
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    _run("CREATE INDEX idx_kb_accesses_enterprise_id ON knowledge_base_accesses(enterprise_id)")
+    _run("CREATE INDEX idx_kb_accesses_kb_id ON knowledge_base_accesses(kb_id)")
+    _run(
+        """
+        CREATE INDEX idx_kb_accesses_subject
+        ON knowledge_base_accesses(enterprise_id, subject_type, subject_id, permission, status)
+        """
+    )
+    _run(
+        """
+        CREATE UNIQUE INDEX uq_kb_accesses_active
+        ON knowledge_base_accesses(enterprise_id, kb_id, subject_type, subject_id, permission)
+        WHERE status = 'active'
         """
     )
 
@@ -429,6 +472,7 @@ def downgrade() -> None:
         "document_versions",
         "documents",
         "folders",
+        "knowledge_base_accesses",
         "knowledge_bases",
     ):
         op.execute(f"DROP TABLE IF EXISTS {table} CASCADE")

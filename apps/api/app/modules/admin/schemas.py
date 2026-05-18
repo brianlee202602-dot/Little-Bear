@@ -54,14 +54,31 @@ class AdminDepartmentList:
 
 
 @dataclass(frozen=True)
+class AdminKnowledgeBaseAccessRule:
+    subject_type: str
+    subject_id: str
+    permission: str
+
+
+@dataclass(frozen=True)
+class AdminKnowledgeBaseAccessRuleInput:
+    subject_type: str
+    subject_id: str
+    permission: str
+
+
+@dataclass(frozen=True)
 class AdminKnowledgeBase:
     id: str
     name: str
     status: str
     owner_department_id: str
-    default_visibility: str
+    kb_visibility: str
+    default_document_visibility: str
+    default_document_owner_department_id: str
     config_scope_id: str | None = None
     policy_version: int = 1
+    access_rules: tuple[AdminKnowledgeBaseAccessRule, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -139,6 +156,17 @@ class AdminPermissionPolicy:
     resource_type: str
     resource_id: str
     visibility: str
+    permission_version: int
+
+
+@dataclass(frozen=True)
+class AdminKnowledgeBasePermissionPolicy:
+    resource_type: str
+    resource_id: str
+    kb_visibility: str
+    default_document_visibility: str
+    default_document_owner_department_id: str
+    access_rules: tuple[AdminKnowledgeBaseAccessRule, ...]
     permission_version: int
 
 

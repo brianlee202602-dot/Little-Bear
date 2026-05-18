@@ -11,12 +11,14 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 from app.api.schemas.query import CitationData, QueryRequest, QueryResponse
 from app.db.session import session_scope
+from app.modules.answer.schemas import AnswerGenerationResult
 from app.modules.auth.errors import AuthServiceError
 from app.modules.auth.schemas import AuthContext
 from app.modules.auth.service import AuthService
 from app.modules.query.errors import QueryServiceError
 from app.modules.query.runtime import build_query_service
 from app.modules.query.schemas import QueryCitation, QueryResult
+from app.modules.query.service import QueryService, QueryStreamPlan
 from app.shared.context import get_request_context
 
 router = APIRouter(prefix="/internal/v1", tags=["query"])
@@ -38,14 +40,67 @@ async def create_query_stream(
     payload: QueryRequest,
     authorization: str | None = Header(default=None),
 ) -> StreamingResponse | JSONResponse:
-    result_or_error = _execute_query(payload, authorization=authorization, stage="query_stream")
-    if isinstance(result_or_error, JSONResponse):
-        return result_or_error
+    stream_or_error = _prepare_query_stream(payload, authorization=authorization)
+    if isinstance(stream_or_error, JSONResponse):
+        return stream_or_error
+    if isinstance(stream_or_error, QueryResult):
+        return StreamingResponse(
+            _query_sse_events(stream_or_error),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    service, plan = stream_or_error
     return StreamingResponse(
-        _query_sse_events(result_or_error),
+        _query_stream_sse_events(service, plan),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _prepare_query_stream(
+    payload: QueryRequest,
+    *,
+    authorization: str | None,
+) -> tuple[QueryService, QueryStreamPlan] | QueryResult | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="rag:query")
+            service = build_query_service(session)
+            if not hasattr(service, "create_query_stream_plan"):
+                return service.create_query(
+                    session,
+                    user_id=auth_context.user.id,
+                    enterprise_id=auth_context.user.enterprise_id,
+                    kb_ids=payload.kb_ids,
+                    query_text=payload.query,
+                    mode=payload.mode,
+                    filters=payload.filters,
+                    top_k=payload.top_k,
+                    include_sources=payload.include_sources,
+                    request_id=_request_id(),
+                    trace_id=_trace_id(),
+                )
+            plan = service.create_query_stream_plan(
+                session,
+                user_id=auth_context.user.id,
+                enterprise_id=auth_context.user.enterprise_id,
+                kb_ids=payload.kb_ids,
+                query_text=payload.query,
+                mode=payload.mode,
+                filters=payload.filters,
+                top_k=payload.top_k,
+                include_sources=payload.include_sources,
+                request_id=_request_id(),
+                trace_id=_trace_id(),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="query_stream_auth")
+    except QueryServiceError as exc:
+        return _query_error_response(exc, stage="query_stream")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="query_stream")
+    return service, plan
 
 
 def _execute_query(
@@ -134,6 +189,70 @@ def _query_sse_events(result: QueryResult) -> Iterable[str]:
         "done",
         {
             "request_id": result.request_id,
+            "answer": result.answer,
+            "trace_id": result.trace_id,
+            "citations": [
+                _citation_data(citation).model_dump() for citation in result.citations
+            ],
+            "confidence": result.confidence,
+            "degraded": result.degraded,
+            "degrade_reason": result.degrade_reason,
+        },
+    )
+
+
+def _query_stream_sse_events(service: QueryService, plan: QueryStreamPlan) -> Iterable[str]:
+    yield _sse_event(
+        "metadata",
+        {
+            "request_id": plan.request_id,
+            "trace_id": plan.trace_id,
+            "confidence": plan.confidence,
+            "degraded": bool(plan.pre_degrade_reasons),
+            "degrade_reason": ";".join(plan.pre_degrade_reasons)
+            if plan.pre_degrade_reasons
+            else None,
+            "streaming": plan.mode == "answer",
+        },
+    )
+    if plan.mode == "answer":
+        runner = service.answer_service.stream(query_context=plan.query_context)
+        for token in runner.stream_tokens():
+            yield _sse_event("token", {"delta": token})
+        answer_result = runner.result or AnswerGenerationResult(
+            answer="",
+            degraded=True,
+            degrade_reason="llm_stream_result_missing",
+        )
+    else:
+        answer_result = AnswerGenerationResult(answer="", degraded=False, degrade_reason=None)
+
+    try:
+        with session_scope() as session:
+            result = service.finalize_query_stream(
+                session,
+                plan=plan,
+                answer_result=answer_result,
+            )
+    except (QueryServiceError, SQLAlchemyError) as exc:
+        yield _sse_event(
+            "error",
+            {
+                "request_id": plan.request_id,
+                "trace_id": plan.trace_id,
+                "error_code": getattr(exc, "error_code", "QUERY_STREAM_FINALIZE_FAILED"),
+                "message": getattr(exc, "message", "query stream finalization failed"),
+            },
+        )
+        return
+
+    for citation in result.citations:
+        yield _sse_event("citation", _citation_data(citation).model_dump())
+    yield _sse_event(
+        "done",
+        {
+            "request_id": result.request_id,
+            "answer": result.answer,
             "trace_id": result.trace_id,
             "citations": [
                 _citation_data(citation).model_dump() for citation in result.citations

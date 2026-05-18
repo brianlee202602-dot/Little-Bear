@@ -296,6 +296,7 @@ DELETE /internal/v1/admin/knowledge-bases/{kb_id}
 - 禁用、归档、恢复都使用 `PATCH` 修改 `status`，例如 `active`、`disabled`、`archived`。
 - `DELETE` 表示删除或软删除知识库，必须先阻断查询可见性并记录审计。
 - `default_visibility=enterprise` 属于扩大可见范围，应按配置触发审批或高风险审计。
+- 管理后台新建普通业务知识库时默认建议 `enterprise` 可见；当前兼容字段 `default_visibility` 同时作为新导入文档默认权限，后续应拆为 `kb_visibility` 和 `default_document_visibility`。
 
 ## 10. 管理后台：文件夹 API
 
@@ -343,6 +344,7 @@ GET    /internal/v1/admin/documents/{doc_id}/index-versions
 要求：
 
 - 修改 `owner_department_id` 或 `visibility` 必须调用 Permission Service，生成新的资源策略版本、权限快照，并触发索引 payload 刷新。
+- 修改文档权限时必须校验父知识库可见性：父知识库为 `department` 时，文档不得设置为 `enterprise`，也不得授权给父知识库不可见的其他部门；管理后台应在弹窗中展示父知识库权限并提前提示非法组合。
 - 删除必须先写 access block，再异步物理删除索引。
 - 恢复软删除文档使用 `PATCH` 修改 `lifecycle_status`，并按数据状态决定是否需要重建索引。
 - 重建索引使用 `POST /admin/documents/{doc_id}/index-jobs` 创建新的索引任务。

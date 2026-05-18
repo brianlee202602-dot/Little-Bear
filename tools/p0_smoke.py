@@ -14,8 +14,11 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -32,23 +35,73 @@ class SmokeConfig:
     top_k: int
     require_citations: bool
     timeout_seconds: float
+    record_path: str | None
 
 
 class SmokeError(Exception):
     pass
 
 
+class SmokeRecorder:
+    def __init__(self, config: SmokeConfig) -> None:
+        self._config = config
+        self._started_at = _utc_now()
+        self._started_perf = time.perf_counter()
+        self._steps: list[dict[str, Any]] = []
+
+    def step(self, name: str, details: dict[str, Any] | None = None) -> None:
+        self._steps.append(
+            {
+                "name": name,
+                "status": "passed",
+                "elapsed_ms": round((time.perf_counter() - self._started_perf) * 1000, 2),
+                "details": details or {},
+            }
+        )
+
+    def write(self, *, status: str, error: str | None = None) -> None:
+        if not self._config.record_path:
+            return
+        path = Path(self._config.record_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "schema_version": 1,
+            "kind": "p0_smoke",
+            "status": status,
+            "started_at": self._started_at,
+            "finished_at": _utc_now(),
+            "duration_ms": round((time.perf_counter() - self._started_perf) * 1000, 2),
+            "config": {
+                "base_url": self._config.base_url,
+                "username": self._config.username,
+                "enterprise_code": self._config.enterprise_code,
+                "kb_id": self._config.kb_id,
+                "query": self._config.query,
+                "top_k": self._config.top_k,
+                "require_citations": self._config.require_citations,
+                "timeout_seconds": self._config.timeout_seconds,
+            },
+            "steps": self._steps,
+            "error": error,
+        }
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"record={path}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     config = _parse_args(argv)
+    recorder = SmokeRecorder(config)
     try:
-        _run_smoke(config)
+        _run_smoke(config, recorder)
     except SmokeError as exc:
+        recorder.write(status="failed", error=str(exc))
         print(f"smoke failed: {exc}", file=sys.stderr)
         return 1
+    recorder.write(status="passed")
     return 0
 
 
-def _run_smoke(config: SmokeConfig) -> None:
+def _run_smoke(config: SmokeConfig, recorder: SmokeRecorder) -> None:
     print(f"api={config.base_url}")
     setup_state = _request_json(
         "GET",
@@ -58,6 +111,7 @@ def _run_smoke(config: SmokeConfig) -> None:
     setup_data = _object(setup_state.get("data"), "setup-state.data")
     if setup_data.get("setup_required") is True:
         raise SmokeError("setup is still required")
+    recorder.step("setup_state", {"setup_status": setup_data.get("setup_status")})
     print("setup-state=ok")
 
     ready_response = _request_json(
@@ -67,6 +121,7 @@ def _run_smoke(config: SmokeConfig) -> None:
     )
     if ready_response.get("status") != "ready":
         raise SmokeError(f"health is not ready: {json.dumps(ready_response, ensure_ascii=False)}")
+    recorder.step("health_ready", {"status": ready_response.get("status")})
     print("health-ready=ok")
 
     login_payload: dict[str, Any] = {
@@ -82,15 +137,26 @@ def _run_smoke(config: SmokeConfig) -> None:
         timeout_seconds=config.timeout_seconds,
     )
     access_token = _required_str(token_response, "access_token")
+    recorder.step(
+        "login",
+        {
+            "token_type": token_response.get("token_type"),
+            "expires_in": token_response.get("expires_in"),
+        },
+    )
     print("login=ok")
 
     try:
-        _run_authenticated_smoke(config, access_token)
+        _run_authenticated_smoke(config, access_token, recorder)
     finally:
-        _logout_current_session(config, access_token)
+        _logout_current_session(config, access_token, recorder)
 
 
-def _run_authenticated_smoke(config: SmokeConfig, access_token: str) -> None:
+def _run_authenticated_smoke(
+    config: SmokeConfig,
+    access_token: str,
+    recorder: SmokeRecorder,
+) -> None:
     user_response = _request_json(
         "GET",
         f"{config.base_url}/internal/v1/users/me",
@@ -98,6 +164,14 @@ def _run_authenticated_smoke(config: SmokeConfig, access_token: str) -> None:
         timeout_seconds=config.timeout_seconds,
     )
     user = _object(user_response.get("data"), "users.me.data")
+    recorder.step(
+        "current_user",
+        {
+            "username": user.get("username"),
+            "department_count": len(_list(user.get("departments"), "users.me.departments")),
+            "role_count": len(_list(user.get("roles"), "users.me.roles")),
+        },
+    )
     print(f"user={user.get('username', 'unknown')}")
 
     kb_response = _request_json(
@@ -108,6 +182,10 @@ def _run_authenticated_smoke(config: SmokeConfig, access_token: str) -> None:
     )
     knowledge_bases = _list(kb_response.get("data"), "knowledge-bases.data")
     selected_kb_id = config.kb_id or _first_id(knowledge_bases, "knowledge base")
+    recorder.step(
+        "knowledge_bases",
+        {"count": len(knowledge_bases), "selected_kb_id": selected_kb_id},
+    )
     print(f"knowledge-bases={len(knowledge_bases)} selected={selected_kb_id}")
 
     documents_response = _request_json(
@@ -120,9 +198,11 @@ def _run_authenticated_smoke(config: SmokeConfig, access_token: str) -> None:
         timeout_seconds=config.timeout_seconds,
     )
     documents = _list(documents_response.get("data"), "documents.data")
+    first_document_id: str | None = None
     print(f"documents={len(documents)}")
     if documents:
         document_id = _required_str(_object(documents[0], "documents[0]"), "id")
+        first_document_id = document_id
         chunks_response = _request_json(
             "GET",
             f"{config.base_url}/internal/v1/documents/{document_id}/chunks",
@@ -130,7 +210,20 @@ def _run_authenticated_smoke(config: SmokeConfig, access_token: str) -> None:
             timeout_seconds=config.timeout_seconds,
         )
         chunks = _list(chunks_response.get("data"), "chunks.data")
+        recorder.step(
+            "document_sources",
+            {
+                "document_count": len(documents),
+                "first_document_id": document_id,
+                "chunk_count": len(chunks),
+            },
+        )
         print(f"chunks={len(chunks)} first_document={document_id}")
+    else:
+        recorder.step(
+            "document_sources",
+            {"document_count": 0, "first_document_id": first_document_id},
+        )
 
     query_payload = {
         "kb_ids": [selected_kb_id],
@@ -150,6 +243,17 @@ def _run_authenticated_smoke(config: SmokeConfig, access_token: str) -> None:
     citations = _list(query_response.get("citations"), "queries.citations")
     if config.require_citations and not citations:
         raise SmokeError("non-streaming query returned no citations")
+    recorder.step(
+        "query",
+        {
+            "request_id": query_response.get("request_id"),
+            "trace_id": query_response.get("trace_id"),
+            "degraded": query_response.get("degraded"),
+            "degrade_reason": query_response.get("degrade_reason"),
+            "citation_count": len(citations),
+            "confidence": query_response.get("confidence"),
+        },
+    )
     print(
         "query=ok "
         f"degraded={query_response.get('degraded')} citations={len(citations)} "
@@ -171,11 +275,19 @@ def _run_authenticated_smoke(config: SmokeConfig, access_token: str) -> None:
     stream_citations = [event for event in events if event["event"] == "citation"]
     if config.require_citations and not stream_citations:
         raise SmokeError("streaming query returned no citation events")
+    recorder.step(
+        "query_stream",
+        {"events": event_names, "citation_event_count": len(stream_citations)},
+    )
     print(f"stream=ok events={','.join(event_names)}")
     print("smoke=passed")
 
 
-def _logout_current_session(config: SmokeConfig, access_token: str) -> None:
+def _logout_current_session(
+    config: SmokeConfig,
+    access_token: str,
+    recorder: SmokeRecorder,
+) -> None:
     try:
         _request_text(
             "DELETE",
@@ -184,8 +296,10 @@ def _logout_current_session(config: SmokeConfig, access_token: str) -> None:
             timeout_seconds=config.timeout_seconds,
         )
     except SmokeError as exc:
+        recorder.step("logout", {"status": "skipped", "reason": str(exc)})
         print(f"logout=skipped reason={exc}", file=sys.stderr)
     else:
+        recorder.step("logout", {"status": "ok"})
         print("logout=ok")
 
 
@@ -298,6 +412,11 @@ def _parse_args(argv: Sequence[str] | None) -> SmokeConfig:
         type=float,
         default=float(os.getenv("LITTLE_BEAR_SMOKE_TIMEOUT_SECONDS", "30")),
     )
+    parser.add_argument(
+        "--record-path",
+        default=os.getenv("LITTLE_BEAR_SMOKE_RECORD_PATH"),
+        help="Write a sanitized JSON execution record to this path.",
+    )
     args = parser.parse_args(argv)
     if not args.username:
         parser.error("--username or LITTLE_BEAR_SMOKE_USERNAME is required")
@@ -313,7 +432,12 @@ def _parse_args(argv: Sequence[str] | None) -> SmokeConfig:
         top_k=max(int(args.top_k), 1),
         require_citations=bool(args.require_citations),
         timeout_seconds=max(float(args.timeout_seconds), 1.0),
+        record_path=args.record_path,
     )
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def _object(value: Any, name: str) -> dict[str, Any]:

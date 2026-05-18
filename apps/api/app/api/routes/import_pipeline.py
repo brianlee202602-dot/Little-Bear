@@ -299,6 +299,7 @@ def _actor_context(auth_context: AuthContext) -> ImportActorContext:
         user_id=auth_context.user.id,
         scopes=auth_context.user.scopes,
         department_ids=tuple(department.id for department in auth_context.user.departments),
+        role_ids=tuple(role.id for role in auth_context.user.roles),
         knowledge_base_ids=knowledge_base_ids,
         can_import_all_knowledge_bases=can_import_all_knowledge_bases,
     )

@@ -69,10 +69,12 @@ class PermissionService:
         roles = self._load_roles(session, user_id=user_id, enterprise_id=user["enterprise_id"])
         scopes = _merge_scopes(roles)
         department_ids = tuple(department.id for department in departments)
+        role_ids = tuple(role.id for role in roles)
         filter_hash = _permission_filter_hash(
             enterprise_id=user["enterprise_id"],
             user_id=user_id,
             department_ids=department_ids,
+            role_ids=role_ids,
             scopes=scopes,
             permission_version=versions["permission_version"],
             org_version=versions["org_version"],
@@ -85,6 +87,7 @@ class PermissionService:
             department_ids=department_ids,
             departments=departments,
             roles=roles,
+            role_ids=role_ids,
             scopes=scopes,
             permission_version=versions["permission_version"],
             org_version=versions["org_version"],
@@ -151,6 +154,60 @@ class PermissionService:
             ),
             params=params,
         )
+
+    def require_queryable_knowledge_bases(
+        self,
+        session: Session,
+        context: PermissionContext,
+        *,
+        kb_ids: list[str] | tuple[str, ...],
+        required_scope: str = "rag:query",
+    ) -> tuple[str, ...]:
+        self.require_scope(context, required_scope)
+        normalized_kb_ids = _normalize_ids(kb_ids)
+        params: dict[str, Any] = {
+            "enterprise_id": context.enterprise_id,
+            "kb_ids": list(normalized_kb_ids),
+        }
+        access_sql = knowledge_base_access_where_sql(
+            context,
+            params,
+            permission="query",
+            alias="kb",
+        )
+        try:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT kb.id::text AS kb_id
+                    FROM knowledge_bases kb
+                    WHERE kb.enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND kb.id = ANY(CAST(:kb_ids AS uuid[]))
+                      AND kb.deleted_at IS NULL
+                      AND kb.status = 'active'
+                      AND {access_sql}
+                    """
+                ),
+                params,
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "PERM_KB_ACCESS_UNAVAILABLE",
+                "knowledge base access cannot be verified",
+                exc,
+            ) from exc
+        allowed = {str(row._mapping["kb_id"]) for row in rows}
+        if len(allowed) != len(normalized_kb_ids):
+            raise PermissionServiceError(
+                "PERM_KB_DENIED",
+                "knowledge base is not accessible",
+                status_code=404,
+                details={
+                    "requested_count": len(normalized_kb_ids),
+                    "allowed_count": len(allowed),
+                },
+            )
+        return tuple(kb_id for kb_id in normalized_kb_ids if kb_id in allowed)
 
     def validate_visibility_policy(self, policy: dict[str, Any]) -> None:
         unsupported = sorted(UNSUPPORTED_POLICY_KEYS.intersection(policy))
@@ -578,6 +635,49 @@ NOT EXISTS (
 """.strip()
 
 
+def knowledge_base_access_where_sql(
+    context: PermissionContext,
+    params: dict[str, Any],
+    *,
+    permission: str,
+    alias: str,
+) -> str:
+    if context.has_scope("knowledge_base:manage"):
+        return "TRUE"
+    implied_permissions = ["manage", permission] if permission != "manage" else ["manage"]
+    params[f"{alias}_kb_access_permissions"] = implied_permissions
+    subject_conditions = [
+        f"(kba.subject_type = 'user' AND kba.subject_id = CAST(:{alias}_kb_access_user_id AS uuid))"
+    ]
+    params[f"{alias}_kb_access_user_id"] = context.user_id
+    if context.department_ids:
+        subject_conditions.append(
+            f"(kba.subject_type = 'department' "
+            f"AND kba.subject_id = ANY(CAST(:{alias}_kb_access_department_ids AS uuid[])))"
+        )
+        params[f"{alias}_kb_access_department_ids"] = list(context.department_ids)
+    if context.role_ids:
+        subject_conditions.append(
+            f"(kba.subject_type = 'role' "
+            f"AND kba.subject_id = ANY(CAST(:{alias}_kb_access_role_ids AS uuid[])))"
+        )
+        params[f"{alias}_kb_access_role_ids"] = list(context.role_ids)
+    return f"""
+(
+    {alias}.kb_visibility = 'enterprise'
+    OR EXISTS (
+        SELECT 1
+        FROM knowledge_base_accesses kba
+        WHERE kba.enterprise_id = {alias}.enterprise_id
+          AND kba.kb_id = {alias}.id
+          AND kba.status = 'active'
+          AND kba.permission = ANY(CAST(:{alias}_kb_access_permissions AS text[]))
+          AND ({' OR '.join(subject_conditions)})
+    )
+)
+""".strip()
+
+
 def _merge_scopes(roles: tuple[PermissionRole, ...]) -> tuple[str, ...]:
     scopes = set(BASE_USER_SCOPES)
     for role in roles:
@@ -590,6 +690,7 @@ def _permission_filter_hash(
     enterprise_id: str,
     user_id: str,
     department_ids: tuple[str, ...],
+    role_ids: tuple[str, ...],
     scopes: tuple[str, ...],
     permission_version: int,
     org_version: int,
@@ -599,6 +700,7 @@ def _permission_filter_hash(
             "enterprise_id": enterprise_id,
             "user_id": user_id,
             "department_ids": sorted(department_ids),
+            "role_ids": sorted(role_ids),
             "scopes": sorted(scopes),
             "permission_version": permission_version,
             "org_version": org_version,

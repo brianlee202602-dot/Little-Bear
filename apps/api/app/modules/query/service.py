@@ -75,6 +75,30 @@ class _QueryAuditEvent:
     summary: dict[str, object]
 
 
+@dataclass(frozen=True)
+class QueryStreamPlan:
+    request_id: str
+    trace_id: str
+    mode: str
+    started_at: float
+    normalized_query: str
+    normalized_kb_ids: tuple[str, ...]
+    config_version: int
+    context: PermissionContext
+    query_context: QueryContext | None
+    allowed_candidates: tuple[QueryAllowedCandidate, ...]
+    citations: tuple[QueryCitation, ...]
+    confidence: Literal["low", "medium", "high"]
+    pre_degrade_reasons: tuple[str, ...]
+    audit_events: tuple[_QueryAuditEvent, ...]
+    rerank_model_call: RetrievalModelCall | None
+    model_route_hash: str | None
+    candidate_count: int
+    permission_filter_hash: str
+    permission_version: int
+    index_version_hash: str | None
+
+
 class QueryService:
     """非流式查询编排。"""
 
@@ -127,10 +151,16 @@ class QueryService:
                 enterprise_id=enterprise_id,
                 request_id=request_id,
             )
+            queryable_kb_ids = self.permission_service.require_queryable_knowledge_bases(
+                session,
+                context,
+                kb_ids=normalized_kb_ids,
+                required_scope="rag:query",
+            )
             active_indexes = self._load_active_index_versions(
                 session,
                 enterprise_id=context.enterprise_id,
-                kb_ids=normalized_kb_ids,
+                kb_ids=queryable_kb_ids,
             )
             active_index_ids = tuple(index.id for index in active_indexes)
             collection_names = tuple(index.collection_name for index in active_indexes)
@@ -147,7 +177,7 @@ class QueryService:
             if active_index_ids:
                 permission_filter = self.permission_service.build_filter(
                     context,
-                    kb_ids=normalized_kb_ids,
+                    kb_ids=queryable_kb_ids,
                     active_index_version_ids=active_index_ids,
                     required_scope="rag:query",
                 )
@@ -175,7 +205,7 @@ class QueryService:
                 allowed_candidates = self._gate_candidates(
                     context,
                     candidates,
-                    allowed_kb_ids=normalized_kb_ids,
+                    allowed_kb_ids=queryable_kb_ids,
                     active_index_version_ids=active_index_ids,
                     limit=max(normalized_top_k, self.rerank_input_top_k),
                 )
@@ -270,6 +300,13 @@ class QueryService:
                                 summary=citation_validation.summary(),
                             )
                         )
+            if mode == "answer" and not answer and degrade_reasons:
+                answer = _degraded_answer(
+                    query_text=normalized_query,
+                    degrade_reasons=tuple(degrade_reasons),
+                    citation_count=len(citations),
+                    candidate_count=candidate_count,
+                )
             degraded = bool(degrade_reasons)
             degrade_reason = ";".join(degrade_reasons) if degrade_reasons else None
             result = QueryResult(
@@ -373,6 +410,324 @@ class QueryService:
                 retryable=exc.retryable,
                 details=exc.details,
             ) from exc
+
+    def create_query_stream_plan(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        enterprise_id: str,
+        kb_ids: list[str],
+        query_text: str,
+        mode: str,
+        filters: dict[str, Any] | None,
+        top_k: int,
+        include_sources: bool,
+        request_id: str,
+        trace_id: str,
+    ) -> QueryStreamPlan:
+        started_at = time.monotonic()
+        normalized_query = _normalize_query(query_text)
+        normalized_kb_ids = _normalize_ids(kb_ids)
+        normalized_top_k = min(max(top_k, 1), 50)
+        request_filters = filters or {}
+        filter_clause = _build_filter_clause(request_filters)
+        config_version = self._load_active_config_version(session)
+
+        try:
+            context = self.permission_service.build_context(
+                session,
+                user_id=user_id,
+                enterprise_id=enterprise_id,
+                request_id=request_id,
+            )
+            queryable_kb_ids = self.permission_service.require_queryable_knowledge_bases(
+                session,
+                context,
+                kb_ids=normalized_kb_ids,
+                required_scope="rag:query",
+            )
+            query_context: QueryContext | None = None
+            allowed_candidates: tuple[QueryAllowedCandidate, ...] = ()
+            citations: tuple[QueryCitation, ...] = ()
+            rerank_model_call: RetrievalModelCall | None = None
+            model_route_hash: str | None = None
+            audit_events: list[_QueryAuditEvent] = []
+            degrade_reasons: list[str] = []
+            active_indexes = self._load_active_index_versions(
+                session,
+                enterprise_id=context.enterprise_id,
+                kb_ids=queryable_kb_ids,
+            )
+            active_index_ids = tuple(index.id for index in active_indexes)
+            collection_names = tuple(index.collection_name for index in active_indexes)
+            index_version_hash = _index_version_hash(active_index_ids)
+            if active_index_ids:
+                permission_filter = self.permission_service.build_filter(
+                    context,
+                    kb_ids=queryable_kb_ids,
+                    active_index_version_ids=active_index_ids,
+                    required_scope="rag:query",
+                )
+                keyword_candidates = self._keyword_search(
+                    session,
+                    permission_filter=permission_filter,
+                    query_text=normalized_query,
+                    filter_clause=filter_clause,
+                    limit=normalized_top_k * 3,
+                )
+                vector_result = self.vector_retriever.search(
+                    query_text=normalized_query,
+                    permission_filter=permission_filter,
+                    collection_names=collection_names,
+                    top_k=normalized_top_k * 3,
+                )
+                if vector_result.degraded:
+                    degrade_reasons.append(
+                        vector_result.degrade_reason or "vector_retrieval_degraded"
+                    )
+                candidates = self.fusion_service.fuse(
+                    keyword_candidates + vector_result.candidates,
+                    limit=normalized_top_k * 3,
+                )
+                allowed_candidates = self._gate_candidates(
+                    context,
+                    candidates,
+                    allowed_kb_ids=queryable_kb_ids,
+                    active_index_version_ids=active_index_ids,
+                    limit=max(normalized_top_k, self.rerank_input_top_k),
+                )
+                rerank_result = self._rerank_allowed_candidates(
+                    session,
+                    query_text=normalized_query,
+                    allowed_candidates=allowed_candidates,
+                    top_k=normalized_top_k,
+                )
+                if rerank_result.degraded:
+                    rerank_degrade_reason = (
+                        rerank_result.degrade_reason or "rerank_degraded"
+                    )
+                    degrade_reasons.append(rerank_degrade_reason)
+                    audit_events.append(
+                        _QueryAuditEvent(
+                            event_name="query.rerank_degraded",
+                            result="failure",
+                            risk_level="medium",
+                            error_code=rerank_degrade_reason,
+                            summary={
+                                "degrade_reason": rerank_degrade_reason,
+                                "candidate_count": len(allowed_candidates),
+                            },
+                        )
+                    )
+                rerank_model_call = rerank_result.model_call
+                if rerank_model_call is not None:
+                    model_route_hash = rerank_model_call.model_route_hash
+                allowed_candidates = _allowed_candidates_from_retrieval(
+                    rerank_result.candidates
+                )
+                citations = (
+                    tuple(item.citation for item in allowed_candidates)
+                    if include_sources
+                    else ()
+                )
+                if mode == "answer":
+                    query_context = self.context_builder.build(
+                        session,
+                        query_text=normalized_query,
+                        allowed_candidates=allowed_candidates,
+                    )
+                candidate_count = len(candidates)
+                permission_filter_hash = permission_filter.permission_filter_hash
+                permission_version = permission_filter.permission_version
+            else:
+                candidate_count = 0
+                permission_filter_hash = context.permission_filter_hash
+                permission_version = context.permission_version
+
+            return QueryStreamPlan(
+                request_id=request_id,
+                trace_id=trace_id,
+                mode=mode,
+                started_at=started_at,
+                normalized_query=normalized_query,
+                normalized_kb_ids=normalized_kb_ids,
+                config_version=config_version,
+                context=context,
+                query_context=query_context,
+                allowed_candidates=allowed_candidates,
+                citations=citations,
+                confidence=_confidence(citations),
+                pre_degrade_reasons=tuple(degrade_reasons),
+                audit_events=tuple(audit_events),
+                rerank_model_call=rerank_model_call,
+                model_route_hash=model_route_hash,
+                candidate_count=candidate_count,
+                permission_filter_hash=permission_filter_hash,
+                permission_version=permission_version,
+                index_version_hash=index_version_hash,
+            )
+        except PermissionServiceError as exc:
+            self._insert_denied_query_log(
+                session,
+                request_id=request_id,
+                trace_id=trace_id,
+                enterprise_id=enterprise_id,
+                user_id=user_id,
+                kb_ids=normalized_kb_ids,
+                query_text=normalized_query,
+                config_version=config_version,
+                latency_ms=_elapsed_ms(started_at),
+                error_code=exc.error_code,
+            )
+            self._insert_query_audit_log(
+                session,
+                request_id=request_id,
+                trace_id=trace_id,
+                enterprise_id=enterprise_id,
+                user_id=user_id,
+                config_version=config_version,
+                permission_version=0,
+                index_version_hash=None,
+                event=_QueryAuditEvent(
+                    event_name="query.denied",
+                    result="denied",
+                    risk_level="high",
+                    error_code=exc.error_code,
+                    summary={"kb_ids": list(normalized_kb_ids), "error_code": exc.error_code},
+                ),
+            )
+            raise QueryServiceError(
+                exc.error_code,
+                exc.message,
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+                details=exc.details,
+            ) from exc
+
+    def finalize_query_stream(
+        self,
+        session: Session,
+        *,
+        plan: QueryStreamPlan,
+        answer_result: AnswerGenerationResult,
+    ) -> QueryResult:
+        answer = answer_result.answer
+        model_route_hash = answer_result.model_route_hash or plan.model_route_hash
+        audit_events = list(plan.audit_events)
+        degrade_reasons = list(plan.pre_degrade_reasons)
+        if answer_result.degraded:
+            degrade_reasons.append(answer_result.degrade_reason or "llm_degraded")
+            if answer_result.model_call_attempted:
+                summary: dict[str, object] = {
+                    "model_name": answer_result.model_name,
+                    "degrade_reason": answer_result.degrade_reason,
+                }
+                if answer_result.error_message:
+                    summary["error_message"] = _truncate_error_message(
+                        answer_result.error_message
+                    )
+                audit_events.append(
+                    _QueryAuditEvent(
+                        event_name="query.llm_degraded",
+                        result="failure",
+                        risk_level="medium",
+                        error_code=answer_result.degrade_reason,
+                        summary=summary,
+                    )
+                )
+        elif answer:
+            citation_validation = _validate_answer_citations(
+                answer,
+                allowed_source_ids=tuple(
+                    allowed.candidate.chunk_id for allowed in plan.allowed_candidates
+                ),
+            )
+            if not citation_validation.valid:
+                answer = ""
+                degrade_reasons.append(citation_validation.degrade_reason)
+                audit_events.append(
+                    _QueryAuditEvent(
+                        event_name="query.citation_validation_failed",
+                        result="failure",
+                        risk_level="high",
+                        error_code=citation_validation.degrade_reason,
+                        summary=citation_validation.summary(),
+                    )
+                )
+        if plan.mode == "answer" and not answer and degrade_reasons:
+            answer = _degraded_answer(
+                query_text=plan.normalized_query,
+                degrade_reasons=tuple(degrade_reasons),
+                citation_count=len(plan.citations),
+                candidate_count=plan.candidate_count,
+            )
+        degraded = bool(degrade_reasons)
+        degrade_reason = ";".join(degrade_reasons) if degrade_reasons else None
+        result = QueryResult(
+            request_id=plan.request_id,
+            answer=answer,
+            citations=plan.citations,
+            confidence=plan.confidence,
+            degraded=degraded,
+            degrade_reason=degrade_reason,
+            trace_id=plan.trace_id,
+            context=plan.query_context,
+        )
+        if answer_result.model_call_attempted:
+            self._insert_model_call_log(
+                session,
+                request_id=plan.request_id,
+                trace_id=plan.trace_id,
+                enterprise_id=plan.context.enterprise_id,
+                config_version=plan.config_version,
+                caller="query.answer_stream",
+                answer_result=answer_result,
+            )
+        if plan.rerank_model_call is not None:
+            self._insert_retrieval_model_call_log(
+                session,
+                request_id=plan.request_id,
+                trace_id=plan.trace_id,
+                enterprise_id=plan.context.enterprise_id,
+                config_version=plan.config_version,
+                caller="query.rerank",
+                model_call=plan.rerank_model_call,
+            )
+        for audit_event in audit_events:
+            self._insert_query_audit_log(
+                session,
+                request_id=plan.request_id,
+                trace_id=plan.trace_id,
+                enterprise_id=plan.context.enterprise_id,
+                user_id=plan.context.user_id,
+                config_version=plan.config_version,
+                permission_version=plan.permission_version,
+                index_version_hash=plan.index_version_hash,
+                event=audit_event,
+            )
+        self._insert_query_log(
+            session,
+            request_id=plan.request_id,
+            trace_id=plan.trace_id,
+            enterprise_id=plan.context.enterprise_id,
+            user_id=plan.context.user_id,
+            kb_ids=plan.normalized_kb_ids,
+            query_hash=_query_hash(plan.normalized_query),
+            status="success",
+            degraded=degraded,
+            degrade_reason=degrade_reason,
+            config_version=plan.config_version,
+            permission_version=plan.permission_version,
+            permission_filter_hash=plan.permission_filter_hash,
+            index_version_hash=plan.index_version_hash,
+            model_route_hash=model_route_hash,
+            latency_ms=_elapsed_ms(plan.started_at),
+            candidate_count=plan.candidate_count,
+            citation_count=len(plan.citations),
+            error_code=None,
+        )
+        return result
 
     def _load_active_config_version(self, session: Session) -> int:
         try:
@@ -1097,6 +1452,101 @@ def _validate_answer_citations(
         invalid_source_ids=(),
         allowed_source_count=len(allowed),
     )
+
+
+def _degraded_answer(
+    *,
+    query_text: str,
+    degrade_reasons: tuple[str, ...],
+    citation_count: int,
+    candidate_count: int,
+) -> str:
+    reason_messages = _degrade_reason_messages(degrade_reasons)
+    query_summary = _brief_query(query_text)
+    if citation_count > 0:
+        retrieval_summary = (
+            f"系统找到了 {citation_count} 条当前账号可访问的引用资料，"
+            "但没有生成可直接采信的业务答案。"
+        )
+        next_step = "你可以先查看下方引用资料，或换一种更具体的问题重新查询。"
+    elif candidate_count > 0:
+        retrieval_summary = (
+            "系统找到了一些候选片段，但这些片段没有形成可用于回答的最终上下文。"
+        )
+        next_step = "请检查相关文档是否已完成索引、权限快照是否已刷新，或缩小问题范围后重试。"
+    else:
+        retrieval_summary = (
+            "系统没有在当前账号可访问、已发布且已索引的知识库内容中找到匹配资料。"
+        )
+        next_step = "请确认知识库中已有可访问文档、文档已索引完成，或选择其他知识库后重试。"
+
+    return "\n".join(
+        [
+            f"我没有得到可以直接回答“{query_summary}”的可靠答案。",
+            f"本次处理结果：{retrieval_summary}",
+            f"没有答案的原因：{'；'.join(reason_messages)}。",
+            next_step,
+        ]
+    )
+
+
+def _degrade_reason_messages(reasons: tuple[str, ...]) -> tuple[str, ...]:
+    messages: list[str] = []
+    seen: set[str] = set()
+    for reason in reasons:
+        message = _degrade_reason_message(reason)
+        if message in seen:
+            continue
+        seen.add(message)
+        messages.append(message)
+    return tuple(messages) or ("系统进入降级流程，但没有提供更具体的原因",)
+
+
+def _degrade_reason_message(reason: str) -> str:
+    if reason == "llm_context_empty":
+        return "没有可用于生成答案的上下文，通常是文档为空、未检索到内容或权限过滤后无可用片段"
+    if reason == "llm_runtime_config_unavailable":
+        return "回答生成服务未完成可用配置"
+    if reason == "llm_stream_result_missing":
+        return "流式回答结束时没有得到有效的模型输出"
+    if reason == "citation_missing":
+        return "模型生成的回答缺少可验证引用，系统已拦截原回答"
+    if reason == "citation_unauthorized":
+        return "模型生成的回答引用了本次查询未授权或未命中的资料，系统已拦截原回答"
+    if reason in {
+        "vector_retriever_unavailable",
+        "vector_runtime_config_unavailable",
+        "vector_runtime_config_incomplete",
+    }:
+        return "向量检索能力不可用，本次只能依赖关键词检索"
+    if reason == "vector_collection_unavailable":
+        return "当前知识库没有可用的向量集合"
+    if reason == "query_embedding_failed":
+        return "问题向量化失败，本次只能依赖关键词检索"
+    if reason == "vector_search_failed":
+        return "向量数据库检索失败，本次只能依赖关键词检索"
+    if reason in {
+        "RERANK_PROVIDER_UNAVAILABLE",
+        "RERANK_PROVIDER_HTTP_ERROR",
+        "RERANK_PROVIDER_RESPONSE_INVALID",
+        "QUERY_RERANK_INPUT_UNAVAILABLE",
+        "rerank_input_mismatch",
+    }:
+        return "候选精排不可用，系统已使用检索排序继续处理"
+    if reason in {
+        "LLM_PROVIDER_HTTP_ERROR",
+        "LLM_PROVIDER_UNAVAILABLE",
+        "LLM_PROVIDER_RESPONSE_INVALID",
+    }:
+        return "回答生成模型不可用、超时或返回异常"
+    return f"系统降级原因代码为 {reason}"
+
+
+def _brief_query(query_text: str, *, limit: int = 80) -> str:
+    compact = " ".join(query_text.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit].rstrip()}..."
 
 
 def _optional_int(value: Any) -> int | None:

@@ -140,6 +140,20 @@ LITTLE_BEAR_SMOKE_PASSWORD=<password> \
 make PYTHON=.venv/bin/python smoke-p0
 ```
 
+需要保留脱敏执行记录时使用：
+
+```bash
+make PYTHON=.venv/bin/python smoke-p0-record
+```
+
+执行查询回归数据集：
+
+```bash
+make PYTHON=.venv/bin/python query-regression-p0
+```
+
+默认查询回归样例位于 `docs/examples/query-regression.p0.jsonl`。真实验收时应复制并替换为当前业务知识库的问题、预期引用和必要关键词；执行记录默认写入 `artifacts/`，不会提交到仓库。
+
 数据库迁移完成后再启动 API。空库完成迁移但尚未执行业务初始化时，`GET /internal/v1/setup-state` 应返回未初始化状态，随后才能进入 `setup-config-validations` 和 `setup-initialization` 流程。
 
 ## 开发约定
@@ -156,15 +170,15 @@ make PYTHON=.venv/bin/python smoke-p0
 - 管理后台已接入 setup、登录、配置、用户、部门、角色绑定、审计查询和知识库运营页面；知识库页面已支持知识库 CRUD、文件夹 CRUD、指定文件夹上传、文档列表、文档版本、chunk 预览以及知识库 / 文档权限变更。
 - Permission Service 核心已落地；管理端知识库、文件夹和文档元数据管理已接入权限边界。
 - 文档详情、文档版本、chunk 来源、普通用户文档预览，以及知识库 / 文档独立权限变更 API 已补齐。
-- Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、MinIO/S3 对象存储交接、PDF / DOCX / UTF-8 文本 / Markdown parse-clean-chunk、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入和 active index 发布。
+- Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、MinIO/S3 对象存储交接、PDF / DOCX / UTF-8 文本 / Markdown parse-clean-chunk、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入、active index 发布，以及权限变更后的索引 payload 刷新任务。
 - Query Service 非流式链路已落地：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、rerank provider、Permission Service filter、候选 gate、Context Builder、LLM provider、citation 校验、query_logs、model_call_logs 和高风险 query audit 写入；rerank、LLM 不可用或 citation 校验失败时结构化降级。
-- Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、降级状态、request_id 和 trace_id 展示。
-- 已新增 P0 主链路 smoke 脚本和 `make smoke-p0` 入口；`employee` 内置角色已补齐 `knowledge_base:read` 初始化模板和存量迁移。
-- RAG 数据面仍待补齐：复杂版式 / OCR 解析、查询改写、真实模型 token 级流式输出和真实业务回归数据集验证仍待实现。
+- Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、provider token 级流式答案、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、降级状态、request_id 和 trace_id 展示。
+- 已新增 P0 主链路 smoke 脚本、脱敏执行记录和查询回归数据集入口；`employee` 内置角色已补齐 `knowledge_base:read` 初始化模板和存量迁移。
+- RAG 数据面仍待补齐：复杂版式 / OCR 解析、查询改写和真实业务回归数据集验证仍待实现。
 - 当前开发进度详见根目录 `开发进度追踪.md`。
 
 建议下一步按以下顺序推进：
 
 1. 持续保持实际 FastAPI routes 与 `docs/contracts/openapi.yaml` 的契约对齐。
-2. 增加真实 MinIO + Worker + API 联调记录、查询回归数据集与 P0 smoke 真实环境执行记录。
-3. 将 Query Stream 从服务端缓冲式 SSE 升级为 provider token 级流式输出。
+2. 用真实业务数据集执行 `make query-regression-p0`，并把 smoke / query regression 记录纳入验收 artifact。
+3. 补齐复杂版式 / OCR 解析、文档全文预览、文档移动 / 生命周期变更和权限收紧真实环境回归记录。

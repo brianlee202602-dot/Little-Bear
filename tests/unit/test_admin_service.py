@@ -7,6 +7,7 @@ from app.modules.admin.schemas import (
     AdminDocument,
     AdminFolder,
     AdminKnowledgeBase,
+    AdminKnowledgeBaseAccessRule,
     AdminRole,
     AdminRoleBinding,
     AdminUser,
@@ -50,6 +51,17 @@ class _Result:
 
 _ENTERPRISE_ID = "33333333-3333-3333-3333-333333333333"
 _ACTOR_USER_ID = "11111111-1111-1111-1111-111111111111"
+
+
+def _department_kb_access_rule(
+    department_id: str,
+    permission: str = "query",
+) -> AdminKnowledgeBaseAccessRule:
+    return AdminKnowledgeBaseAccessRule(
+        subject_type="department",
+        subject_id=department_id,
+        permission=permission,
+    )
 
 
 class _FakeSession:
@@ -174,7 +186,9 @@ def test_list_knowledge_bases_filters_enterprise_and_status() -> None:
                         "name": "制度知识库",
                         "status": "active",
                         "owner_department_id": "department_1",
-                        "default_visibility": "department",
+                        "kb_visibility": "department_acl",
+                        "default_document_visibility": "department",
+                        "default_document_owner_department_id": "department_1",
                         "config_scope_id": None,
                         "policy_version": 1,
                     }
@@ -249,7 +263,9 @@ def test_create_knowledge_base_requires_confirmation_for_enterprise_visibility()
             actor_user_id=_ACTOR_USER_ID,
             name="制度知识库",
             owner_department_id="22222222-2222-2222-2222-222222222222",
-            default_visibility="enterprise",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
             confirmed_enterprise_visibility=False,
             actor_context=actor,
         )
@@ -275,6 +291,23 @@ def test_create_knowledge_base_writes_policy_snapshot_and_audit(monkeypatch) -> 
                 )
             ]
         ),
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "department_id": "22222222-2222-2222-2222-222222222222",
+                        "code": "engineering",
+                        "name": "研发部",
+                        "status": "active",
+                        "is_default": False,
+                    }
+                )
+            ]
+        ),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
         _Result(),
         _Result(one=_Row({"permission_version": 7})),
         _Result(),
@@ -293,7 +326,9 @@ def test_create_knowledge_base_writes_policy_snapshot_and_audit(monkeypatch) -> 
         actor_user_id=_ACTOR_USER_ID,
         name=" 制度知识库 ",
         owner_department_id="22222222-2222-2222-2222-222222222222",
-        default_visibility="department",
+        kb_visibility="department_acl",
+        default_document_visibility="department",
+        default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
         confirmed_enterprise_visibility=False,
         actor_context=actor,
     )
@@ -321,7 +356,9 @@ def test_patch_knowledge_base_requires_confirmation_when_visibility_expands(monk
         name="制度知识库",
         status="active",
         owner_department_id="department_1",
-        default_visibility="department",
+        kb_visibility="department_acl",
+        default_document_visibility="department",
+        default_document_owner_department_id="department_1",
         policy_version=2,
     )
     monkeypatch.setattr(service, "get_knowledge_base", lambda *_args, **_kwargs: current)
@@ -332,7 +369,7 @@ def test_patch_knowledge_base_requires_confirmation_when_visibility_expands(monk
             enterprise_id=_ENTERPRISE_ID,
             actor_user_id=_ACTOR_USER_ID,
             kb_id="kb_1",
-            default_visibility="enterprise",
+            kb_visibility="enterprise",
             confirmed_visibility_expand=False,
             actor_context=AdminActorContext(
                 user_id=_ACTOR_USER_ID,
@@ -342,7 +379,7 @@ def test_patch_knowledge_base_requires_confirmation_when_visibility_expands(monk
         )
 
     assert exc_info.value.error_code == "ADMIN_CONFIRMATION_REQUIRED"
-    assert exc_info.value.details["previous_visibility"] == "department"
+    assert exc_info.value.details["previous_visibility"] == "department_acl"
 
 
 def test_patch_knowledge_base_visibility_writes_new_policy_and_snapshot(monkeypatch) -> None:
@@ -353,7 +390,9 @@ def test_patch_knowledge_base_visibility_writes_new_policy_and_snapshot(monkeypa
         name="制度知识库",
         status="active",
         owner_department_id="22222222-2222-2222-2222-222222222222",
-        default_visibility="department",
+        kb_visibility="department_acl",
+        default_document_visibility="department",
+        default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
         policy_version=2,
     )
     after = AdminKnowledgeBase(
@@ -361,7 +400,9 @@ def test_patch_knowledge_base_visibility_writes_new_policy_and_snapshot(monkeypa
         name="制度知识库",
         status="active",
         owner_department_id="22222222-2222-2222-2222-222222222222",
-        default_visibility="enterprise",
+        kb_visibility="enterprise",
+        default_document_visibility="department",
+        default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
         policy_version=3,
     )
     monkeypatch.setattr(service, "get_knowledge_base", lambda *_args, **_kwargs: current)
@@ -389,7 +430,7 @@ def test_patch_knowledge_base_visibility_writes_new_policy_and_snapshot(monkeypa
         enterprise_id=_ENTERPRISE_ID,
         actor_user_id=_ACTOR_USER_ID,
         kb_id="kb_1",
-        default_visibility="enterprise",
+        kb_visibility="enterprise",
         confirmed_visibility_expand=True,
         actor_context=AdminActorContext(
             user_id=_ACTOR_USER_ID,
@@ -398,7 +439,7 @@ def test_patch_knowledge_base_visibility_writes_new_policy_and_snapshot(monkeypa
         ),
     )
 
-    assert result.default_visibility == "enterprise"
+    assert result.kb_visibility == "enterprise"
     update_params = next(
         params for statement, params in session.executed if "UPDATE knowledge_bases" in statement
     )
@@ -415,7 +456,9 @@ def test_delete_knowledge_base_blocks_access_and_enqueues_cleanup(monkeypatch) -
         name="制度知识库",
         status="active",
         owner_department_id="department_1",
-        default_visibility="department",
+        kb_visibility="department_acl",
+        default_document_visibility="department",
+        default_document_owner_department_id="department_1",
         policy_version=1,
     )
     monkeypatch.setattr(service, "get_knowledge_base", lambda *_args, **_kwargs: current)
@@ -460,7 +503,9 @@ def test_list_folders_requires_folder_manage_scope(monkeypatch) -> None:
             name="制度知识库",
             status="active",
             owner_department_id="department_1",
-            default_visibility="department",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="department_1",
         ),
     )
     actor = AdminActorContext(
@@ -511,7 +556,9 @@ def test_list_folders_filters_by_knowledge_base(monkeypatch) -> None:
             name="制度知识库",
             status="active",
             owner_department_id="department_1",
-            default_visibility="department",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="department_1",
         ),
     )
 
@@ -547,7 +594,9 @@ def test_create_folder_writes_audit(monkeypatch) -> None:
             name="制度知识库",
             status="active",
             owner_department_id="department_1",
-            default_visibility="department",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="department_1",
         ),
     )
     monkeypatch.setattr(service, "_resolve_parent_folder", lambda *_args, **_kwargs: None)
@@ -692,7 +741,9 @@ def test_list_documents_requires_document_manage_scope(monkeypatch) -> None:
             name="制度知识库",
             status="active",
             owner_department_id="department_1",
-            default_visibility="department",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="department_1",
         ),
     )
     actor = AdminActorContext(
@@ -750,7 +801,9 @@ def test_list_documents_filters_by_knowledge_base_and_status(monkeypatch) -> Non
             name="制度知识库",
             status="active",
             owner_department_id="department_1",
-            default_visibility="department",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="department_1",
         ),
     )
 
@@ -913,11 +966,11 @@ def test_replace_document_permissions_delegates_to_document_patch(monkeypatch) -
         visibility="enterprise",
         owner_department_id="22222222-2222-2222-2222-222222222222",
         confirmed=True,
-        actor_context=AdminActorContext(
-            user_id=_ACTOR_USER_ID,
-            scopes=("permission:manage",),
-            can_manage_all_knowledge_bases=False,
-        ),
+            actor_context=AdminActorContext(
+                user_id=_ACTOR_USER_ID,
+                scopes=("permission:manage",),
+                can_manage_all_knowledge_bases=True,
+            ),
     )
 
     assert policy.resource_type == "document"
@@ -935,10 +988,25 @@ def test_replace_knowledge_base_permissions_writes_snapshot_and_audit(monkeypatc
         name="制度知识库",
         status="active",
         owner_department_id="22222222-2222-2222-2222-222222222222",
-        default_visibility="department",
+        kb_visibility="department_acl",
+        default_document_visibility="department",
+        default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
+        access_rules=(
+            _department_kb_access_rule("22222222-2222-2222-2222-222222222222"),
+        ),
         policy_version=3,
     )
     monkeypatch.setattr(service, "_load_knowledge_base", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(
+        service,
+        "_resolve_department",
+        lambda *_args, **_kwargs: AdminDepartment(
+            id="22222222-2222-2222-2222-222222222222",
+            code="engineering",
+            name="研发部",
+            status="active",
+        ),
+    )
     monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 19)
     monkeypatch.setattr(
         service,
@@ -962,13 +1030,15 @@ def test_replace_knowledge_base_permissions_writes_snapshot_and_audit(monkeypatc
         enterprise_id=_ENTERPRISE_ID,
         actor_user_id=_ACTOR_USER_ID,
         kb_id=current.id,
-        visibility="enterprise",
-        owner_department_id=None,
+        kb_visibility="enterprise",
+        default_document_visibility="department",
+        default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
+        access_rules=[],
         confirmed=True,
         actor_context=AdminActorContext(
             user_id=_ACTOR_USER_ID,
             scopes=("permission:manage",),
-            can_manage_all_knowledge_bases=False,
+            can_manage_all_knowledge_bases=True,
         ),
     )
 
@@ -1009,6 +1079,19 @@ def test_patch_document_permission_change_writes_snapshot_and_refresh_job(monkey
     after = _document(visibility="enterprise", policy_version=4)
     monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: current)
     monkeypatch.setattr(service, "_load_document", lambda *_args, **_kwargs: after)
+    monkeypatch.setattr(
+        service,
+        "_load_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id=current.kb_id,
+            name="制度知识库",
+            status="active",
+            owner_department_id=current.owner_department_id,
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id=current.owner_department_id,
+        ),
+    )
     monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 12)
     monkeypatch.setattr(
         service,
@@ -1073,6 +1156,20 @@ def test_patch_document_tightening_inserts_access_block(monkeypatch) -> None:
     after = _document(visibility="department", policy_version=3)
     monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: current)
     monkeypatch.setattr(service, "_load_document", lambda *_args, **_kwargs: after)
+    monkeypatch.setattr(
+        service,
+        "_load_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id=current.kb_id,
+            name="制度知识库",
+            status="active",
+            owner_department_id=current.owner_department_id,
+            kb_visibility="department_acl",
+            default_document_visibility="department",
+            default_document_owner_department_id=current.owner_department_id,
+            access_rules=(_department_kb_access_rule(current.owner_department_id),),
+        ),
+    )
     monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 13)
     monkeypatch.setattr(
         service,
@@ -1117,6 +1214,119 @@ def test_patch_document_tightening_inserts_access_block(monkeypatch) -> None:
     assert blocks[0]["resource_type"] == "document"
     assert blocks[0]["reason"] == "permission_tightened"
     assert blocks[0]["block_level"] == "query"
+
+
+def test_patch_document_rejects_permission_outside_parent_knowledge_base(monkeypatch) -> None:
+    service = AdminService()
+    current = _document(visibility="department", policy_version=2)
+    target_department_id = "99999999-9999-9999-9999-999999999999"
+    monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(
+        service,
+        "_resolve_department",
+        lambda *_args, **_kwargs: AdminDepartment(
+            id=target_department_id,
+            code="finance",
+            name="财务部",
+            status="active",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id=current.kb_id,
+            name="制度知识库",
+            status="active",
+            owner_department_id=current.owner_department_id,
+            kb_visibility="department_acl",
+            default_document_visibility="department",
+            default_document_owner_department_id=current.owner_department_id,
+            access_rules=(_department_kb_access_rule(current.owner_department_id),),
+        ),
+    )
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        service.patch_document(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            doc_id=current.id,
+            owner_department_id=target_department_id,
+            visibility="department",
+            confirmed_visibility_expand=False,
+            actor_context=AdminActorContext(
+                user_id=_ACTOR_USER_ID,
+                scopes=("document:manage",),
+                can_manage_all_knowledge_bases=True,
+            ),
+        )
+
+    assert exc_info.value.error_code == "ADMIN_DOCUMENT_PERMISSION_OUTSIDE_KB_SCOPE"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.details["kb_owner_department_id"] == current.owner_department_id
+    assert exc_info.value.details["document_owner_department_id"] == target_department_id
+
+
+def test_patch_document_allows_enterprise_document_under_restricted_knowledge_base(
+    monkeypatch,
+) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    current = _document(visibility="department", policy_version=2)
+    after = _document(visibility="enterprise", policy_version=3)
+    monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: current)
+    monkeypatch.setattr(service, "_load_document", lambda *_args, **_kwargs: after)
+    monkeypatch.setattr(
+        service,
+        "_load_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id=current.kb_id,
+            name="制度知识库",
+            status="active",
+            owner_department_id=current.owner_department_id,
+            kb_visibility="department_acl",
+            default_document_visibility="department",
+            default_document_owner_department_id=current.owner_department_id,
+            access_rules=(_department_kb_access_rule(current.owner_department_id),),
+        ),
+    )
+    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 13)
+    monkeypatch.setattr(
+        service,
+        "_replace_resource_policy",
+        lambda *_args, **_kwargs: "99999999-9999-9999-9999-999999999999",
+    )
+    monkeypatch.setattr(
+        service,
+        "_insert_permission_snapshot",
+        lambda *_args, **_kwargs: {
+            "snapshot_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload_hash": "hash_2",
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_enqueue_permission_refresh_job",
+        lambda *_args, **_kwargs: "job_1",
+    )
+    monkeypatch.setattr(service, "_insert_audit_log", lambda *_args, **_kwargs: None)
+
+    result = service.patch_document(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        doc_id=current.id,
+        visibility="enterprise",
+        confirmed_visibility_expand=True,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.visibility == "enterprise"
 
 
 def test_delete_document_blocks_access_and_enqueues_cleanup(monkeypatch) -> None:

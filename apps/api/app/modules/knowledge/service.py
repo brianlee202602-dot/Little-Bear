@@ -17,6 +17,7 @@ from app.modules.knowledge.schemas import (
 )
 from app.modules.permissions import PermissionService, PermissionServiceError
 from app.modules.permissions.schemas import PermissionContext
+from app.modules.permissions.service import knowledge_base_access_where_sql
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -76,10 +77,13 @@ class KnowledgeService:
                         name,
                         status,
                         owner_department_id::text AS owner_department_id,
-                        default_visibility,
+                        kb_visibility,
+                        default_document_visibility,
+                        default_document_owner_department_id::text
+                            AS default_document_owner_department_id,
                         config_scope_id,
                         policy_version
-                    FROM knowledge_bases
+                    FROM knowledge_bases kb
                     WHERE {where_sql}
                     ORDER BY updated_at DESC, name
                     LIMIT :limit OFFSET :offset
@@ -88,7 +92,7 @@ class KnowledgeService:
                 params,
             ).all()
             total_row = session.execute(
-                text(f"SELECT count(*) AS total FROM knowledge_bases WHERE {where_sql}"),
+                text(f"SELECT count(*) AS total FROM knowledge_bases kb WHERE {where_sql}"),
                 params,
             ).one()
         except SQLAlchemyError as exc:
@@ -122,6 +126,7 @@ class KnowledgeService:
             request_id=request_id,
             required_scope="document:read",
         )
+        self._ensure_queryable_knowledge_base(session, context, kb_id=kb_id)
         active_index_ids = self._load_active_index_versions(
             session,
             enterprise_id=context.enterprise_id,
@@ -217,6 +222,7 @@ class KnowledgeService:
             enterprise_id=context.enterprise_id,
             document_id=document_id,
         )
+        self._ensure_queryable_knowledge_base(session, context, kb_id=document_kb_id)
         active_index_ids = self._load_active_index_versions(
             session,
             enterprise_id=context.enterprise_id,
@@ -338,6 +344,7 @@ class KnowledgeService:
             enterprise_id=context.enterprise_id,
             document_id=document_id,
         )
+        self._ensure_queryable_knowledge_base(session, context, kb_id=document_kb_id)
         active_index_ids = self._load_active_index_versions(
             session,
             enterprise_id=context.enterprise_id,
@@ -492,6 +499,29 @@ class KnowledgeService:
             ) from exc
         return tuple(str(row._mapping["index_version_id"]) for row in rows)
 
+    def _ensure_queryable_knowledge_base(
+        self,
+        session: Session,
+        context: PermissionContext,
+        *,
+        kb_id: str,
+    ) -> None:
+        try:
+            self.permission_service.require_queryable_knowledge_bases(
+                session,
+                context,
+                kb_ids=(kb_id,),
+                required_scope="document:read",
+            )
+        except PermissionServiceError as exc:
+            raise KnowledgeServiceError(
+                exc.error_code,
+                "knowledge base is not accessible",
+                status_code=404 if exc.status_code == 404 else exc.status_code,
+                retryable=exc.retryable,
+                details=exc.details,
+            ) from exc
+
     def _load_document_kb_id(
         self,
         session: Session,
@@ -533,21 +563,12 @@ def _knowledge_base_visibility_sql(
     context: PermissionContext,
     params: dict[str, Any],
 ) -> str:
-    if context.has_scope("knowledge_base:manage"):
-        return ""
-    conditions = ["default_visibility = 'enterprise'"]
-    if context.department_ids:
-        conditions.append("owner_department_id = ANY(CAST(:department_ids AS uuid[]))")
-        params["department_ids"] = list(context.department_ids)
-    scoped_kb_ids = tuple(
-        role.scope_id
-        for role in context.roles
-        if role.scope_type == "knowledge_base" and role.scope_id
+    return knowledge_base_access_where_sql(
+        context,
+        params,
+        permission="discover",
+        alias="kb",
     )
-    if scoped_kb_ids:
-        conditions.append("id = ANY(CAST(:scoped_kb_ids AS uuid[]))")
-        params["scoped_kb_ids"] = list(scoped_kb_ids)
-    return f"({' OR '.join(conditions)})"
 
 
 def _knowledge_base_from_mapping(row: Any) -> AccessibleKnowledgeBase:
@@ -556,7 +577,9 @@ def _knowledge_base_from_mapping(row: Any) -> AccessibleKnowledgeBase:
         name=str(row["name"]),
         status=str(row["status"]),
         owner_department_id=str(row["owner_department_id"]),
-        default_visibility=str(row["default_visibility"]),
+        kb_visibility=str(row["kb_visibility"]),
+        default_document_visibility=str(row["default_document_visibility"]),
+        default_document_owner_department_id=str(row["default_document_owner_department_id"]),
         config_scope_id=_optional_str(row.get("config_scope_id")),
         policy_version=int(row["policy_version"]),
     )

@@ -11,7 +11,9 @@ class AccessibleKnowledgeBase:
     name: str
     status: str
     owner_department_id: str
-    default_visibility: str
+    kb_visibility: str
+    default_document_visibility: str
+    default_document_owner_department_id: str
     config_scope_id: str | None
     policy_version: int
 

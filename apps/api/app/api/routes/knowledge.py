@@ -236,7 +236,9 @@ def _knowledge_base_data(item: AccessibleKnowledgeBase) -> KnowledgeBaseData:
         name=item.name,
         status=item.status,
         owner_department_id=item.owner_department_id,
-        default_visibility=item.default_visibility,
+        kb_visibility=item.kb_visibility,
+        default_document_visibility=item.default_document_visibility,
+        default_document_owner_department_id=item.default_document_owner_department_id,
         config_scope_id=item.config_scope_id,
         policy_version=item.policy_version,
     )

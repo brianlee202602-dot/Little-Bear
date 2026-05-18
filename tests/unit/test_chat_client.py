@@ -9,15 +9,25 @@ from app.modules.models import ChatMessage, ModelClientError, ModelGatewayChatCl
 
 
 class _Response:
-    def __init__(self, payload: object, *, status: int = 200) -> None:
+    def __init__(
+        self,
+        payload: object | None = None,
+        *,
+        status: int = 200,
+        lines: tuple[bytes, ...] = (),
+    ) -> None:
         self.status = status
         self.payload = payload
+        self.lines = lines
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
+
+    def __iter__(self):
+        return iter(self.lines)
 
     def read(self) -> bytes:
         return json.dumps(self.payload).encode("utf-8")
@@ -119,6 +129,62 @@ def test_chat_client_merges_extra_body_without_overriding_core_fields(monkeypatc
 
     assert captured["body"]["max_tokens"] == 128
     assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_chat_client_streams_openai_compatible_chunks(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(
+            lines=(
+                _sse_line({"choices": [{"delta": {"content": "员工年假"}}]}),
+                _sse_line(
+                    {
+                        "choices": [{"delta": {"content": "需要提前申请"}}],
+                        "usage": {"completion_tokens": 4},
+                    }
+                ),
+                b"data: [DONE]\n",
+            )
+        )
+
+    monkeypatch.setattr("app.modules.models.chat.urlopen", _urlopen)
+
+    chunks = list(
+        ModelGatewayChatClient(
+            base_url="https://model.example",
+            path="/v1/chat/completions",
+            model="qwen3-4b",
+            auth_token="token",
+            timeout_seconds=2.5,
+        ).stream_complete(
+            messages=(ChatMessage(role="user", content="员工年假怎么申请？"),),
+            temperature=0.1,
+            max_tokens=800,
+        )
+    )
+
+    assert captured["url"] == "https://model.example/v1/chat/completions"
+    assert captured["timeout"] == 2.5
+    assert captured["headers"]["Authorization"] == "Bearer token"
+    assert captured["headers"]["Accept"] == "text/event-stream"
+    assert captured["body"] == {
+        "model": "qwen3-4b",
+        "messages": [{"role": "user", "content": "员工年假怎么申请？"}],
+        "temperature": 0.1,
+        "max_tokens": 800,
+        "stream": True,
+    }
+    assert [chunk.content_delta for chunk in chunks] == ["员工年假", "需要提前申请"]
+    assert chunks[-1].token_usage == {"completion_tokens": 4}
+
+
+def _sse_line(payload: object) -> bytes:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n".encode()
 
 
 def test_chat_client_includes_http_error_body(monkeypatch) -> None:

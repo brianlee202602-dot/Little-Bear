@@ -51,6 +51,7 @@ class _FakeVectorIndexWriter:
     def __init__(self) -> None:
         self.draft_points: tuple[object, ...] = ()
         self.activated: list[dict[str, object]] = []
+        self.payload_updates: tuple[object, ...] = ()
 
     def upsert_draft_points(self, points) -> None:
         self.draft_points = points
@@ -70,6 +71,9 @@ class _FakeVectorIndexWriter:
             }
         )
 
+    def update_payloads(self, updates) -> None:
+        self.payload_updates = updates
+
 
 class _FailingDraftVectorIndexWriter:
     def upsert_draft_points(self, _points) -> None:
@@ -78,6 +82,9 @@ class _FailingDraftVectorIndexWriter:
     def activate_points(self, **_kwargs) -> None:
         raise RuntimeError("unexpected activate")
 
+    def update_payloads(self, _updates) -> None:
+        raise RuntimeError("unexpected payload update")
+
 
 class _FailingActivateVectorIndexWriter:
     def upsert_draft_points(self, _points) -> None:
@@ -85,6 +92,20 @@ class _FailingActivateVectorIndexWriter:
 
     def activate_points(self, **_kwargs) -> None:
         raise RuntimeError("qdrant activate failed")
+
+    def update_payloads(self, _updates) -> None:
+        raise RuntimeError("unexpected payload update")
+
+
+class _FailingPayloadVectorIndexWriter:
+    def upsert_draft_points(self, _points) -> None:
+        raise RuntimeError("unexpected draft upsert")
+
+    def activate_points(self, **_kwargs) -> None:
+        raise RuntimeError("unexpected activate")
+
+    def update_payloads(self, _updates) -> None:
+        raise RuntimeError("qdrant payload refresh failed")
 
 
 _ENTERPRISE_ID = "33333333-3333-3333-3333-333333333333"
@@ -98,6 +119,17 @@ _DEPARTMENT_ID = "22222222-2222-2222-2222-222222222222"
 
 def _request_json() -> dict[str, object]:
     return {"document_version_ids": [_DOC_VERSION_ID]}
+
+
+def _permission_refresh_request() -> dict[str, object]:
+    return {
+        "enterprise_id": _ENTERPRISE_ID,
+        "resource_type": "document",
+        "document_id": _DOC_ID,
+        "kb_id": _KB_ID,
+        "permission_version": 9,
+        "permission_snapshot_id": "12121212-1212-1212-1212-121212121212",
+    }
 
 
 def _ready_version_mapping(
@@ -139,6 +171,30 @@ def _permission_payload_mapping(
     return {
         "payload_count": payload_count,
         "valid_payload_count": valid_payload_count,
+    }
+
+
+def _permission_refresh_target_mapping() -> dict[str, object]:
+    return {
+        "enterprise_id": _ENTERPRISE_ID,
+        "kb_id": _KB_ID,
+        "document_id": _DOC_ID,
+        "document_version_id": _DOC_VERSION_ID,
+        "index_version_id": _INDEX_VERSION_ID,
+        "collection_name": "little_bear_p0",
+        "vector_id": "11111111-1111-5111-8111-111111111111",
+        "keyword_id": "77777777-7777-7777-7777-777777777777",
+        "chunk_id": _CHUNK_ID,
+        "title": "员工手册",
+        "owner_department_id": _DEPARTMENT_ID,
+        "visibility": "department",
+        "indexed_permission_version": 9,
+        "index_payload_hash": "index_hash",
+        "document_status": "active",
+        "document_index_status": "indexed",
+        "chunk_status": "active",
+        "page_start": 1,
+        "page_end": 2,
     }
 
 
@@ -461,3 +517,57 @@ def test_publish_ready_indexes_rejects_invalid_permission_payload() -> None:
     assert exc_info.value.error_code == "INDEX_PERMISSION_PAYLOAD_INVALID"
     assert exc_info.value.details["valid_payload_count"] == 1
     assert not any("UPDATE index_versions" in statement for statement, _ in session.executed)
+
+
+def test_refresh_permission_payloads_updates_vector_keyword_refs_and_releases_block() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(all_rows=[_Row(_permission_refresh_target_mapping())]),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
+    ]
+    vector_writer = _FakeVectorIndexWriter()
+
+    result = IndexingService(vector_index_writer=vector_writer).refresh_permission_payloads(
+        session,
+        request_json=_permission_refresh_request(),
+    )
+
+    assert result == {"chunk_count": 1, "vector_payload_count": 1}
+    assert len(vector_writer.payload_updates) == 1
+    update = vector_writer.payload_updates[0]
+    assert update.collection_name == "little_bear_p0"
+    assert update.vector_id == "11111111-1111-5111-8111-111111111111"
+    assert update.payload["visibility_state"] == "active"
+    assert update.payload["visibility"] == "department"
+    assert update.payload["indexed_permission_version"] == 9
+    statements = [statement for statement, _params in session.executed]
+    assert any("UPDATE keyword_index_entries" in statement for statement in statements)
+    assert any("UPDATE chunk_index_refs" in statement for statement in statements)
+    assert any("UPDATE access_blocks" in statement for statement in statements)
+
+
+def test_refresh_permission_payloads_marks_vector_failure_retryable() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(all_rows=[_Row(_permission_refresh_target_mapping())]),
+    ]
+
+    with pytest.raises(IndexingServiceError) as exc_info:
+        IndexingService(
+            vector_index_writer=_FailingPayloadVectorIndexWriter()
+        ).refresh_permission_payloads(
+            session,
+            request_json=_permission_refresh_request(),
+        )
+
+    assert exc_info.value.error_code == "INDEX_PERMISSION_VECTOR_REFRESH_FAILED"
+    assert exc_info.value.retryable is True
+    assert exc_info.value.details["point_count"] == 1
+    assert not any(
+        "index_permission_payload.refreshed" in str(params)
+        for _statement, params in session.executed
+    )

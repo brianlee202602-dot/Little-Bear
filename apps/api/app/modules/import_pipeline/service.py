@@ -159,7 +159,7 @@ class ImportService:
                 status_code=409,
                 details={"kb_id": kb_id, "status": knowledge_base["status"]},
             )
-        _ensure_actor_can_import_to_kb(actor_context, kb_id=kb_id)
+        _ensure_actor_can_import_to_kb(actor_context, knowledge_base=knowledge_base)
 
         if idempotency_key:
             existing = self._load_job_by_idempotency(
@@ -175,13 +175,20 @@ class ImportService:
             session,
             enterprise_id=enterprise_id,
             requested_owner_department_id=owner_department_id,
-            knowledge_base_owner_department_id=knowledge_base["owner_department_id"],
+            knowledge_base_owner_department_id=knowledge_base[
+                "default_document_owner_department_id"
+            ],
             actor_context=actor_context,
         )
-        resolved_visibility = visibility or knowledge_base["default_visibility"]
+        resolved_visibility = visibility or knowledge_base["default_document_visibility"]
         self._validate_visibility(
             owner_department_id=resolved_owner_department_id,
             visibility=resolved_visibility,
+        )
+        self._ensure_document_permission_within_parent_knowledge_base(
+            knowledge_base=knowledge_base,
+            visibility=resolved_visibility,
+            owner_department_id=resolved_owner_department_id,
         )
         if folder_id:
             self._ensure_folder_available(
@@ -804,6 +811,25 @@ class ImportService:
 
     def _apply_stage_effect(self, session: Session, *, row: Any) -> None:
         stage = row["stage"]
+        job_type = row["job_type"]
+        if job_type == "permission_refresh":
+            if stage == "index":
+                try:
+                    build_indexing_service(session).refresh_permission_payloads(
+                        session,
+                        request_json=_json_mapping(row["request_json"]),
+                    )
+                    return
+                except IndexingServiceError as exc:
+                    raise ImportServiceError(
+                        exc.error_code,
+                        exc.message,
+                        status_code=exc.status_code,
+                        retryable=exc.retryable,
+                        details=exc.details,
+                    ) from exc
+            if stage in {"publish", "cleanup"}:
+                return
         if stage == "validate":
             self._mark_documents_indexing(session, request_json=_json_mapping(row["request_json"]))
             return
@@ -1208,7 +1234,27 @@ class ImportService:
                 SELECT
                     id::text AS kb_id,
                     owner_department_id::text AS owner_department_id,
-                    default_visibility,
+                    kb_visibility,
+                    default_document_visibility,
+                    default_document_owner_department_id::text
+                        AS default_document_owner_department_id,
+                    COALESCE(
+                        (
+                            SELECT jsonb_agg(
+                                jsonb_build_object(
+                                    'subject_type', kba.subject_type,
+                                    'subject_id', kba.subject_id::text,
+                                    'permission', kba.permission
+                                )
+                                ORDER BY kba.subject_type, kba.subject_id::text, kba.permission
+                            )
+                            FROM knowledge_base_accesses kba
+                            WHERE kba.enterprise_id = knowledge_bases.enterprise_id
+                              AND kba.kb_id = knowledge_bases.id
+                              AND kba.status = 'active'
+                        ),
+                        '[]'::jsonb
+                    ) AS access_rules,
                     status,
                     policy_version
                 FROM knowledge_bases
@@ -1302,6 +1348,30 @@ class ImportService:
                 retryable=exc.retryable,
                 details=exc.details,
             ) from exc
+
+    def _ensure_document_permission_within_parent_knowledge_base(
+        self,
+        *,
+        knowledge_base: dict[str, Any],
+        visibility: str,
+        owner_department_id: str,
+    ) -> None:
+        if visibility == "enterprise":
+            return
+        kb_id = str(knowledge_base.get("kb_id") or knowledge_base.get("id") or "")
+        if not _department_can_query_knowledge_base(knowledge_base, owner_department_id):
+            raise ImportServiceError(
+                "IMPORT_DOCUMENT_PERMISSION_OUTSIDE_KB_SCOPE",
+                "document owner department must be able to access parent knowledge base",
+                status_code=409,
+                details={
+                    "kb_id": kb_id,
+                    "kb_visibility": knowledge_base["kb_visibility"],
+                    "kb_owner_department_id": knowledge_base["owner_department_id"],
+                    "document_visibility": visibility,
+                    "document_owner_department_id": owner_department_id,
+                },
+            )
 
     def _ensure_folder_available(
         self,
@@ -1933,12 +2003,19 @@ def _require_scope(actor_context: ImportActorContext | None, required_scope: str
         )
 
 
-def _ensure_actor_can_import_to_kb(actor_context: ImportActorContext | None, *, kb_id: str) -> None:
+def _ensure_actor_can_import_to_kb(
+    actor_context: ImportActorContext | None,
+    *,
+    knowledge_base: dict[str, Any],
+) -> None:
     if actor_context is None:
         return
     if actor_context.can_import_all_knowledge_bases:
         return
+    kb_id = str(knowledge_base["kb_id"])
     if kb_id in actor_context.knowledge_base_ids:
+        return
+    if _actor_has_kb_manage_access(actor_context, knowledge_base):
         return
     raise ImportServiceError(
         "IMPORT_KB_DENIED",
@@ -1946,6 +2023,57 @@ def _ensure_actor_can_import_to_kb(actor_context: ImportActorContext | None, *, 
         status_code=403,
         details={"kb_id": kb_id},
     )
+
+
+def _department_can_query_knowledge_base(
+    knowledge_base: dict[str, Any],
+    department_id: str,
+) -> bool:
+    if knowledge_base["kb_visibility"] == "enterprise":
+        return True
+    return any(
+        rule.get("subject_type") == "department"
+        and rule.get("subject_id") == department_id
+        and rule.get("permission") in {"query", "manage"}
+        for rule in _kb_access_rule_dicts(knowledge_base)
+    )
+
+
+def _actor_has_kb_manage_access(
+    actor_context: ImportActorContext,
+    knowledge_base: dict[str, Any],
+) -> bool:
+    for rule in _kb_access_rule_dicts(knowledge_base):
+        if rule.get("permission") != "manage":
+            continue
+        subject_type = rule.get("subject_type")
+        subject_id = rule.get("subject_id")
+        if subject_type == "user" and subject_id == actor_context.user_id:
+            return True
+        if subject_type == "department" and subject_id in actor_context.department_ids:
+            return True
+        if subject_type == "role" and subject_id in actor_context.role_ids:
+            return True
+    return False
+
+
+def _kb_access_rule_dicts(knowledge_base: dict[str, Any]) -> list[dict[str, str]]:
+    value = knowledge_base.get("access_rules") or []
+    items = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(items, list):
+        return []
+    rules: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        rules.append(
+            {
+                "subject_type": str(item.get("subject_type") or ""),
+                "subject_id": str(item.get("subject_id") or ""),
+                "permission": str(item.get("permission") or ""),
+            }
+        )
+    return rules
 
 
 def _has_scope(scopes: tuple[str, ...], required_scope: str) -> bool:

@@ -67,6 +67,7 @@ import {
   type ImportJobData,
   type ImportJobStage,
   type ImportJobStatus,
+  type KnowledgeBaseAccessRuleData,
   type SetupInitializationData,
   type SetupIssue,
   type SetupStateData,
@@ -270,20 +271,27 @@ const departmentEditForm = reactive({
 const knowledgeBaseCreateForm = reactive({
   name: "",
   ownerDepartmentId: "",
-  defaultVisibility: "department" as "department" | "enterprise",
+  kbVisibility: "enterprise" as "enterprise" | "department_acl" | "private",
+  defaultDocumentVisibility: "department" as "department" | "enterprise",
+  defaultDocumentOwnerDepartmentId: "",
+  accessDepartmentIds: [] as string[],
   configScopeId: "",
   confirmedEnterpriseVisibility: false,
 });
 const knowledgeBaseEditForm = reactive({
   name: "",
   status: "active" as "active" | "disabled" | "archived",
-  defaultVisibility: "department" as "department" | "enterprise",
+  kbVisibility: "enterprise" as "enterprise" | "department_acl" | "private",
+  defaultDocumentVisibility: "department" as "department" | "enterprise",
+  defaultDocumentOwnerDepartmentId: "",
   configScopeId: "",
   confirmedVisibilityExpand: false,
 });
 const knowledgeBasePermissionForm = reactive({
-  visibility: "department" as "department" | "enterprise",
-  ownerDepartmentId: "",
+  kbVisibility: "enterprise" as "enterprise" | "department_acl" | "private",
+  defaultDocumentVisibility: "department" as "department" | "enterprise",
+  defaultDocumentOwnerDepartmentId: "",
+  accessDepartmentIds: [] as string[],
   confirmedReplace: false,
 });
 const folderCreateForm = reactive({
@@ -999,6 +1007,27 @@ const selectedFolder = computed(
 const selectedAdminDocument = computed(
   () => adminDocuments.value.find((document) => document.id === selectedDocumentId.value) ?? null,
 );
+const selectedDocumentParentKnowledgeBase = computed(() => {
+  const document = selectedAdminDocument.value;
+  if (!document) {
+    return selectedKnowledgeBase.value;
+  }
+  return (
+    adminKnowledgeBases.value.find((knowledgeBase) => knowledgeBase.id === document.kb_id) ??
+    selectedKnowledgeBase.value
+  );
+});
+const documentPermissionParentConflict = computed(() => {
+  const knowledgeBase = selectedDocumentParentKnowledgeBase.value;
+  if (!knowledgeBase || documentPermissionForm.visibility === "enterprise") {
+    return "";
+  }
+  const ownerDepartmentId = documentPermissionForm.ownerDepartmentId.trim();
+  if (ownerDepartmentId && !departmentCanQueryKnowledgeBase(knowledgeBase, ownerDepartmentId)) {
+    return `${formatDepartmentById(ownerDepartmentId)} 不能查询父知识库；请先在知识库权限中授予该部门查询权限。`;
+  }
+  return "";
+});
 const selectedUserDepartmentsForDisplay = computed(() => {
   if (selectedUserDepartments.value.length > 0) {
     return selectedUserDepartments.value;
@@ -1024,11 +1053,26 @@ const folderParentOptions = computed(() =>
 const selectedImportKnowledgeBase = computed(
   () => adminKnowledgeBases.value.find((knowledgeBase) => knowledgeBase.id === importUploadForm.kbId) ?? null,
 );
+const importUploadPermissionParentConflict = computed(() => {
+  const knowledgeBase = selectedImportKnowledgeBase.value;
+  if (!knowledgeBase || importUploadForm.visibility === "enterprise") {
+    return "";
+  }
+  const ownerDepartmentId =
+    selectedImportKnowledgeBase.value?.default_document_owner_department_id ??
+    selectedImportKnowledgeBase.value?.owner_department_id ??
+    "";
+  if (ownerDepartmentId && !departmentCanQueryKnowledgeBase(knowledgeBase, ownerDepartmentId)) {
+    return `${formatDepartmentById(ownerDepartmentId)} 不能查询目标知识库；请先在知识库权限中授予该部门查询权限。`;
+  }
+  return "";
+});
 const canUploadImportFiles = computed(
   () =>
     canImportDocuments.value &&
     importUploadForm.kbId.trim().length > 0 &&
     selectedImportFiles.value.length > 0 &&
+    !importUploadPermissionParentConflict.value &&
     !importAdminBusy.uploading,
 );
 const canCreateKnowledgeBase = computed(
@@ -1036,7 +1080,10 @@ const canCreateKnowledgeBase = computed(
     canManageKnowledgeBases.value &&
     knowledgeBaseCreateForm.name.trim().length > 0 &&
     knowledgeBaseCreateForm.ownerDepartmentId.trim().length > 0 &&
-    (knowledgeBaseCreateForm.defaultVisibility !== "enterprise" ||
+    knowledgeBaseCreateForm.defaultDocumentOwnerDepartmentId.trim().length > 0 &&
+    (knowledgeBaseCreateForm.kbVisibility === "enterprise" ||
+      knowledgeBaseCreateForm.accessDepartmentIds.length > 0) &&
+    (knowledgeBaseCreateForm.kbVisibility !== "enterprise" ||
       knowledgeBaseCreateForm.confirmedEnterpriseVisibility) &&
     !importAdminBusy.creating,
 );
@@ -1045,9 +1092,10 @@ const canUpdateSelectedKnowledgeBase = computed(
     canManageKnowledgeBases.value &&
     Boolean(selectedKnowledgeBase.value) &&
     knowledgeBaseEditForm.name.trim().length > 0 &&
+    knowledgeBaseEditForm.defaultDocumentOwnerDepartmentId.trim().length > 0 &&
     !(
-      selectedKnowledgeBase.value?.default_visibility === "department" &&
-      knowledgeBaseEditForm.defaultVisibility === "enterprise" &&
+      selectedKnowledgeBase.value?.kb_visibility !== "enterprise" &&
+      knowledgeBaseEditForm.kbVisibility === "enterprise" &&
       !knowledgeBaseEditForm.confirmedVisibilityExpand
     ) &&
     !importAdminBusy.updating,
@@ -1084,7 +1132,9 @@ const canReplaceSelectedKnowledgeBasePermissions = computed(
   () =>
     canManagePermissions.value &&
     Boolean(selectedKnowledgeBase.value) &&
-    knowledgeBasePermissionForm.ownerDepartmentId.trim().length > 0 &&
+    knowledgeBasePermissionForm.defaultDocumentOwnerDepartmentId.trim().length > 0 &&
+    (knowledgeBasePermissionForm.kbVisibility === "enterprise" ||
+      knowledgeBasePermissionForm.accessDepartmentIds.length > 0) &&
     knowledgeBasePermissionForm.confirmedReplace &&
     !importAdminBusy.updatingPermissions,
 );
@@ -1093,6 +1143,7 @@ const canReplaceSelectedDocumentPermissions = computed(
     canManagePermissions.value &&
     Boolean(selectedAdminDocument.value) &&
     documentPermissionForm.ownerDepartmentId.trim().length > 0 &&
+    !documentPermissionParentConflict.value &&
     documentPermissionForm.confirmedReplace &&
     !importAdminBusy.updatingPermissions,
 );
@@ -2044,21 +2095,34 @@ function syncKnowledgeBaseCreateOwnerDefault(): void {
     currentUser.value?.departments.find((department) => department.status === "active") ??
     activeDepartments.value[0];
   knowledgeBaseCreateForm.ownerDepartmentId = defaultDepartment?.id ?? knowledgeBaseCreateForm.ownerDepartmentId;
+  knowledgeBaseCreateForm.defaultDocumentOwnerDepartmentId =
+    knowledgeBaseCreateForm.defaultDocumentOwnerDepartmentId ||
+    knowledgeBaseCreateForm.ownerDepartmentId;
 }
 
 function syncKnowledgeBaseEditForm(): void {
   const knowledgeBase = selectedKnowledgeBase.value;
   knowledgeBaseEditForm.name = knowledgeBase?.name ?? "";
   knowledgeBaseEditForm.status = knowledgeBase?.status ?? "active";
-  knowledgeBaseEditForm.defaultVisibility = knowledgeBase?.default_visibility ?? "department";
+  knowledgeBaseEditForm.kbVisibility = knowledgeBase?.kb_visibility ?? "enterprise";
+  knowledgeBaseEditForm.defaultDocumentVisibility =
+    knowledgeBase?.default_document_visibility ?? "department";
+  knowledgeBaseEditForm.defaultDocumentOwnerDepartmentId =
+    knowledgeBase?.default_document_owner_department_id ?? "";
   knowledgeBaseEditForm.configScopeId = knowledgeBase?.config_scope_id ?? "";
   knowledgeBaseEditForm.confirmedVisibilityExpand = false;
 }
 
 function syncKnowledgeBasePermissionForm(): void {
   const knowledgeBase = selectedKnowledgeBase.value;
-  knowledgeBasePermissionForm.visibility = knowledgeBase?.default_visibility ?? "department";
-  knowledgeBasePermissionForm.ownerDepartmentId = knowledgeBase?.owner_department_id ?? "";
+  knowledgeBasePermissionForm.kbVisibility = knowledgeBase?.kb_visibility ?? "enterprise";
+  knowledgeBasePermissionForm.defaultDocumentVisibility =
+    knowledgeBase?.default_document_visibility ?? "department";
+  knowledgeBasePermissionForm.defaultDocumentOwnerDepartmentId =
+    knowledgeBase?.default_document_owner_department_id ?? knowledgeBase?.owner_department_id ?? "";
+  knowledgeBasePermissionForm.accessDepartmentIds = knowledgeBase
+    ? queryDepartmentIdsForKnowledgeBase(knowledgeBase)
+    : [];
   knowledgeBasePermissionForm.confirmedReplace = false;
 }
 
@@ -2078,7 +2142,10 @@ function syncDocumentPermissionForm(): void {
 
 function resetKnowledgeBaseCreateForm(): void {
   knowledgeBaseCreateForm.name = "";
-  knowledgeBaseCreateForm.defaultVisibility = "department";
+  knowledgeBaseCreateForm.kbVisibility = "enterprise";
+  knowledgeBaseCreateForm.defaultDocumentVisibility = "department";
+  knowledgeBaseCreateForm.defaultDocumentOwnerDepartmentId = "";
+  knowledgeBaseCreateForm.accessDepartmentIds = [];
   knowledgeBaseCreateForm.configScopeId = "";
   knowledgeBaseCreateForm.confirmedEnterpriseVisibility = false;
   syncKnowledgeBaseCreateOwnerDefault();
@@ -2116,7 +2183,7 @@ async function openUploadKnowledgeBaseModal(knowledgeBase: AdminKnowledgeBaseDat
     selectedFolderId.value && activeFolders.value.some((folder) => folder.id === selectedFolderId.value)
       ? selectedFolderId.value
       : "";
-  importUploadForm.visibility = knowledgeBase.default_visibility;
+  importUploadForm.visibility = knowledgeBase.default_document_visibility;
   importUploadForm.idempotencyKey = "";
   clearImportFiles();
 }
@@ -2186,6 +2253,13 @@ function clearImportFiles(): void {
 }
 
 async function submitDocumentUpload(): Promise<void> {
+  if (importUploadPermissionParentConflict.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: importUploadPermissionParentConflict.value,
+    };
+    return;
+  }
   if (!canUploadImportFiles.value) {
     importAdminFeedback.value = {
       tone: "error",
@@ -2207,7 +2281,8 @@ async function submitDocumentUpload(): Promise<void> {
       {
         files: selectedImportFiles.value,
         visibility: importUploadForm.visibility,
-        owner_department_id: selectedImportKnowledgeBase.value?.owner_department_id,
+        owner_department_id:
+          selectedImportKnowledgeBase.value?.default_document_owner_department_id,
         folder_id: importUploadForm.folderId || undefined,
         idempotency_key: importUploadForm.idempotencyKey.trim() || undefined,
       },
@@ -2256,7 +2331,18 @@ async function submitCreateKnowledgeBase(): Promise<void> {
       {
         name: knowledgeBaseCreateForm.name.trim(),
         owner_department_id: knowledgeBaseCreateForm.ownerDepartmentId.trim(),
-        default_visibility: knowledgeBaseCreateForm.defaultVisibility,
+        kb_visibility: knowledgeBaseCreateForm.kbVisibility,
+        default_document_visibility: knowledgeBaseCreateForm.defaultDocumentVisibility,
+        default_document_owner_department_id:
+          knowledgeBaseCreateForm.defaultDocumentOwnerDepartmentId.trim(),
+        access_rules: buildDepartmentKnowledgeBaseAccessRules(
+          knowledgeBaseCreateForm.kbVisibility === "enterprise"
+            ? []
+            : [
+                ...knowledgeBaseCreateForm.accessDepartmentIds,
+                knowledgeBaseCreateForm.defaultDocumentOwnerDepartmentId.trim(),
+              ],
+        ),
         config_scope_id: knowledgeBaseCreateForm.configScopeId.trim() || null,
       },
       accessToken,
@@ -2454,7 +2540,10 @@ async function submitPatchKnowledgeBase(): Promise<void> {
       {
         name: knowledgeBaseEditForm.name.trim(),
         status: knowledgeBaseEditForm.status,
-        default_visibility: knowledgeBaseEditForm.defaultVisibility,
+        kb_visibility: knowledgeBaseEditForm.kbVisibility,
+        default_document_visibility: knowledgeBaseEditForm.defaultDocumentVisibility,
+        default_document_owner_department_id:
+          knowledgeBaseEditForm.defaultDocumentOwnerDepartmentId.trim(),
         config_scope_id: knowledgeBaseEditForm.configScopeId.trim() || null,
       },
       accessToken,
@@ -2483,7 +2572,7 @@ async function submitKnowledgeBasePermissions(): Promise<void> {
   if (!knowledgeBase || !canReplaceSelectedKnowledgeBasePermissions.value) {
     importAdminFeedback.value = {
       tone: "error",
-      message: "请选择知识库、填写所属部门并勾选确认项。",
+      message: "请选择知识库、填写默认文档所属部门并勾选确认项。",
     };
     return;
   }
@@ -2497,8 +2586,18 @@ async function submitKnowledgeBasePermissions(): Promise<void> {
     await putKnowledgeBasePermissions(
       knowledgeBase.id,
       {
-        visibility: knowledgeBasePermissionForm.visibility,
-        owner_department_id: knowledgeBasePermissionForm.ownerDepartmentId.trim(),
+        kb_visibility: knowledgeBasePermissionForm.kbVisibility,
+        default_document_visibility: knowledgeBasePermissionForm.defaultDocumentVisibility,
+        default_document_owner_department_id:
+          knowledgeBasePermissionForm.defaultDocumentOwnerDepartmentId.trim(),
+        access_rules: buildDepartmentKnowledgeBaseAccessRules(
+          knowledgeBasePermissionForm.kbVisibility === "enterprise"
+            ? []
+            : [
+                ...knowledgeBasePermissionForm.accessDepartmentIds,
+                knowledgeBasePermissionForm.defaultDocumentOwnerDepartmentId.trim(),
+              ],
+        ),
       },
       accessToken,
       true,
@@ -2583,6 +2682,13 @@ function closeDocumentModal(): void {
 
 async function submitDocumentPermissions(): Promise<void> {
   const document = selectedAdminDocument.value;
+  if (documentPermissionParentConflict.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: documentPermissionParentConflict.value,
+    };
+    return;
+  }
   if (!document || !canReplaceSelectedDocumentPermissions.value) {
     importAdminFeedback.value = {
       tone: "error",
@@ -2653,6 +2759,46 @@ function toggleSelectedUserDepartment(departmentId: string, checked: boolean): v
   if (!selectedUserPrimaryDepartmentWillChange.value) {
     userDepartmentForm.confirmedReplacePrimary = false;
   }
+}
+
+function toggleKnowledgeBaseCreateAccessDepartment(departmentId: string, checked: boolean): void {
+  const next = new Set(knowledgeBaseCreateForm.accessDepartmentIds);
+  if (checked) {
+    next.add(departmentId);
+  } else {
+    next.delete(departmentId);
+  }
+  knowledgeBaseCreateForm.accessDepartmentIds = Array.from(next);
+}
+
+function onKnowledgeBaseCreateAccessDepartmentChange(departmentId: string, event: Event): void {
+  toggleKnowledgeBaseCreateAccessDepartment(
+    departmentId,
+    (event.target as HTMLInputElement | null)?.checked ?? false,
+  );
+}
+
+function toggleKnowledgeBasePermissionAccessDepartment(
+  departmentId: string,
+  checked: boolean,
+): void {
+  const next = new Set(knowledgeBasePermissionForm.accessDepartmentIds);
+  if (checked) {
+    next.add(departmentId);
+  } else {
+    next.delete(departmentId);
+  }
+  knowledgeBasePermissionForm.accessDepartmentIds = Array.from(next);
+}
+
+function onKnowledgeBasePermissionAccessDepartmentChange(
+  departmentId: string,
+  event: Event,
+): void {
+  toggleKnowledgeBasePermissionAccessDepartment(
+    departmentId,
+    (event.target as HTMLInputElement | null)?.checked ?? false,
+  );
 }
 
 function ensureDefaultCreateDepartmentSelection(): void {
@@ -3995,8 +4141,52 @@ function knowledgeBaseStatusTone(status: AdminKnowledgeBaseData["status"]): Tone
   return "neutral";
 }
 
-function knowledgeBaseVisibilityLabel(visibility: AdminKnowledgeBaseData["default_visibility"]): string {
+function knowledgeBaseVisibilityLabel(visibility: AdminKnowledgeBaseData["kb_visibility"]): string {
+  if (visibility === "enterprise") {
+    return "企业可见";
+  }
+  return visibility === "department_acl" ? "指定部门可见" : "私密可见";
+}
+
+function documentVisibilityLabel(visibility: "department" | "enterprise"): string {
   return visibility === "enterprise" ? "企业可见" : "部门可见";
+}
+
+function queryDepartmentIdsForKnowledgeBase(knowledgeBase: AdminKnowledgeBaseData): string[] {
+  const ids = new Set<string>();
+  for (const rule of knowledgeBase.access_rules ?? []) {
+    if (
+      rule.subject_type === "department" &&
+      (rule.permission === "query" || rule.permission === "manage")
+    ) {
+      ids.add(rule.subject_id);
+    }
+  }
+  return Array.from(ids);
+}
+
+function departmentCanQueryKnowledgeBase(
+  knowledgeBase: AdminKnowledgeBaseData,
+  departmentId: string,
+): boolean {
+  if (knowledgeBase.kb_visibility === "enterprise") {
+    return true;
+  }
+  return queryDepartmentIdsForKnowledgeBase(knowledgeBase).includes(departmentId);
+}
+
+function buildDepartmentKnowledgeBaseAccessRules(
+  departmentIds: string[],
+): KnowledgeBaseAccessRuleData[] {
+  const rules: KnowledgeBaseAccessRuleData[] = [];
+  for (const departmentId of new Set(departmentIds.filter(Boolean))) {
+    rules.push(
+      { subject_type: "department", subject_id: departmentId, permission: "discover" },
+      { subject_type: "department", subject_id: departmentId, permission: "query" },
+      { subject_type: "department", subject_id: departmentId, permission: "manage" },
+    );
+  }
+  return rules;
 }
 
 function documentLifecycleStatusTone(status: AdminDocumentData["lifecycle_status"]): Tone {
@@ -5255,7 +5445,8 @@ function isComposeDemoProvider(value: string): boolean {
                   </span>
                 </div>
                 <div class="entity-cell">
-                  {{ knowledgeBaseVisibilityLabel(knowledgeBase.default_visibility) }}
+                  {{ knowledgeBaseVisibilityLabel(knowledgeBase.kb_visibility) }} /
+                  默认文档{{ documentVisibilityLabel(knowledgeBase.default_document_visibility) }}
                 </div>
                 <div class="entity-cell">{{ formatDepartmentById(knowledgeBase.owner_department_id) }}</div>
                 <div class="entity-cell">
@@ -5445,7 +5636,7 @@ function isComposeDemoProvider(value: string): boolean {
                       </span>
                     </div>
                     <div class="entity-cell">
-                      {{ knowledgeBaseVisibilityLabel(document.visibility) }} /
+                      {{ documentVisibilityLabel(document.visibility) }} /
                       {{ formatDepartmentById(document.owner_department_id) }}
                     </div>
                     <div class="entity-cell">{{ document.current_version_id ?? "-" }}</div>
@@ -5959,8 +6150,8 @@ function isComposeDemoProvider(value: string): boolean {
                   <input v-model.trim="knowledgeBaseCreateForm.name" class="control" type="text" required />
                 </label>
                 <label class="field">
-                  <span class="field__label">所属部门</span>
-                  <p class="field__hint">作为知识库和默认文档权限策略的 owner_department_id。</p>
+                  <span class="field__label">管理部门</span>
+                  <p class="field__hint">仅表示管理归属，不等于访问边界。</p>
                   <select
                     v-if="activeDepartments.length"
                     v-model="knowledgeBaseCreateForm.ownerDepartmentId"
@@ -5982,20 +6173,64 @@ function isComposeDemoProvider(value: string): boolean {
                   />
                 </label>
                 <label class="field">
-                  <span class="field__label">默认可见性</span>
-                  <p class="field__hint">后续从该知识库添加文件时会默认沿用这个可见性。</p>
-                  <select v-model="knowledgeBaseCreateForm.defaultVisibility" class="control">
+                  <span class="field__label">知识库可见性</span>
+                  <p class="field__hint">董事会、法务等敏感知识库应使用指定部门可见。</p>
+                  <select v-model="knowledgeBaseCreateForm.kbVisibility" class="control">
+                    <option value="enterprise">enterprise</option>
+                    <option value="department_acl">department_acl</option>
+                    <option value="private">private</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">默认文档权限</span>
+                  <p class="field__hint">新导入文件默认使用该文档权限，可在导入后单独调整。</p>
+                  <select v-model="knowledgeBaseCreateForm.defaultDocumentVisibility" class="control">
                     <option value="department">department</option>
                     <option value="enterprise">enterprise</option>
                   </select>
                 </label>
+                <label class="field">
+                  <span class="field__label">默认文档所属部门</span>
+                  <p class="field__hint">当默认文档权限为 department 时，该部门必须能查询此知识库。</p>
+                  <select
+                    v-if="activeDepartments.length"
+                    v-model="knowledgeBaseCreateForm.defaultDocumentOwnerDepartmentId"
+                    class="control"
+                  >
+                    <option value="">请选择部门</option>
+                    <option v-for="department in activeDepartments" :key="department.id" :value="department.id">
+                      {{ formatDepartmentLabel(department) }}
+                    </option>
+                  </select>
+                  <input
+                    v-else
+                    v-model.trim="knowledgeBaseCreateForm.defaultDocumentOwnerDepartmentId"
+                    class="control"
+                    type="text"
+                    placeholder="输入 department id"
+                  />
+                </label>
+                <fieldset
+                  v-if="knowledgeBaseCreateForm.kbVisibility !== 'enterprise'"
+                  class="field field--full checkbox-list"
+                >
+                  <legend class="field__label">可访问部门</legend>
+                  <label v-for="department in activeDepartments" :key="department.id" class="check-row">
+                    <input
+                      type="checkbox"
+                      :checked="knowledgeBaseCreateForm.accessDepartmentIds.includes(department.id)"
+                      @change="onKnowledgeBaseCreateAccessDepartmentChange(department.id, $event)"
+                    />
+                    <span>{{ formatDepartmentLabel(department) }}</span>
+                  </label>
+                </fieldset>
                 <label class="field">
                   <span class="field__label">配置作用域</span>
                   <p class="field__hint">可留空；后续用于按知识库覆盖模型或索引配置。</p>
                   <input v-model.trim="knowledgeBaseCreateForm.configScopeId" class="control" type="text" />
                 </label>
                 <label
-                  v-if="knowledgeBaseCreateForm.defaultVisibility === 'enterprise'"
+                  v-if="knowledgeBaseCreateForm.kbVisibility === 'enterprise'"
                   class="confirm confirm--inline modal-confirm"
                 >
                   <input v-model="knowledgeBaseCreateForm.confirmedEnterpriseVisibility" type="checkbox" />
@@ -6044,12 +6279,42 @@ function isComposeDemoProvider(value: string): boolean {
                   </select>
                 </label>
                 <label class="field">
-                  <span class="field__label">默认可见性</span>
-                  <p class="field__hint">从 department 扩大到 enterprise 需要显式确认。</p>
-                  <select v-model="knowledgeBaseEditForm.defaultVisibility" class="control">
+                  <span class="field__label">知识库可见性</span>
+                  <p class="field__hint">从受限可见扩大到 enterprise 需要显式确认。</p>
+                  <select v-model="knowledgeBaseEditForm.kbVisibility" class="control">
+                    <option value="enterprise">enterprise</option>
+                    <option value="department_acl">department_acl</option>
+                    <option value="private">private</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">默认文档权限</span>
+                  <p class="field__hint">只影响后续导入文件，不批量修改已有文档。</p>
+                  <select v-model="knowledgeBaseEditForm.defaultDocumentVisibility" class="control">
                     <option value="department">department</option>
                     <option value="enterprise">enterprise</option>
                   </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">默认文档所属部门</span>
+                  <p class="field__hint">默认文档权限为 department 时使用。</p>
+                  <select
+                    v-if="activeDepartments.length"
+                    v-model="knowledgeBaseEditForm.defaultDocumentOwnerDepartmentId"
+                    class="control"
+                  >
+                    <option value="">请选择部门</option>
+                    <option v-for="department in activeDepartments" :key="department.id" :value="department.id">
+                      {{ formatDepartmentLabel(department) }}
+                    </option>
+                  </select>
+                  <input
+                    v-else
+                    v-model.trim="knowledgeBaseEditForm.defaultDocumentOwnerDepartmentId"
+                    class="control"
+                    type="text"
+                    placeholder="输入 department id"
+                  />
                 </label>
                 <label class="field">
                   <span class="field__label">配置作用域</span>
@@ -6058,8 +6323,8 @@ function isComposeDemoProvider(value: string): boolean {
                 </label>
                 <label
                   v-if="
-                    selectedKnowledgeBase.default_visibility === 'department' &&
-                    knowledgeBaseEditForm.defaultVisibility === 'enterprise'
+                    selectedKnowledgeBase.kb_visibility !== 'enterprise' &&
+                    knowledgeBaseEditForm.kbVisibility === 'enterprise'
                   "
                   class="confirm confirm--inline modal-confirm"
                 >
@@ -6091,8 +6356,9 @@ function isComposeDemoProvider(value: string): boolean {
                 <div class="summary__row">
                   <dt>当前策略</dt>
                   <dd>
-                    {{ knowledgeBaseVisibilityLabel(selectedKnowledgeBase.default_visibility) }} /
-                    {{ formatDepartmentById(selectedKnowledgeBase.owner_department_id) }}
+                    {{ knowledgeBaseVisibilityLabel(selectedKnowledgeBase.kb_visibility) }} /
+                    默认文档{{ documentVisibilityLabel(selectedKnowledgeBase.default_document_visibility) }} /
+                    {{ formatDepartmentById(selectedKnowledgeBase.default_document_owner_department_id) }}
                   </dd>
                 </div>
               </dl>
@@ -6101,19 +6367,28 @@ function isComposeDemoProvider(value: string): boolean {
               </div>
               <div class="form-grid form-grid--compact form-grid--modal">
                 <label class="field">
-                  <span class="field__label">可见性</span>
-                  <p class="field__hint">department 仅所属部门可访问；enterprise 对企业内可读用户可见。</p>
-                  <select v-model="knowledgeBasePermissionForm.visibility" class="control">
+                  <span class="field__label">知识库可见性</span>
+                  <p class="field__hint">控制知识库是否出现在用户列表中，以及是否可被选择查询。</p>
+                  <select v-model="knowledgeBasePermissionForm.kbVisibility" class="control">
+                    <option value="enterprise">enterprise</option>
+                    <option value="department_acl">department_acl</option>
+                    <option value="private">private</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">默认文档权限</span>
+                  <p class="field__hint">只影响后续导入文件；已有文档权限请在文档权限弹窗中修改。</p>
+                  <select v-model="knowledgeBasePermissionForm.defaultDocumentVisibility" class="control">
                     <option value="department">department</option>
                     <option value="enterprise">enterprise</option>
                   </select>
                 </label>
                 <label class="field">
-                  <span class="field__label">所属部门</span>
-                  <p class="field__hint">权限策略中的 owner_department_id，收紧或改部门会先写 access block。</p>
+                  <span class="field__label">默认文档所属部门</span>
+                  <p class="field__hint">当默认文档权限为 department 时，该部门必须具备知识库查询权限。</p>
                   <select
                     v-if="activeDepartments.length"
-                    v-model="knowledgeBasePermissionForm.ownerDepartmentId"
+                    v-model="knowledgeBasePermissionForm.defaultDocumentOwnerDepartmentId"
                     class="control"
                   >
                     <option value="">请选择部门</option>
@@ -6123,12 +6398,26 @@ function isComposeDemoProvider(value: string): boolean {
                   </select>
                   <input
                     v-else
-                    v-model.trim="knowledgeBasePermissionForm.ownerDepartmentId"
+                    v-model.trim="knowledgeBasePermissionForm.defaultDocumentOwnerDepartmentId"
                     class="control"
                     type="text"
                     placeholder="输入 department id"
                   />
                 </label>
+                <fieldset
+                  v-if="knowledgeBasePermissionForm.kbVisibility !== 'enterprise'"
+                  class="field field--full checkbox-list"
+                >
+                  <legend class="field__label">可访问部门</legend>
+                  <label v-for="department in activeDepartments" :key="department.id" class="check-row">
+                    <input
+                      type="checkbox"
+                      :checked="knowledgeBasePermissionForm.accessDepartmentIds.includes(department.id)"
+                      @change="onKnowledgeBasePermissionAccessDepartmentChange(department.id, $event)"
+                    />
+                    <span>{{ formatDepartmentLabel(department) }}</span>
+                  </label>
+                </fieldset>
                 <label class="confirm confirm--inline modal-confirm">
                   <input v-model="knowledgeBasePermissionForm.confirmedReplace" type="checkbox" />
                   <span>确认替换知识库权限策略</span>
@@ -6153,8 +6442,8 @@ function isComposeDemoProvider(value: string): boolean {
                   <dd>{{ formatKnowledgeBaseLabel(selectedImportKnowledgeBase) }}</dd>
                 </div>
                 <div class="summary__row">
-                  <dt>所属部门</dt>
-                  <dd>{{ formatDepartmentById(selectedImportKnowledgeBase.owner_department_id) }}</dd>
+                  <dt>默认文档部门</dt>
+                  <dd>{{ formatDepartmentById(selectedImportKnowledgeBase.default_document_owner_department_id) }}</dd>
                 </div>
               </dl>
               <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
@@ -6164,7 +6453,7 @@ function isComposeDemoProvider(value: string): boolean {
                 <section class="upload-panel__main">
                   <label class="field">
                     <span class="field__label">文档可见性</span>
-                    <p class="field__hint">默认沿用知识库可见性；department 会按所属部门可见。</p>
+                    <p class="field__hint">默认继承知识库的默认文档权限；department 会按默认文档所属部门可见。</p>
                     <select
                       v-model="importUploadForm.visibility"
                       class="control"
@@ -6173,6 +6462,9 @@ function isComposeDemoProvider(value: string): boolean {
                       <option value="department">department</option>
                       <option value="enterprise">enterprise</option>
                     </select>
+                    <p v-if="importUploadPermissionParentConflict" :class="toneClass('warning')">
+                      {{ importUploadPermissionParentConflict }}
+                    </p>
                   </label>
                   <label class="field">
                     <span class="field__label">目标文件夹</span>
@@ -6476,14 +6768,25 @@ function isComposeDemoProvider(value: string): boolean {
                 <div class="summary__row">
                   <dt>当前策略</dt>
                   <dd>
-                    {{ knowledgeBaseVisibilityLabel(selectedAdminDocument.visibility) }} /
+                    {{ documentVisibilityLabel(selectedAdminDocument.visibility) }} /
                     {{ formatDepartmentById(selectedAdminDocument.owner_department_id) }}
+                  </dd>
+                </div>
+                <div v-if="selectedDocumentParentKnowledgeBase" class="summary__row">
+                  <dt>父知识库</dt>
+                  <dd>
+                    {{ formatKnowledgeBaseLabel(selectedDocumentParentKnowledgeBase) }}，
+                    {{ knowledgeBaseVisibilityLabel(selectedDocumentParentKnowledgeBase.kb_visibility) }} /
+                    默认文档{{ documentVisibilityLabel(selectedDocumentParentKnowledgeBase.default_document_visibility) }}
                   </dd>
                 </div>
               </dl>
               <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
                 {{ importAdminFeedback.message }}
               </div>
+              <p v-if="documentPermissionParentConflict" :class="toneClass('warning')">
+                {{ documentPermissionParentConflict }}
+              </p>
               <div class="form-grid form-grid--compact form-grid--modal">
                 <label class="field">
                   <span class="field__label">可见性</span>
@@ -8385,6 +8688,21 @@ function isComposeDemoProvider(value: string): boolean {
 
 .field--full {
   grid-column: 1 / -1;
+}
+
+.checkbox-list {
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 12px 4px 0;
+  color: #263241;
+  font-size: 13px;
 }
 
 .field__label {

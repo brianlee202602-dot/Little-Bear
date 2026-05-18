@@ -13,7 +13,7 @@ from app.modules.permissions.schemas import PermissionFilter
 from app.modules.retrieval import RetrievalCandidate, VectorSearchResult
 
 if TYPE_CHECKING:
-    from app.modules.indexing.schemas import DraftVectorPoint
+    from app.modules.indexing.schemas import DraftVectorPoint, VectorPayloadUpdate
 
 
 class QdrantVectorRetriever:
@@ -180,6 +180,21 @@ class QdrantVectorIndexWriter:
             timeout_seconds=self.timeout_seconds,
             api_key=self.api_key,
         )
+
+    def update_payloads(self, updates: tuple[VectorPayloadUpdate, ...]) -> None:
+        for update in updates:
+            if not update.collection_name:
+                raise QdrantClientError("qdrant collection name is empty")
+            _send_json(
+                _payload_url(self.base_url, update.collection_name),
+                {
+                    "payload": update.payload,
+                    "points": [update.vector_id],
+                },
+                method="POST",
+                timeout_seconds=self.timeout_seconds,
+                api_key=self.api_key,
+            )
 
 
 class QdrantClientError(Exception):

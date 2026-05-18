@@ -7,13 +7,22 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import JSONResponse
 
 from app.api.schemas.permissions import (
+    KnowledgeBaseAccessRuleData,
+    KnowledgeBasePermissionPolicyData,
+    KnowledgeBasePermissionPolicyResponse,
+    KnowledgeBasePermissionPutRequest,
     PermissionPolicyData,
     PermissionPolicyResponse,
     ResourcePermissionPutRequest,
 )
 from app.db.session import session_scope
 from app.modules.admin.errors import AdminServiceError
-from app.modules.admin.schemas import AdminPermissionPolicy
+from app.modules.admin.schemas import (
+    AdminKnowledgeBaseAccessRule,
+    AdminKnowledgeBaseAccessRuleInput,
+    AdminKnowledgeBasePermissionPolicy,
+    AdminPermissionPolicy,
+)
 from app.modules.admin.service import AdminActorContext, AdminService
 from app.modules.auth.errors import AuthServiceError
 from app.modules.auth.schemas import AuthContext
@@ -25,14 +34,14 @@ router = APIRouter(prefix="/internal/v1", tags=["permissions"])
 
 @router.put(
     "/knowledge-bases/{kb_id}/permissions",
-    response_model=PermissionPolicyResponse,
+    response_model=KnowledgeBasePermissionPolicyResponse,
 )
 async def put_knowledge_base_permissions(
     kb_id: str,
-    payload: ResourcePermissionPutRequest,
+    payload: KnowledgeBasePermissionPutRequest,
     authorization: str | None = Header(default=None),
     x_permission_confirm: str | None = Header(default=None),
-) -> PermissionPolicyResponse | JSONResponse:
+) -> KnowledgeBasePermissionPolicyResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
@@ -43,8 +52,19 @@ async def put_knowledge_base_permissions(
                 enterprise_id=auth_context.user.enterprise_id,
                 actor_user_id=auth_context.user.id,
                 kb_id=kb_id,
-                visibility=payload.visibility,
-                owner_department_id=payload.owner_department_id,
+                kb_visibility=payload.kb_visibility,
+                default_document_visibility=payload.default_document_visibility,
+                default_document_owner_department_id=(
+                    payload.default_document_owner_department_id
+                ),
+                access_rules=[
+                    AdminKnowledgeBaseAccessRuleInput(
+                        subject_type=rule.subject_type,
+                        subject_id=rule.subject_id,
+                        permission=rule.permission,
+                    )
+                    for rule in payload.access_rules
+                ],
                 confirmed=x_permission_confirm == "replace",
                 actor_context=_actor_context(auth_context),
             )
@@ -54,7 +74,10 @@ async def put_knowledge_base_permissions(
         return _admin_error_response(exc, stage="knowledge_base_permission_put")
     except SQLAlchemyError as exc:
         return _database_error_response(exc, stage="knowledge_base_permission_put")
-    return PermissionPolicyResponse(request_id=_request_id(), data=_permission_policy_data(policy))
+    return KnowledgeBasePermissionPolicyResponse(
+        request_id=_request_id(),
+        data=_knowledge_base_permission_policy_data(policy),
+    )
 
 
 @router.put("/documents/{doc_id}/permissions", response_model=PermissionPolicyResponse)
@@ -115,6 +138,7 @@ def _actor_context(auth_context: AuthContext) -> AdminActorContext:
         user_id=auth_context.user.id,
         scopes=auth_context.user.scopes,
         department_ids=tuple(department.id for department in auth_context.user.departments),
+        role_ids=tuple(role.id for role in auth_context.user.roles),
         knowledge_base_ids=knowledge_base_ids,
         can_manage_all_knowledge_bases=can_manage_all_knowledge_bases,
     )
@@ -126,6 +150,30 @@ def _permission_policy_data(policy: AdminPermissionPolicy) -> PermissionPolicyDa
         resource_id=policy.resource_id,
         visibility=policy.visibility,
         permission_version=policy.permission_version,
+    )
+
+
+def _knowledge_base_permission_policy_data(
+    policy: AdminKnowledgeBasePermissionPolicy,
+) -> KnowledgeBasePermissionPolicyData:
+    return KnowledgeBasePermissionPolicyData(
+        resource_type=policy.resource_type,
+        resource_id=policy.resource_id,
+        kb_visibility=policy.kb_visibility,
+        default_document_visibility=policy.default_document_visibility,
+        default_document_owner_department_id=policy.default_document_owner_department_id,
+        access_rules=[_knowledge_base_access_rule_data(rule) for rule in policy.access_rules],
+        permission_version=policy.permission_version,
+    )
+
+
+def _knowledge_base_access_rule_data(
+    rule: AdminKnowledgeBaseAccessRule,
+) -> KnowledgeBaseAccessRuleData:
+    return KnowledgeBaseAccessRuleData(
+        subject_type=rule.subject_type,
+        subject_id=rule.subject_id,
+        permission=rule.permission,
     )
 
 

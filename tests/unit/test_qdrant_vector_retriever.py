@@ -6,7 +6,7 @@ from urllib.error import URLError
 import pytest
 from app.adapters import QdrantVectorIndexWriter, QdrantVectorRetriever
 from app.adapters.qdrant import QdrantClientError
-from app.modules.indexing.schemas import DraftVectorPoint
+from app.modules.indexing.schemas import DraftVectorPoint, VectorPayloadUpdate
 from app.modules.models import ModelClientError
 from app.modules.permissions.schemas import PermissionFilter
 
@@ -244,6 +244,46 @@ def test_qdrant_vector_index_writer_activates_points(monkeypatch) -> None:
     assert captured["body"]["points"] == ["11111111-1111-5111-8111-111111111111"]
     assert captured["body"]["payload"]["visibility_state"] == "active"
     assert captured["body"]["payload"]["indexed_permission_version"] == 42
+
+
+def test_qdrant_vector_index_writer_updates_permission_payload(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response({"result": {"status": "acknowledged"}})
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    QdrantVectorIndexWriter(
+        base_url="http://qdrant:6333",
+        api_key="qdrant-key",
+        embedding_client=_EmbeddingClient(),
+        timeout_seconds=2.0,
+    ).update_payloads(
+        (
+            VectorPayloadUpdate(
+                collection_name="little_bear_p0",
+                vector_id="11111111-1111-5111-8111-111111111111",
+                payload={
+                    "visibility_state": "active",
+                    "visibility": "department",
+                    "owner_department_id": DEPARTMENT_ID,
+                    "indexed_permission_version": 43,
+                },
+            ),
+        )
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://qdrant:6333/collections/little_bear_p0/points/payload"
+    assert captured["timeout"] == 2.0
+    assert captured["body"]["points"] == ["11111111-1111-5111-8111-111111111111"]
+    assert captured["body"]["payload"]["visibility"] == "department"
+    assert captured["body"]["payload"]["indexed_permission_version"] == 43
 
 
 def _draft_point() -> DraftVectorPoint:

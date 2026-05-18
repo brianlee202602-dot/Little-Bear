@@ -11,6 +11,7 @@ class ImportActorContext:
     user_id: str
     scopes: tuple[str, ...]
     department_ids: tuple[str, ...] = ()
+    role_ids: tuple[str, ...] = ()
     knowledge_base_ids: tuple[str, ...] = ()
     can_import_all_knowledge_bases: bool = False
 

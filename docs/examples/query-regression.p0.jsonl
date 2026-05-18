@@ -1,0 +1,2 @@
+{"case_id":"p0_smoke_employee_handbook","description":"P0 默认回归样例；真实验收前应按已导入文档改成业务问题。","query":"员工手册","mode":"answer","top_k":8,"include_sources":true,"min_citations":1,"allow_degraded":false,"run_stream":true}
+{"case_id":"p0_policy_lookup","description":"用于验证具体政策类问题能返回引用；如知识库不含年假制度，请替换 query 和预期项。","query":"什么是浅拷贝？","mode":"answer","top_k":8,"include_sources":true,"min_citations":1,"allow_degraded":false,"expected_answer_terms":[],"expected_citation_title_terms":["答题"],"expected_doc_ids":[],"run_stream":false}
