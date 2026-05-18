@@ -24,7 +24,7 @@ REGRESSION_KB_ID ?= $(SMOKE_KB_ID)
 REGRESSION_TIMEOUT_SECONDS ?= 30
 
 define env_shell
-set -a; [ ! -f "$(ENV_FILE)" ] || . "$(ENV_FILE)"; set +a;
+set -a; [ ! -f "./$(ENV_FILE)" ] || . "./$(ENV_FILE)"; set +a;
 endef
 
 .PHONY: env up down restart ps logs clean reset db-upgrade db-current api worker web admin test smoke-p0 smoke-p0-record query-regression-p0 test-integration-qdrant
