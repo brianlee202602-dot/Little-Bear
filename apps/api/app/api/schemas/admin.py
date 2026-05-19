@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -274,6 +274,38 @@ class DocumentResponse(BaseModel):
 
     request_id: str
     data: DocumentData
+
+
+class AdminDocumentPreviewChunkData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    document_id: str
+    document_version_id: str
+    text: str
+    text_preview: str
+    page_start: int | None = None
+    page_end: int | None = None
+    status: str
+    ordinal: int
+    heading_path: str | None = None
+    source_offsets: dict[str, Any] | None = None
+    text_status: Literal["object", "preview_only", "object_unavailable"]
+
+
+class AdminDocumentPreviewData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    doc_id: str
+    title: str
+    chunks: list[AdminDocumentPreviewChunkData]
+
+
+class AdminDocumentPreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: AdminDocumentPreviewData
 
 
 class DocumentListResponse(BaseModel):

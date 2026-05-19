@@ -173,6 +173,66 @@ export interface AuditLogListResponse {
   pagination: PaginationData;
 }
 
+export interface QueryLogData {
+  id: string;
+  request_id: string;
+  trace_id: string;
+  user_id: string;
+  kb_ids: string[];
+  query_hash: string;
+  status: "success" | "failed" | "denied";
+  degraded: boolean;
+  degrade_reason: string | null;
+  config_version: number;
+  permission_version: number;
+  permission_filter_hash: string;
+  index_version_hash: string | null;
+  model_route_hash: string | null;
+  latency_ms: number;
+  candidate_count: number;
+  citation_count: number;
+  error_code: string | null;
+  created_at: string | null;
+}
+
+export interface QueryLogResponse {
+  request_id: string;
+  data: QueryLogData;
+}
+
+export interface QueryLogListResponse {
+  request_id: string;
+  data: QueryLogData[];
+  pagination: PaginationData;
+}
+
+export interface ModelCallLogData {
+  id: string;
+  request_id: string | null;
+  trace_id: string;
+  caller: string;
+  model_type: string;
+  model_name: string;
+  model_version: string | null;
+  model_route_hash: string;
+  status: "success" | "failed" | "degraded";
+  latency_ms: number;
+  token_usage_json: Record<string, unknown> | null;
+  degraded: boolean;
+  config_version: number | null;
+  prompt_hash: string | null;
+  input_hash: string | null;
+  output_hash: string | null;
+  error_code: string | null;
+  created_at: string | null;
+}
+
+export interface ModelCallLogListResponse {
+  request_id: string;
+  data: ModelCallLogData[];
+  pagination: PaginationData;
+}
+
 export type AdminUserStatus = "active" | "disabled" | "locked" | "deleted";
 
 export interface AdminDepartmentData {
@@ -341,6 +401,32 @@ export interface ChunkData {
 export interface ChunkListResponse {
   request_id: string;
   data: ChunkData[];
+}
+
+export interface AdminDocumentPreviewChunkData {
+  id: string;
+  document_id: string;
+  document_version_id: string;
+  text: string;
+  text_preview: string;
+  page_start: number | null;
+  page_end: number | null;
+  status: string;
+  ordinal: number;
+  heading_path: string | null;
+  source_offsets: Record<string, unknown> | null;
+  text_status: "object" | "preview_only" | "object_unavailable";
+}
+
+export interface AdminDocumentPreviewData {
+  doc_id: string;
+  title: string;
+  chunks: AdminDocumentPreviewChunkData[];
+}
+
+export interface AdminDocumentPreviewResponse {
+  request_id: string;
+  data: AdminDocumentPreviewData;
 }
 
 export interface ResourcePermissionPutRequest {
@@ -709,6 +795,81 @@ export async function listAuditLogs(
   }
   return requestJson<AuditLogListResponse>(
     `/internal/v1/admin/audit-logs?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listQueryLogs(
+  accessToken: string,
+  filters: {
+    page?: number;
+    page_size?: number;
+    user_id?: string;
+    kb_id?: string;
+    status?: string;
+    degraded?: boolean | null;
+    degrade_reason?: string;
+    request_id?: string;
+    trace_id?: string;
+    error_code?: string;
+  } = {},
+): Promise<QueryLogListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
+  for (const [key, value] of Object.entries(filters)) {
+    if (key === "page" || key === "page_size" || value === undefined || value === null || value === "") {
+      continue;
+    }
+    params.set(key, String(value));
+  }
+  return requestJson<QueryLogListResponse>(
+    `/internal/v1/admin/query-logs?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function getQueryLog(
+  queryLogId: string,
+  accessToken: string,
+): Promise<QueryLogResponse> {
+  return requestJson<QueryLogResponse>(
+    `/internal/v1/admin/query-logs/${encodeURIComponent(queryLogId)}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listModelCallLogs(
+  accessToken: string,
+  filters: {
+    page?: number;
+    page_size?: number;
+    model?: string;
+    model_type?: string;
+    caller?: string;
+    status?: string;
+    degraded?: boolean | null;
+    request_id?: string;
+    trace_id?: string;
+    error_code?: string;
+  } = {},
+): Promise<ModelCallLogListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
+  for (const [key, value] of Object.entries(filters)) {
+    if (key === "page" || key === "page_size" || value === undefined || value === null || value === "") {
+      continue;
+    }
+    params.set(key, String(value));
+  }
+  return requestJson<ModelCallLogListResponse>(
+    `/internal/v1/admin/model-call-logs?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1114,6 +1275,17 @@ export async function listAdminDocumentChunks(
 ): Promise<ChunkListResponse> {
   return requestJson<ChunkListResponse>(
     `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/chunks`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function getAdminDocumentPreview(
+  documentId: string,
+  accessToken: string,
+): Promise<AdminDocumentPreviewResponse> {
+  return requestJson<AdminDocumentPreviewResponse>(
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/preview`,
     { method: "GET" },
     accessToken,
   );

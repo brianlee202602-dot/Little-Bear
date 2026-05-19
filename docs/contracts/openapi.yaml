@@ -975,6 +975,26 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /internal/v1/admin/documents/{doc_id}/preview:
+    get:
+      tags: [AdminDocument]
+      summary: Admin get document full preview
+      operationId: adminGetDocumentPreview
+      x-token-type: access
+      x-required-scope: document:manage
+      x-audit-required: true
+      parameters:
+        - $ref: "#/components/parameters/DocId"
+      responses:
+        "200":
+          description: Document preview chunks with full text when object storage is available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminDocumentPreviewResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
   /internal/v1/admin/documents/{doc_id}/index-versions:
     get:
       tags: [AdminDocument]
@@ -1841,6 +1861,26 @@ paths:
           in: query
           schema:
             type: boolean
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: degrade_reason
+          in: query
+          schema:
+            type: string
+        - name: request_id
+          in: query
+          schema:
+            type: string
+        - name: trace_id
+          in: query
+          schema:
+            type: string
+        - name: error_code
+          in: query
+          schema:
+            type: string
       responses:
         "200":
           description: Query logs
@@ -1890,6 +1930,30 @@ paths:
           in: query
           schema:
             type: boolean
+        - name: model_type
+          in: query
+          schema:
+            type: string
+        - name: caller
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: request_id
+          in: query
+          schema:
+            type: string
+        - name: trace_id
+          in: query
+          schema:
+            type: string
+        - name: error_code
+          in: query
+          schema:
+            type: string
       responses:
         "200":
           description: Model call logs
@@ -2903,6 +2967,66 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Chunk"
+    AdminDocumentPreviewChunk:
+      type: object
+      required:
+        - id
+        - document_id
+        - document_version_id
+        - text
+        - text_preview
+        - status
+        - ordinal
+        - text_status
+      properties:
+        id:
+          type: string
+        document_id:
+          type: string
+        document_version_id:
+          type: string
+        text:
+          type: string
+        text_preview:
+          type: string
+        page_start:
+          type: [integer, "null"]
+        page_end:
+          type: [integer, "null"]
+        status:
+          type: string
+        ordinal:
+          type: integer
+        heading_path:
+          type: [string, "null"]
+        source_offsets:
+          type: [object, "null"]
+          additionalProperties: true
+        text_status:
+          type: string
+          enum: [object, preview_only, object_unavailable]
+    AdminDocumentPreview:
+      type: object
+      required:
+        - doc_id
+        - title
+        - chunks
+      properties:
+        doc_id:
+          type: string
+        title:
+          type: string
+        chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminDocumentPreviewChunk"
+    AdminDocumentPreviewResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/AdminDocumentPreview"
     CitationSource:
       type: object
       required:
@@ -3587,7 +3711,7 @@ components:
         latency_ms:
           type: integer
         token_usage_json:
-          type: object
+          type: [object, "null"]
           additionalProperties: true
         degraded:
           type: boolean

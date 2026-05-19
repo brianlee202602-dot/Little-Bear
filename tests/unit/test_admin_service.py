@@ -19,6 +19,7 @@ from app.modules.admin.service import (
     _is_high_risk_role,
     _merge_scopes,
 )
+from app.modules.storage.service import InMemoryObjectStorage
 
 
 class _Row:
@@ -919,6 +920,54 @@ def test_list_document_chunks_filters_by_document(monkeypatch) -> None:
     )
 
     assert chunks[0].text_preview == "制度正文"
+    sql, params = session.executed[0]
+    assert "FROM chunks" in sql
+    assert params["doc_id"] == "44444444-4444-4444-4444-444444444444"
+
+
+def test_get_document_preview_reads_full_chunk_text_from_object_storage(monkeypatch) -> None:
+    storage = InMemoryObjectStorage({"chunks/doc_1/chunk_1.txt": "完整制度正文".encode()})
+    service = AdminService(object_storage=storage)
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "chunk_id": "chunk_1",
+                        "document_id": "44444444-4444-4444-4444-444444444444",
+                        "document_version_id": "77777777-7777-7777-7777-777777777777",
+                        "text_object_key": "chunks/doc_1/chunk_1.txt",
+                        "text_preview": "制度正文",
+                        "heading_path": "总则 / 采购",
+                        "source_offsets": {"start": 0, "end": 6},
+                        "page_start": 1,
+                        "page_end": 2,
+                        "status": "active",
+                        "ordinal": 3,
+                    }
+                )
+            ]
+        )
+    ]
+    monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: _document())
+
+    preview = service.get_document_preview(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        doc_id="44444444-4444-4444-4444-444444444444",
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert preview.title == "员工手册"
+    assert preview.chunks[0].text == "完整制度正文"
+    assert preview.chunks[0].text_status == "object"
+    assert preview.chunks[0].heading_path == "总则 / 采购"
+    assert preview.chunks[0].source_offsets == {"start": 0, "end": 6}
     sql, params = session.executed[0]
     assert "FROM chunks" in sql
     assert params["doc_id"] == "44444444-4444-4444-4444-444444444444"

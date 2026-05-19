@@ -11,6 +11,8 @@ from app.modules.admin.schemas import (
     AdminDepartmentList,
     AdminDocument,
     AdminDocumentList,
+    AdminDocumentPreview,
+    AdminDocumentPreviewChunk,
     AdminDocumentVersion,
     AdminFolder,
     AdminKnowledgeBase,
@@ -834,6 +836,60 @@ def test_document_chunks_route_requires_document_manage_scope(monkeypatch) -> No
     assert seen["required_scope"] == "document:manage"
     assert seen["doc_id"] == "doc_1"
     assert response.json()["data"][0]["text_preview"] == "制度正文"
+
+
+def test_document_preview_route_requires_document_manage_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def get_document_preview(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminDocumentPreview(
+            doc_id=kwargs["doc_id"],
+            title="员工手册",
+            chunks=(
+                AdminDocumentPreviewChunk(
+                    id="chunk_1",
+                    document_id=kwargs["doc_id"],
+                    document_version_id="version_1",
+                    text="完整制度正文",
+                    text_preview="制度正文",
+                    page_start=1,
+                    page_end=1,
+                    status="active",
+                    ordinal=1,
+                    heading_path="总则",
+                    source_offsets={"start": 0, "end": 6},
+                    text_status="object",
+                ),
+            ),
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin._object_storage_or_none", lambda _session: None)
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.get_document_preview",
+        get_document_preview,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/documents/doc_1/preview",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "document:manage"
+    assert seen["doc_id"] == "doc_1"
+    payload = response.json()
+    assert payload["data"]["title"] == "员工手册"
+    assert payload["data"]["chunks"][0]["text"] == "完整制度正文"
+    assert payload["data"]["chunks"][0]["text_status"] == "object"
 
 
 def test_document_patch_route_passes_visibility_confirmation(monkeypatch) -> None:

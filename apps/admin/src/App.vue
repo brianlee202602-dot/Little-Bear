@@ -6,6 +6,8 @@ import {
   type ApiErrorPayload,
   type AdminDepartmentData,
   type AdminDocumentData,
+  type AdminDocumentPreviewChunkData,
+  type AdminDocumentPreviewData,
   type AdminFolderData,
   type AdminKnowledgeBaseData,
   type AdminRoleBindingData,
@@ -25,7 +27,9 @@ import {
   deleteCurrentSession,
   discardConfigDraft,
   getAdminKnowledgeBase,
+  getAdminDocumentPreview,
   getCurrentUser,
+  getQueryLog,
   getAdminDepartment,
   getSetupState,
   initializeSetup,
@@ -41,6 +45,8 @@ import {
   listAdminUserRoleBindings,
   listAdminUsers,
   listAuditLogs,
+  listModelCallLogs,
+  listQueryLogs,
   listConfigVersions,
   listConfigs,
   patchAdminFolder,
@@ -68,6 +74,8 @@ import {
   type ImportJobStage,
   type ImportJobStatus,
   type KnowledgeBaseAccessRuleData,
+  type ModelCallLogData,
+  type QueryLogData,
   type SetupInitializationData,
   type SetupIssue,
   type SetupStateData,
@@ -100,7 +108,7 @@ type FieldOption = {
 type Tone = "success" | "error" | "warning" | "neutral";
 type LocalIssueTone = "error" | "warning";
 type ActiveView = "loading" | "setup" | "login" | "dashboard";
-type ActiveAdminTab = "config" | "departments" | "users" | "knowledge";
+type ActiveAdminTab = "config" | "departments" | "users" | "knowledge" | "diagnostics";
 type ConfigModalMode = "create" | "edit" | "delete" | null;
 type DepartmentModalMode = "create" | "edit" | "delete" | null;
 type KnowledgeBaseModalMode = "create" | "edit" | "delete" | "upload" | "permissions" | null;
@@ -221,6 +229,11 @@ const importAdminBusy = reactive({
   uploading: false,
   updatingPermissions: false,
 });
+const diagnosticsBusy = reactive({
+  loadingQueryLogs: false,
+  loadingModelCallLogs: false,
+  loadingQueryDetail: false,
+});
 const loginForm = reactive({
   username: "",
   password: "",
@@ -241,6 +254,26 @@ const importSearchForm = reactive({
   kbId: "",
   status: "",
   stage: "",
+});
+const queryLogSearchForm = reactive({
+  userId: "",
+  kbId: "",
+  status: "",
+  degraded: "",
+  degradeReason: "",
+  requestId: "",
+  traceId: "",
+  errorCode: "",
+});
+const modelCallSearchForm = reactive({
+  model: "",
+  modelType: "",
+  caller: "",
+  status: "",
+  degraded: "",
+  requestId: "",
+  traceId: "",
+  errorCode: "",
 });
 const documentSearchForm = reactive({
   status: "",
@@ -353,6 +386,9 @@ const feedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>
 const authFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
 const configFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
 const auditFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
+const diagnosticsFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(
+  null,
+);
 const userAdminFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(null);
 const departmentAdminFeedback = ref<{ tone: Exclude<Tone, "warning">; message: string } | null>(
   null,
@@ -367,6 +403,9 @@ const currentUser = ref<CurrentUserData | null>(null);
 const configItems = ref<ConfigItemData[]>([]);
 const configVersions = ref<ConfigVersionData[]>([]);
 const auditLogs = ref<AuditLogData[]>([]);
+const queryLogs = ref<QueryLogData[]>([]);
+const modelCallLogs = ref<ModelCallLogData[]>([]);
+const selectedQueryLog = ref<QueryLogData | null>(null);
 const selectedConfigKey = ref<string>("");
 const configEditorText = ref("");
 const configValidationResult = ref<SetupValidationData | null>(null);
@@ -381,6 +420,8 @@ const adminFolders = ref<AdminFolderData[]>([]);
 const adminDocuments = ref<AdminDocumentData[]>([]);
 const selectedDocumentVersions = ref<DocumentVersionData[]>([]);
 const selectedDocumentChunks = ref<ChunkData[]>([]);
+const selectedDocumentPreview = ref<AdminDocumentPreviewData | null>(null);
+const highlightedDocumentChunkId = ref("");
 const adminRoles = ref<AdminRoleData[]>([]);
 const adminImportJobs = ref<ImportJobData[]>([]);
 const selectedImportFiles = ref<File[]>([]);
@@ -934,6 +975,7 @@ const userRoleLabels = computed(() => formatRoleList(currentUser.value?.roles ??
 const canManageConfig = computed(() => hasScope(currentUser.value?.scopes ?? [], "config:manage"));
 const canReadConfig = computed(() => hasScope(currentUser.value?.scopes ?? [], "config:read"));
 const canReadAudit = computed(() => hasScope(currentUser.value?.scopes ?? [], "audit:read"));
+const canLoadDiagnostics = computed(() => canReadAudit.value);
 const canReadUsers = computed(
   () => hasScope(currentUser.value?.scopes ?? [], "user:read") || canManageUsers.value,
 );
@@ -1007,6 +1049,12 @@ const selectedFolder = computed(
 );
 const selectedAdminDocument = computed(
   () => adminDocuments.value.find((document) => document.id === selectedDocumentId.value) ?? null,
+);
+const selectedDocumentPreviewChunk = computed(
+  () =>
+    selectedDocumentPreview.value?.chunks.find(
+      (chunk) => chunk.id === highlightedDocumentChunkId.value,
+    ) ?? null,
 );
 const selectedDocumentParentKnowledgeBase = computed(() => {
   const document = selectedAdminDocument.value;
@@ -1805,8 +1853,7 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
     adminKnowledgeBases.value = [];
     adminFolders.value = [];
     adminDocuments.value = [];
-    selectedDocumentVersions.value = [];
-    selectedDocumentChunks.value = [];
+    clearSelectedDocumentDetails();
     adminImportJobs.value = [];
     selectedKnowledgeBaseId.value = "";
     selectedFolderId.value = "";
@@ -1855,16 +1902,14 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
       } else {
         adminDocuments.value = [];
         selectedDocumentId.value = "";
-        selectedDocumentVersions.value = [];
-        selectedDocumentChunks.value = [];
+        clearSelectedDocumentDetails();
       }
     } else {
       adminFolders.value = [];
       adminDocuments.value = [];
       selectedFolderId.value = "";
       selectedDocumentId.value = "";
-      selectedDocumentVersions.value = [];
-      selectedDocumentChunks.value = [];
+      clearSelectedDocumentDetails();
     }
     if (canReadImportJobs.value) {
       const jobsResponse = await listAdminImportJobs(accessToken, {
@@ -1966,13 +2011,19 @@ async function refreshSelectedKnowledgeBaseFolders(existingAccessToken?: string)
   }
 }
 
+function clearSelectedDocumentDetails(): void {
+  selectedDocumentVersions.value = [];
+  selectedDocumentChunks.value = [];
+  selectedDocumentPreview.value = null;
+  highlightedDocumentChunkId.value = "";
+}
+
 async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: string): Promise<void> {
   const knowledgeBase = selectedKnowledgeBase.value;
   if (!knowledgeBase || !canManageDocuments.value) {
     adminDocuments.value = [];
     selectedDocumentId.value = "";
-    selectedDocumentVersions.value = [];
-    selectedDocumentChunks.value = [];
+    clearSelectedDocumentDetails();
     return;
   }
   const accessToken = existingAccessToken ?? (await ensureAccessToken());
@@ -1992,8 +2043,7 @@ async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: strin
       !adminDocuments.value.some((document) => document.id === selectedDocumentId.value)
     ) {
       selectedDocumentId.value = "";
-      selectedDocumentVersions.value = [];
-      selectedDocumentChunks.value = [];
+      clearSelectedDocumentDetails();
     }
     if (!selectedDocumentId.value && adminDocuments.value.length > 0) {
       selectedDocumentId.value = adminDocuments.value[0].id;
@@ -2015,8 +2065,7 @@ async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: strin
 async function refreshSelectedDocumentDetails(existingAccessToken?: string): Promise<void> {
   const document = selectedAdminDocument.value;
   if (!document || !canManageDocuments.value) {
-    selectedDocumentVersions.value = [];
-    selectedDocumentChunks.value = [];
+    clearSelectedDocumentDetails();
     return;
   }
   const accessToken = existingAccessToken ?? (await ensureAccessToken());
@@ -2026,22 +2075,153 @@ async function refreshSelectedDocumentDetails(existingAccessToken?: string): Pro
 
   importAdminBusy.loadingDocumentDetails = true;
   try {
-    const [versionsResponse, chunksResponse] = await Promise.all([
+    const [versionsResponse, chunksResponse, previewResponse] = await Promise.all([
       listAdminDocumentVersions(document.id, accessToken),
       listAdminDocumentChunks(document.id, accessToken),
+      getAdminDocumentPreview(document.id, accessToken),
     ]);
     selectedDocumentVersions.value = versionsResponse.data;
     selectedDocumentChunks.value = chunksResponse.data;
+    selectedDocumentPreview.value = previewResponse.data;
+    highlightedDocumentChunkId.value = previewResponse.data.chunks[0]?.id ?? "";
     syncDocumentPermissionForm();
   } catch (error) {
-    selectedDocumentVersions.value = [];
-    selectedDocumentChunks.value = [];
+    clearSelectedDocumentDetails();
     importAdminFeedback.value = {
       tone: "error",
-      message: normalizeErrorMessage(error, "读取文档版本或 chunk 失败"),
+      message: normalizeErrorMessage(error, "读取文档版本、chunk 或全文预览失败"),
     };
   } finally {
     importAdminBusy.loadingDocumentDetails = false;
+  }
+}
+
+async function refreshDiagnosticsState(): Promise<void> {
+  if (!canLoadDiagnostics.value) {
+    queryLogs.value = [];
+    modelCallLogs.value = [];
+    selectedQueryLog.value = null;
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: "当前账号缺少 audit:read，无法查看查询诊断和模型调用日志。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  diagnosticsFeedback.value = null;
+  await Promise.all([refreshQueryLogs(accessToken), refreshModelCallLogs(accessToken)]);
+}
+
+async function refreshQueryLogs(existingAccessToken?: string): Promise<void> {
+  if (!canLoadDiagnostics.value) {
+    queryLogs.value = [];
+    selectedQueryLog.value = null;
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  diagnosticsBusy.loadingQueryLogs = true;
+  try {
+    const response = await listQueryLogs(accessToken, {
+      page_size: 50,
+      user_id: queryLogSearchForm.userId.trim() || undefined,
+      kb_id: queryLogSearchForm.kbId.trim() || undefined,
+      status: queryLogSearchForm.status || undefined,
+      degraded: parseBooleanFilter(queryLogSearchForm.degraded),
+      degrade_reason: queryLogSearchForm.degradeReason.trim() || undefined,
+      request_id: queryLogSearchForm.requestId.trim() || undefined,
+      trace_id: queryLogSearchForm.traceId.trim() || undefined,
+      error_code: queryLogSearchForm.errorCode.trim() || undefined,
+    });
+    queryLogs.value = response.data;
+    if (
+      selectedQueryLog.value &&
+      !queryLogs.value.some((log) => log.id === selectedQueryLog.value?.id)
+    ) {
+      selectedQueryLog.value = null;
+    }
+    diagnosticsFeedback.value = null;
+  } catch (error) {
+    queryLogs.value = [];
+    selectedQueryLog.value = null;
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取查询日志失败"),
+    };
+  } finally {
+    diagnosticsBusy.loadingQueryLogs = false;
+  }
+}
+
+async function refreshModelCallLogs(existingAccessToken?: string): Promise<void> {
+  if (!canLoadDiagnostics.value) {
+    modelCallLogs.value = [];
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  diagnosticsBusy.loadingModelCallLogs = true;
+  try {
+    const response = await listModelCallLogs(accessToken, {
+      page_size: 50,
+      model: modelCallSearchForm.model.trim() || undefined,
+      model_type: modelCallSearchForm.modelType.trim() || undefined,
+      caller: modelCallSearchForm.caller.trim() || undefined,
+      status: modelCallSearchForm.status || undefined,
+      degraded: parseBooleanFilter(modelCallSearchForm.degraded),
+      request_id: modelCallSearchForm.requestId.trim() || undefined,
+      trace_id: modelCallSearchForm.traceId.trim() || undefined,
+      error_code: modelCallSearchForm.errorCode.trim() || undefined,
+    });
+    modelCallLogs.value = response.data;
+    diagnosticsFeedback.value = null;
+  } catch (error) {
+    modelCallLogs.value = [];
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取模型调用日志失败"),
+    };
+  } finally {
+    diagnosticsBusy.loadingModelCallLogs = false;
+  }
+}
+
+async function selectQueryLog(queryLogId: string): Promise<void> {
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+  diagnosticsBusy.loadingQueryDetail = true;
+  try {
+    const response = await getQueryLog(queryLogId, accessToken);
+    selectedQueryLog.value = response.data;
+    modelCallSearchForm.traceId = response.data.trace_id;
+    modelCallSearchForm.requestId = "";
+    modelCallSearchForm.model = "";
+    modelCallSearchForm.modelType = "";
+    modelCallSearchForm.caller = "";
+    modelCallSearchForm.status = "";
+    modelCallSearchForm.degraded = "";
+    modelCallSearchForm.errorCode = "";
+    await refreshModelCallLogs(accessToken);
+  } catch (error) {
+    selectedQueryLog.value = queryLogs.value.find((log) => log.id === queryLogId) ?? null;
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取查询日志详情失败"),
+    };
+  } finally {
+    diagnosticsBusy.loadingQueryDetail = false;
   }
 }
 
@@ -2079,6 +2259,8 @@ function switchAdminTab(tab: ActiveAdminTab): void {
     void refreshUserRoleAdminState();
   } else if (tab === "knowledge") {
     void refreshKnowledgeBaseAdminState();
+  } else if (tab === "diagnostics") {
+    void refreshDiagnosticsState();
   } else if (tab === "config") {
     void refreshConfigAdminState();
   }
@@ -2491,8 +2673,7 @@ async function selectKnowledgeBase(kbId: string): Promise<void> {
   selectedKnowledgeBaseId.value = kbId;
   selectedFolderId.value = "";
   selectedDocumentId.value = "";
-  selectedDocumentVersions.value = [];
-  selectedDocumentChunks.value = [];
+  clearSelectedDocumentDetails();
   knowledgeBaseDangerForm.confirmedDelete = false;
   folderDangerForm.confirmedDelete = false;
   syncKnowledgeBaseEditForm();
@@ -3829,13 +4010,15 @@ function clearAuthSession(): void {
   configItems.value = [];
   configVersions.value = [];
   auditLogs.value = [];
+  queryLogs.value = [];
+  modelCallLogs.value = [];
+  selectedQueryLog.value = null;
   adminUsers.value = [];
   adminDepartments.value = [];
   adminKnowledgeBases.value = [];
   adminFolders.value = [];
   adminDocuments.value = [];
-  selectedDocumentVersions.value = [];
-  selectedDocumentChunks.value = [];
+  clearSelectedDocumentDetails();
   adminRoles.value = [];
   adminImportJobs.value = [];
   selectedKnowledgeBaseId.value = "";
@@ -3844,6 +4027,7 @@ function clearAuthSession(): void {
   selectedImportFiles.value = [];
   knowledgeBaseSearchForm.keyword = "";
   knowledgeBaseSearchForm.status = "";
+  resetDiagnosticsFilters();
   knowledgeBaseModalMode.value = null;
   folderModalMode.value = null;
   documentModalMode.value = null;
@@ -4217,7 +4401,7 @@ function formatDocumentVersion(version: DocumentVersionData): string {
   return `v${version.version_no} / ${version.status}`;
 }
 
-function formatChunkPageRange(chunk: ChunkData): string {
+function formatChunkPageRange(chunk: Pick<ChunkData, "page_start" | "page_end">): string {
   if (chunk.page_start === null && chunk.page_end === null) {
     return "-";
   }
@@ -4225,6 +4409,32 @@ function formatChunkPageRange(chunk: ChunkData): string {
     return String(chunk.page_start ?? "-");
   }
   return `${chunk.page_start ?? "-"}-${chunk.page_end}`;
+}
+
+function selectDocumentPreviewChunk(chunkId: string): void {
+  highlightedDocumentChunkId.value = chunkId;
+  requestAnimationFrame(() => {
+    window.document
+      .getElementById(`admin-document-preview-chunk-${chunkId}`)
+      ?.scrollIntoView({ block: "center", behavior: "smooth" });
+  });
+}
+
+function formatPreviewTextStatus(status: AdminDocumentPreviewChunkData["text_status"]): string {
+  if (status === "object") {
+    return "全文";
+  }
+  if (status === "object_unavailable") {
+    return "全文缺失，显示预览";
+  }
+  return "预览";
+}
+
+function formatSourceOffsets(offsets: Record<string, unknown> | null): string {
+  if (!offsets) {
+    return "-";
+  }
+  return JSON.stringify(offsets);
 }
 
 function formatImportJobKnowledgeBase(job: ImportJobData): string {
@@ -4673,6 +4883,71 @@ function formatAuditTime(value: string | null): string {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function parseBooleanFilter(value: string): boolean | null {
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  return null;
+}
+
+function resetDiagnosticsFilters(): void {
+  queryLogSearchForm.userId = "";
+  queryLogSearchForm.kbId = "";
+  queryLogSearchForm.status = "";
+  queryLogSearchForm.degraded = "";
+  queryLogSearchForm.degradeReason = "";
+  queryLogSearchForm.requestId = "";
+  queryLogSearchForm.traceId = "";
+  queryLogSearchForm.errorCode = "";
+  modelCallSearchForm.model = "";
+  modelCallSearchForm.modelType = "";
+  modelCallSearchForm.caller = "";
+  modelCallSearchForm.status = "";
+  modelCallSearchForm.degraded = "";
+  modelCallSearchForm.requestId = "";
+  modelCallSearchForm.traceId = "";
+  modelCallSearchForm.errorCode = "";
+}
+
+function queryLogStatusTone(log: QueryLogData): Tone {
+  if (log.status === "success" && !log.degraded) {
+    return "success";
+  }
+  if (log.status === "denied" || log.degraded) {
+    return "warning";
+  }
+  return "error";
+}
+
+function modelCallStatusTone(log: ModelCallLogData): Tone {
+  if (log.status === "success" && !log.degraded) {
+    return "success";
+  }
+  if (log.status === "degraded" || log.degraded) {
+    return "warning";
+  }
+  return "error";
+}
+
+function formatLatency(value: number): string {
+  return `${value} ms`;
+}
+
+function formatIdList(values: string[]): string {
+  return values.length ? values.join(", ") : "-";
+}
+
+function formatTokenUsage(value: Record<string, unknown> | null): string {
+  if (!value) {
+    return "-";
+  }
+  const entries = Object.entries(value).slice(0, 4);
+  return entries.map(([key, entryValue]) => `${key}: ${String(entryValue)}`).join(" / ");
+}
+
 function auditSummaryPreview(log: AuditLogData): string {
   const summary = log.summary_json;
   const version = log.config_version ? `v${log.config_version}` : "";
@@ -5077,6 +5352,13 @@ function isComposeDemoProvider(value: string): boolean {
           @click="switchAdminTab('knowledge')"
         >
           知识库管理
+        </button>
+        <button
+          :class="['admin-nav__item', { 'admin-nav__item--active': selectedAdminTab === 'diagnostics' }]"
+          type="button"
+          @click="switchAdminTab('diagnostics')"
+        >
+          查询诊断
         </button>
       </nav>
     </aside>
@@ -5690,15 +5972,68 @@ function isComposeDemoProvider(value: string): boolean {
                       <span>{{ importAdminBusy.loadingDocumentDetails ? "读取中" : `${selectedDocumentChunks.length} 个片段` }}</span>
                     </header>
                     <div v-if="selectedDocumentChunks.length" class="chunk-preview-list">
-                      <article v-for="chunk in selectedDocumentChunks" :key="chunk.id" class="chunk-preview-row">
+                      <button
+                        v-for="chunk in selectedDocumentChunks"
+                        :key="chunk.id"
+                        class="chunk-preview-row chunk-preview-row--button"
+                        :class="{ 'chunk-preview-row--active': chunk.id === highlightedDocumentChunkId }"
+                        type="button"
+                        @click="selectDocumentPreviewChunk(chunk.id)"
+                      >
                         <header>
                           <strong>{{ chunk.id }}</strong>
                           <span>{{ chunk.status }} / 页码 {{ formatChunkPageRange(chunk) }}</span>
                         </header>
                         <p>{{ chunk.text_preview }}</p>
-                      </article>
+                      </button>
                     </div>
                     <p v-else class="empty-state empty-state--plain">当前文档尚未读取到 chunk。</p>
+                  </div>
+
+                  <div class="document-detail-pane document-detail-pane--preview">
+                    <header class="document-detail-pane__header">
+                      <div>
+                        <h4>文档全文预览</h4>
+                        <p v-if="selectedDocumentPreviewChunk">
+                          当前定位：{{ selectedDocumentPreviewChunk.id }} /
+                          页码 {{ formatChunkPageRange(selectedDocumentPreviewChunk) }}
+                        </p>
+                      </div>
+                      <span>{{ importAdminBusy.loadingDocumentDetails ? "读取中" : `${selectedDocumentPreview?.chunks.length ?? 0} 个片段` }}</span>
+                    </header>
+                    <div v-if="selectedDocumentPreview?.chunks.length" class="document-preview-viewer">
+                      <article
+                        v-for="chunk in selectedDocumentPreview.chunks"
+                        :id="`admin-document-preview-chunk-${chunk.id}`"
+                        :key="chunk.id"
+                        class="document-preview-chunk"
+                        :class="{ 'document-preview-chunk--active': chunk.id === highlightedDocumentChunkId }"
+                      >
+                        <header class="document-preview-chunk__header">
+                          <div>
+                            <strong>{{ chunk.id }}</strong>
+                            <span>{{ chunk.status }} / 页码 {{ formatChunkPageRange(chunk) }}</span>
+                          </div>
+                          <span class="badge badge--neutral">{{ formatPreviewTextStatus(chunk.text_status) }}</span>
+                        </header>
+                        <dl class="document-preview-chunk__meta">
+                          <div>
+                            <dt>版本</dt>
+                            <dd>{{ chunk.document_version_id }}</dd>
+                          </div>
+                          <div>
+                            <dt>标题路径</dt>
+                            <dd>{{ chunk.heading_path ?? "-" }}</dd>
+                          </div>
+                          <div>
+                            <dt>来源偏移</dt>
+                            <dd>{{ formatSourceOffsets(chunk.source_offsets) }}</dd>
+                          </div>
+                        </dl>
+                        <p class="document-preview-chunk__text">{{ chunk.text }}</p>
+                      </article>
+                    </div>
+                    <p v-else class="empty-state empty-state--plain">当前文档没有可预览全文。</p>
                   </div>
                 </section>
               </section>
@@ -5791,6 +6126,258 @@ function isComposeDemoProvider(value: string): boolean {
             </div>
             <p v-else-if="canReadImportJobs" class="empty-state empty-state--plain">当前尚未读取到导入任务。</p>
             <p v-else class="empty-state empty-state--plain">当前账号缺少 import_job:read，上传后只能看到本次创建结果。</p>
+          </div>
+        </section>
+
+        <section v-if="selectedAdminTab === 'diagnostics'" class="panel panel--wide">
+          <header class="panel__header">
+            <div>
+              <h3>查询诊断</h3>
+              <p :class="toneClass(canLoadDiagnostics ? 'success' : 'warning')">
+                {{ canLoadDiagnostics ? "可读取查询日志与模型调用日志" : "缺少 audit:read" }}
+              </p>
+            </div>
+            <div class="panel__actions">
+              <button
+                class="button button--secondary"
+                type="button"
+                @click="refreshDiagnosticsState"
+                :disabled="!canLoadDiagnostics || diagnosticsBusy.loadingQueryLogs || diagnosticsBusy.loadingModelCallLogs"
+              >
+                {{ diagnosticsBusy.loadingQueryLogs || diagnosticsBusy.loadingModelCallLogs ? "刷新中" : "刷新诊断" }}
+              </button>
+            </div>
+          </header>
+
+          <div class="admin-list-panel">
+            <div v-if="diagnosticsFeedback" :class="['feedback feedback--wide', `feedback--${diagnosticsFeedback.tone}`]">
+              {{ diagnosticsFeedback.message }}
+            </div>
+
+            <section class="diagnostics-grid">
+              <div class="diagnostics-pane">
+                <header class="resource-section__header">
+                  <div>
+                    <h4>查询日志</h4>
+                    <p>按 request、trace、用户、知识库和降级原因定位一次问答。</p>
+                  </div>
+                  <span>{{ diagnosticsBusy.loadingQueryLogs ? "读取中" : `${queryLogs.length} 条` }}</span>
+                </header>
+
+                <form class="list-filter list-filter--diagnostics" @submit.prevent="refreshQueryLogs()">
+                  <label class="field">
+                    <span class="field__label">Trace ID</span>
+                    <input v-model.trim="queryLogSearchForm.traceId" class="control" type="text" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">Request ID</span>
+                    <input v-model.trim="queryLogSearchForm.requestId" class="control" type="text" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">用户 ID</span>
+                    <input v-model.trim="queryLogSearchForm.userId" class="control" type="text" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">知识库 ID</span>
+                    <input v-model.trim="queryLogSearchForm.kbId" class="control" type="text" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">状态</span>
+                    <select v-model="queryLogSearchForm.status" class="control">
+                      <option value="">全部</option>
+                      <option value="success">success</option>
+                      <option value="failed">failed</option>
+                      <option value="denied">denied</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="field__label">是否降级</span>
+                    <select v-model="queryLogSearchForm.degraded" class="control">
+                      <option value="">全部</option>
+                      <option value="true">是</option>
+                      <option value="false">否</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="field__label">降级原因</span>
+                    <input v-model.trim="queryLogSearchForm.degradeReason" class="control" type="text" />
+                  </label>
+                  <label class="field">
+                    <span class="field__label">错误码</span>
+                    <input v-model.trim="queryLogSearchForm.errorCode" class="control" type="text" />
+                  </label>
+                  <button class="button button--secondary" type="submit" :disabled="!canLoadDiagnostics || diagnosticsBusy.loadingQueryLogs">
+                    查询
+                  </button>
+                </form>
+
+                <div v-if="queryLogs.length" class="entity-table entity-table--query-logs">
+                  <div class="entity-table__row entity-table__row--header">
+                    <span>请求</span>
+                    <span>状态</span>
+                    <span>召回</span>
+                    <span>耗时</span>
+                    <span>时间</span>
+                    <span>操作</span>
+                  </div>
+                  <article v-for="log in queryLogs" :key="log.id" class="entity-table__row">
+                    <div class="entity-main">
+                      <strong>{{ log.request_id }}</strong>
+                      <span>{{ log.trace_id }}</span>
+                    </div>
+                    <div class="entity-cell">
+                      <span :class="toneClass(queryLogStatusTone(log))">
+                        {{ log.status }} / 降级 {{ formatBoolean(log.degraded) }}
+                      </span>
+                      <span>{{ log.degrade_reason ?? log.error_code ?? "-" }}</span>
+                    </div>
+                    <div class="entity-cell">{{ log.candidate_count }} 候选 / {{ log.citation_count }} 引用</div>
+                    <div class="entity-cell">{{ formatLatency(log.latency_ms) }}</div>
+                    <div class="entity-cell">{{ formatAuditTime(log.created_at) }}</div>
+                    <div class="row-actions row-actions--dense">
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        @click="selectQueryLog(log.id)"
+                        :disabled="diagnosticsBusy.loadingQueryDetail"
+                      >
+                        详情
+                      </button>
+                    </div>
+                  </article>
+                </div>
+                <p v-else-if="canLoadDiagnostics" class="empty-state empty-state--plain">当前尚未读取到查询日志。</p>
+              </div>
+
+              <aside class="diagnostics-pane diagnostics-pane--detail">
+                <header class="resource-section__header">
+                  <div>
+                    <h4>查询详情</h4>
+                    <p>不展示 query 原文，只展示脱敏 hash、版本和权限过滤摘要。</p>
+                  </div>
+                </header>
+                <dl v-if="selectedQueryLog" class="summary summary--compact">
+                  <div class="summary__row">
+                    <dt>Query Log</dt>
+                    <dd>{{ selectedQueryLog.id }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>用户</dt>
+                    <dd>{{ selectedQueryLog.user_id }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>知识库</dt>
+                    <dd>{{ formatIdList(selectedQueryLog.kb_ids) }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>Query Hash</dt>
+                    <dd>{{ selectedQueryLog.query_hash }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>权限过滤</dt>
+                    <dd>{{ selectedQueryLog.permission_filter_hash }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>索引版本</dt>
+                    <dd>{{ selectedQueryLog.index_version_hash ?? "-" }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>模型路由</dt>
+                    <dd>{{ selectedQueryLog.model_route_hash ?? "-" }}</dd>
+                  </div>
+                  <div class="summary__row">
+                    <dt>配置 / 权限版本</dt>
+                    <dd>v{{ selectedQueryLog.config_version }} / {{ selectedQueryLog.permission_version }}</dd>
+                  </div>
+                </dl>
+                <p v-else class="empty-state empty-state--plain">选择一条查询日志查看详情，并自动过滤同 trace 的模型调用。</p>
+              </aside>
+            </section>
+
+            <section class="diagnostics-pane">
+              <header class="resource-section__header">
+                <div>
+                  <h4>模型调用日志</h4>
+                  <p>展示模型路由、调用方、耗时、token 摘要和错误码，不展示 prompt 或文档原文。</p>
+                </div>
+                <span>{{ diagnosticsBusy.loadingModelCallLogs ? "读取中" : `${modelCallLogs.length} 条` }}</span>
+              </header>
+
+              <form class="list-filter list-filter--model-calls" @submit.prevent="refreshModelCallLogs()">
+                <label class="field">
+                  <span class="field__label">Trace ID</span>
+                  <input v-model.trim="modelCallSearchForm.traceId" class="control" type="text" />
+                </label>
+                <label class="field">
+                  <span class="field__label">模型</span>
+                  <input v-model.trim="modelCallSearchForm.model" class="control" type="text" />
+                </label>
+                <label class="field">
+                  <span class="field__label">类型</span>
+                  <select v-model="modelCallSearchForm.modelType" class="control">
+                    <option value="">全部</option>
+                    <option value="llm">llm</option>
+                    <option value="rerank">rerank</option>
+                    <option value="embedding">embedding</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">调用方</span>
+                  <input v-model.trim="modelCallSearchForm.caller" class="control" type="text" />
+                </label>
+                <label class="field">
+                  <span class="field__label">状态</span>
+                  <select v-model="modelCallSearchForm.status" class="control">
+                    <option value="">全部</option>
+                    <option value="success">success</option>
+                    <option value="failed">failed</option>
+                    <option value="degraded">degraded</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">是否降级</span>
+                  <select v-model="modelCallSearchForm.degraded" class="control">
+                    <option value="">全部</option>
+                    <option value="true">是</option>
+                    <option value="false">否</option>
+                  </select>
+                </label>
+                <button class="button button--secondary" type="submit" :disabled="!canLoadDiagnostics || diagnosticsBusy.loadingModelCallLogs">
+                  查询调用
+                </button>
+              </form>
+
+              <div v-if="modelCallLogs.length" class="entity-table entity-table--model-calls">
+                <div class="entity-table__row entity-table__row--header">
+                  <span>模型</span>
+                  <span>调用方</span>
+                  <span>状态</span>
+                  <span>耗时</span>
+                  <span>Token</span>
+                  <span>Hash</span>
+                  <span>错误</span>
+                </div>
+                <article v-for="log in modelCallLogs" :key="log.id" class="entity-table__row">
+                  <div class="entity-main">
+                    <strong>{{ log.model_name }}</strong>
+                    <span>{{ log.model_type }} / {{ log.model_version ?? "-" }}</span>
+                  </div>
+                  <div class="entity-cell">{{ log.caller }}</div>
+                  <div class="entity-cell">
+                    <span :class="toneClass(modelCallStatusTone(log))">
+                      {{ log.status }} / 降级 {{ formatBoolean(log.degraded) }}
+                    </span>
+                  </div>
+                  <div class="entity-cell">{{ formatLatency(log.latency_ms) }}</div>
+                  <div class="entity-cell">{{ formatTokenUsage(log.token_usage_json) }}</div>
+                  <div class="entity-cell">
+                    prompt {{ log.prompt_hash ?? "-" }} / input {{ log.input_hash ?? "-" }} / output {{ log.output_hash ?? "-" }}
+                  </div>
+                  <div class="entity-cell">{{ log.error_code ?? "-" }}</div>
+                </article>
+              </div>
+              <p v-else-if="canLoadDiagnostics" class="empty-state empty-state--plain">当前尚未读取到模型调用日志。</p>
+            </section>
           </div>
         </section>
 
@@ -8036,8 +8623,39 @@ function isComposeDemoProvider(value: string): boolean {
   grid-template-columns: minmax(180px, 240px) auto;
 }
 
+.list-filter--diagnostics {
+  grid-template-columns: repeat(4, minmax(150px, 1fr)) auto;
+}
+
+.list-filter--model-calls {
+  grid-template-columns: repeat(6, minmax(130px, 1fr)) auto;
+}
+
 .list-filter .field {
   grid-column: auto;
+}
+
+.diagnostics-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.diagnostics-pane {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.diagnostics-pane--detail {
+  position: sticky;
+  top: 20px;
 }
 
 .resource-section {
@@ -8069,7 +8687,14 @@ function isComposeDemoProvider(value: string): boolean {
   color: #1d2935;
 }
 
+.document-detail-pane__header > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
 .resource-section__header p,
+.document-detail-pane__header p,
 .document-detail-pane__header span {
   margin: 4px 0 0;
   color: #667182;
@@ -8095,6 +8720,10 @@ function isComposeDemoProvider(value: string): boolean {
   gap: 12px;
 }
 
+.document-detail-pane--preview {
+  grid-column: 1 / -1;
+}
+
 .chunk-preview-list {
   min-width: 0;
   display: grid;
@@ -8109,6 +8738,21 @@ function isComposeDemoProvider(value: string): boolean {
   padding: 10px 12px;
   display: grid;
   gap: 8px;
+}
+
+.chunk-preview-row--button {
+  width: 100%;
+  appearance: none;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.chunk-preview-row--button:hover,
+.chunk-preview-row--active {
+  border-color: #4f7cff;
+  background: #f3f7ff;
 }
 
 .chunk-preview-row header {
@@ -8132,6 +8776,92 @@ function isComposeDemoProvider(value: string): boolean {
   margin: 0;
   color: #1d2935;
   line-height: 1.55;
+}
+
+.document-preview-viewer {
+  max-height: min(70vh, 720px);
+  min-width: 0;
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+  padding-right: 2px;
+}
+
+.document-preview-chunk {
+  min-width: 0;
+  border: 1px solid #e1e6ee;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  scroll-margin: 96px;
+}
+
+.document-preview-chunk--active {
+  border-color: #4f7cff;
+  box-shadow: 0 0 0 2px rgba(79, 124, 255, 0.16);
+}
+
+.document-preview-chunk__header {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+}
+
+.document-preview-chunk__header > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.document-preview-chunk__header strong,
+.document-preview-chunk__header span,
+.document-preview-chunk__meta dd,
+.document-preview-chunk__text {
+  overflow-wrap: anywhere;
+}
+
+.document-preview-chunk__header span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.document-preview-chunk__meta {
+  min-width: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.document-preview-chunk__meta div {
+  min-width: 0;
+  border: 1px solid #eef1f5;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 8px 10px;
+}
+
+.document-preview-chunk__meta dt {
+  margin: 0 0 4px;
+  color: #667182;
+  font-size: 12px;
+}
+
+.document-preview-chunk__meta dd {
+  margin: 0;
+  color: #1d2935;
+  font-size: 12px;
+}
+
+.document-preview-chunk__text {
+  margin: 0;
+  color: #1d2935;
+  line-height: 1.7;
+  white-space: pre-wrap;
 }
 
 .upload-panel {
@@ -8254,6 +8984,14 @@ function isComposeDemoProvider(value: string): boolean {
 
 .entity-table--imports .entity-table__row {
   grid-template-columns: minmax(220px, 1.2fr) minmax(160px, 0.8fr) minmax(100px, 0.5fr) minmax(130px, 0.65fr) minmax(140px, 0.7fr) minmax(160px, 0.8fr);
+}
+
+.entity-table--query-logs .entity-table__row {
+  grid-template-columns: minmax(220px, 1.1fr) minmax(190px, 0.95fr) minmax(130px, 0.65fr) minmax(90px, 0.45fr) minmax(150px, 0.75fr) minmax(100px, 0.5fr);
+}
+
+.entity-table--model-calls .entity-table__row {
+  grid-template-columns: minmax(190px, 1fr) minmax(130px, 0.7fr) minmax(130px, 0.7fr) minmax(90px, 0.45fr) minmax(180px, 0.9fr) minmax(240px, 1.25fr) minmax(130px, 0.65fr);
 }
 
 .entity-table__row--header {
@@ -9067,8 +9805,13 @@ function isComposeDemoProvider(value: string): boolean {
 
   .config-secondary-grid,
   .config-version-strip,
-  .document-detail-grid {
+  .document-detail-grid,
+  .diagnostics-grid {
     grid-template-columns: 1fr;
+  }
+
+  .diagnostics-pane--detail {
+    position: static;
   }
 
   .config-versions {
@@ -9085,7 +9828,9 @@ function isComposeDemoProvider(value: string): boolean {
   .entity-table--knowledge .entity-table__row,
   .entity-table--folders .entity-table__row,
   .entity-table--documents .entity-table__row,
-  .entity-table--imports .entity-table__row {
+  .entity-table--imports .entity-table__row,
+  .entity-table--query-logs .entity-table__row,
+  .entity-table--model-calls .entity-table__row {
     grid-template-columns: 1fr;
     align-items: start;
   }
@@ -9126,6 +9871,8 @@ function isComposeDemoProvider(value: string): boolean {
   .list-filter,
   .list-filter--imports,
   .list-filter--documents,
+  .list-filter--diagnostics,
+  .list-filter--model-calls,
   .modal__header,
   .modal__footer,
   .modal__body--split {
@@ -9159,6 +9906,15 @@ function isComposeDemoProvider(value: string): boolean {
 
   .flow-strip {
     grid-template-columns: 1fr;
+  }
+
+  .document-preview-chunk__header,
+  .document-preview-chunk__meta {
+    grid-template-columns: 1fr;
+  }
+
+  .document-preview-chunk__header {
+    display: grid;
   }
 
   .form-grid {

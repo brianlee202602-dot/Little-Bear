@@ -45,3 +45,73 @@ class AuditLogListResponse(BaseModel):
     request_id: str
     data: list[AuditLogData]
     pagination: PaginationData
+
+
+class QueryLogData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    request_id: str
+    trace_id: str
+    user_id: str
+    kb_ids: list[str] = Field(default_factory=list)
+    query_hash: str
+    status: Literal["success", "failed", "denied"]
+    degraded: bool
+    degrade_reason: str | None = None
+    config_version: int
+    permission_version: int
+    permission_filter_hash: str
+    index_version_hash: str | None = None
+    model_route_hash: str | None = None
+    latency_ms: int
+    candidate_count: int
+    citation_count: int
+    error_code: str | None = None
+    created_at: datetime | None = None
+
+
+class QueryLogResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: QueryLogData
+
+
+class QueryLogListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[QueryLogData]
+    pagination: PaginationData
+
+
+class ModelCallLogData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    request_id: str | None = None
+    trace_id: str
+    caller: str
+    model_type: str
+    model_name: str
+    model_version: str | None = None
+    model_route_hash: str
+    status: Literal["success", "failed", "degraded"]
+    latency_ms: int
+    token_usage_json: dict[str, Any] | None = None
+    degraded: bool
+    config_version: int | None = None
+    prompt_hash: str | None = None
+    input_hash: str | None = None
+    output_hash: str | None = None
+    error_code: str | None = None
+    created_at: datetime | None = None
+
+
+class ModelCallLogListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[ModelCallLogData]
+    pagination: PaginationData

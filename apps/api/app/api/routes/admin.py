@@ -10,6 +10,9 @@ from starlette.responses import JSONResponse, Response
 from app.api.schemas.admin import (
     AcceptedData,
     AcceptedResponse,
+    AdminDocumentPreviewChunkData,
+    AdminDocumentPreviewData,
+    AdminDocumentPreviewResponse,
     AdminPasswordResetRequest,
     DepartmentCreateRequest,
     DepartmentData,
@@ -59,6 +62,8 @@ from app.modules.admin.schemas import (
     AdminChunk,
     AdminDepartment,
     AdminDocument,
+    AdminDocumentPreview,
+    AdminDocumentPreviewChunk,
     AdminDocumentVersion,
     AdminFolder,
     AdminKnowledgeBase,
@@ -72,7 +77,13 @@ from app.modules.admin.service import AdminActorContext, AdminService, RoleBindi
 from app.modules.auth.errors import AuthServiceError
 from app.modules.auth.schemas import AuthContext
 from app.modules.auth.service import AuthService
+from app.modules.config.errors import ConfigServiceError
+from app.modules.config.service import ConfigService
+from app.modules.secrets.service import SecretStoreError, SecretStoreService
+from app.modules.storage import MinioObjectStorage
+from app.modules.storage.service import ObjectStorage
 from app.shared.context import get_request_context
+from app.shared.json_utils import as_dict, json_str
 
 router = APIRouter(prefix="/internal/v1/admin", tags=["admin-user-role"])
 
@@ -960,6 +971,34 @@ async def list_document_chunks(
     )
 
 
+@router.get("/documents/{doc_id}/preview", response_model=AdminDocumentPreviewResponse)
+async def get_document_preview(
+    doc_id: str,
+    authorization: str | None = Header(default=None),
+) -> AdminDocumentPreviewResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:manage")
+            service = AdminService(object_storage=_object_storage_or_none(session))
+            preview = service.get_document_preview(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                doc_id=doc_id,
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_document_preview")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_document_preview")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_document_preview")
+    return AdminDocumentPreviewResponse(
+        request_id=_request_id(),
+        data=_admin_document_preview_data(preview),
+    )
+
+
 @router.patch("/documents/{doc_id}", response_model=DocumentResponse)
 async def patch_document(
     doc_id: str,
@@ -1340,6 +1379,58 @@ def _admin_chunk_data(chunk: AdminChunk) -> ChunkData:
         page_end=chunk.page_end,
         status=chunk.status,
     )
+
+
+def _admin_document_preview_data(preview: AdminDocumentPreview) -> AdminDocumentPreviewData:
+    return AdminDocumentPreviewData(
+        doc_id=preview.doc_id,
+        title=preview.title,
+        chunks=[_admin_document_preview_chunk_data(chunk) for chunk in preview.chunks],
+    )
+
+
+def _admin_document_preview_chunk_data(
+    chunk: AdminDocumentPreviewChunk,
+) -> AdminDocumentPreviewChunkData:
+    return AdminDocumentPreviewChunkData(
+        id=chunk.id,
+        document_id=chunk.document_id,
+        document_version_id=chunk.document_version_id,
+        text=chunk.text,
+        text_preview=chunk.text_preview,
+        page_start=chunk.page_start,
+        page_end=chunk.page_end,
+        status=chunk.status,
+        ordinal=chunk.ordinal,
+        heading_path=chunk.heading_path,
+        source_offsets=chunk.source_offsets,
+        text_status=chunk.text_status,
+    )
+
+
+def _object_storage_or_none(session: object) -> ObjectStorage | None:
+    try:
+        snapshot = ConfigService().load_active_config(session, validate_schema=False)  # type: ignore[arg-type]
+        storage_config = as_dict(snapshot.config.get("storage"))
+        if json_str(storage_config, "provider") != "minio":
+            return None
+        endpoint = json_str(storage_config, "minio_endpoint")
+        bucket = json_str(storage_config, "bucket")
+        access_key_ref = json_str(storage_config, "access_key_ref")
+        secret_key_ref = json_str(storage_config, "secret_key_ref")
+        if not endpoint or not bucket or not access_key_ref or not secret_key_ref:
+            return None
+        secret_store = SecretStoreService()
+        return MinioObjectStorage(
+            endpoint=endpoint,
+            bucket=bucket,
+            access_key=secret_store.get_secret_value(session, secret_ref=access_key_ref),  # type: ignore[arg-type]
+            secret_key=secret_store.get_secret_value(session, secret_ref=secret_key_ref),  # type: ignore[arg-type]
+            region=json_str(storage_config, "region", default="us-east-1") or "us-east-1",
+            object_key_prefix=json_str(storage_config, "object_key_prefix", default="") or "",
+        )
+    except (ConfigServiceError, SecretStoreError, SQLAlchemyError, AttributeError, TypeError):
+        return None
 
 
 def _role_data(role: AdminRole) -> RoleData:

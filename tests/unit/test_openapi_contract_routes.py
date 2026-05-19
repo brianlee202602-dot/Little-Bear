@@ -13,9 +13,6 @@ CONTRACT_PATH = Path("docs/contracts/openapi.yaml")
 EXPECTED_CONTRACT_ONLY_OPERATIONS = {
     ("/internal/v1/admin/documents/{doc_id}/index-jobs", "POST"),
     ("/internal/v1/admin/documents/{doc_id}/index-versions", "GET"),
-    ("/internal/v1/admin/model-call-logs", "GET"),
-    ("/internal/v1/admin/query-logs", "GET"),
-    ("/internal/v1/admin/query-logs/{query_log_id}", "GET"),
     ("/internal/v1/admin/roles", "POST"),
     ("/internal/v1/admin/roles/{role_id}", "DELETE"),
     ("/internal/v1/admin/roles/{role_id}", "PATCH"),

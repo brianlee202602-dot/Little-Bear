@@ -19,6 +19,8 @@ from app.modules.admin.schemas import (
     AdminDepartmentList,
     AdminDocument,
     AdminDocumentList,
+    AdminDocumentPreview,
+    AdminDocumentPreviewChunk,
     AdminDocumentVersion,
     AdminFolder,
     AdminFolderList,
@@ -37,6 +39,7 @@ from app.modules.auth.password_service import PasswordPolicy, PasswordService
 from app.modules.config.service import ConfigService
 from app.modules.permissions.errors import PermissionServiceError
 from app.modules.permissions.service import PermissionService
+from app.modules.storage.service import ObjectStorage
 from app.shared.context import get_request_context
 from app.shared.json_utils import stable_json_hash
 from sqlalchemy import text
@@ -81,8 +84,14 @@ class RoleBindingInput:
 class AdminService:
     """用户、角色和角色绑定的管理后台写模型。"""
 
-    def __init__(self, *, password_service: PasswordService | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        password_service: PasswordService | None = None,
+        object_storage: ObjectStorage | None = None,
+    ) -> None:
         self.password_service = password_service or PasswordService()
+        self.object_storage = object_storage
 
     def list_users(
         self,
@@ -1548,6 +1557,97 @@ class AdminService:
                 exc,
             ) from exc
         return tuple(_admin_chunk_from_mapping(row._mapping) for row in rows)
+
+    def get_document_preview(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        doc_id: str,
+        actor_context: AdminActorContext | None = None,
+    ) -> AdminDocumentPreview:
+        """读取管理后台文档全文预览，按 chunk 返回可定位文本。"""
+
+        self._ensure_actor_can_manage_documents(actor_context)
+        document = self.get_document(
+            session,
+            doc_id,
+            enterprise_id=enterprise_id,
+            actor_context=actor_context,
+        )
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text AS chunk_id,
+                        document_id::text AS document_id,
+                        document_version_id::text AS document_version_id,
+                        text_object_key,
+                        text_preview,
+                        heading_path,
+                        source_offsets,
+                        page_start,
+                        page_end,
+                        status,
+                        ordinal
+                    FROM chunks
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND document_id = CAST(:doc_id AS uuid)
+                      AND deleted_at IS NULL
+                      AND status != 'deleted'
+                    ORDER BY document_version_id, ordinal, id
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "doc_id": doc_id},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_DOCUMENT_PREVIEW_UNAVAILABLE",
+                "document preview cannot be read",
+                exc,
+            ) from exc
+        return AdminDocumentPreview(
+            doc_id=document.id,
+            title=document.title,
+            chunks=tuple(self._admin_preview_chunk_from_mapping(row._mapping) for row in rows),
+        )
+
+    def _admin_preview_chunk_from_mapping(self, row: Any) -> AdminDocumentPreviewChunk:
+        text_preview = str(row["text_preview"])
+        object_key = _optional_str(row.get("text_object_key"))
+        text, text_status = self._read_preview_text(
+            object_key=object_key,
+            text_preview=text_preview,
+        )
+        return AdminDocumentPreviewChunk(
+            id=str(row["chunk_id"]),
+            document_id=str(row["document_id"]),
+            document_version_id=str(row["document_version_id"]),
+            text=text,
+            text_preview=text_preview,
+            page_start=_optional_int(row.get("page_start")),
+            page_end=_optional_int(row.get("page_end")),
+            status=str(row["status"]),
+            ordinal=int(row["ordinal"]),
+            heading_path=_optional_str(row.get("heading_path")),
+            source_offsets=_json_mapping(row.get("source_offsets")),
+            text_status=text_status,
+        )
+
+    def _read_preview_text(
+        self,
+        *,
+        object_key: str | None,
+        text_preview: str,
+    ) -> tuple[str, str]:
+        if not object_key or self.object_storage is None:
+            return text_preview, "preview_only"
+        try:
+            content = self.object_storage.get_object(object_key=object_key)
+        except (KeyError, OSError):
+            return text_preview, "object_unavailable"
+        return content.decode("utf-8", errors="replace"), "object"
 
     def replace_knowledge_base_permissions(
         self,
@@ -5476,6 +5576,25 @@ def _changed_update_fields(updates: list[str]) -> list[str]:
 
 def _optional_int(value: Any) -> int | None:
     return value if isinstance(value, int) else None
+
+
+def _optional_str(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return None
+
+
+def _json_mapping(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 def _normalize_folder_name(name: str) -> str:

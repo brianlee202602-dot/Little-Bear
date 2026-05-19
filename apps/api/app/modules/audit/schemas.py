@@ -32,3 +32,60 @@ class AuditLog:
 class AuditLogList:
     items: list[AuditLog]
     total: int
+
+
+@dataclass(frozen=True)
+class QueryLog:
+    id: str
+    request_id: str
+    trace_id: str
+    user_id: str
+    kb_ids: tuple[str, ...]
+    query_hash: str
+    status: str
+    degraded: bool
+    degrade_reason: str | None
+    config_version: int
+    permission_version: int
+    permission_filter_hash: str
+    index_version_hash: str | None
+    model_route_hash: str | None
+    latency_ms: int
+    candidate_count: int
+    citation_count: int
+    error_code: str | None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class QueryLogList:
+    items: list[QueryLog]
+    total: int
+
+
+@dataclass(frozen=True)
+class ModelCallLog:
+    id: str
+    request_id: str | None
+    trace_id: str
+    caller: str
+    model_type: str
+    model_name: str
+    model_version: str | None
+    model_route_hash: str
+    status: str
+    latency_ms: int
+    token_usage_json: dict[str, Any] | None
+    degraded: bool
+    config_version: int | None
+    prompt_hash: str | None
+    input_hash: str | None
+    output_hash: str | None
+    error_code: str | None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ModelCallLogList:
+    items: list[ModelCallLog]
+    total: int

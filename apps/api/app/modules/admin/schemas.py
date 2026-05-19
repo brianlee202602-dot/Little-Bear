@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,29 @@ class AdminChunk:
     page_start: int | None
     page_end: int | None
     status: str
+
+
+@dataclass(frozen=True)
+class AdminDocumentPreviewChunk:
+    id: str
+    document_id: str
+    document_version_id: str
+    text: str
+    text_preview: str
+    page_start: int | None
+    page_end: int | None
+    status: str
+    ordinal: int
+    heading_path: str | None
+    source_offsets: dict[str, Any] | None
+    text_status: str
+
+
+@dataclass(frozen=True)
+class AdminDocumentPreview:
+    doc_id: str
+    title: str
+    chunks: tuple[AdminDocumentPreviewChunk, ...]
 
 
 @dataclass(frozen=True)
