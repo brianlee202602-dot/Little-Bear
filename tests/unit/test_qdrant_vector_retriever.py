@@ -5,7 +5,7 @@ from io import BytesIO
 from urllib.error import HTTPError, URLError
 
 import pytest
-from app.adapters import QdrantVectorIndexWriter, QdrantVectorRetriever
+from app.adapters import QdrantOpsClient, QdrantVectorIndexWriter, QdrantVectorRetriever
 from app.adapters.qdrant import QdrantClientError
 from app.modules.indexing.schemas import DraftVectorPoint, VectorPayloadUpdate
 from app.modules.models import ModelClientError
@@ -329,6 +329,189 @@ def test_qdrant_vector_index_writer_updates_permission_payload(monkeypatch) -> N
     assert captured["body"]["points"] == ["11111111-1111-5111-8111-111111111111"]
     assert captured["body"]["payload"]["visibility"] == "department"
     assert captured["body"]["payload"]["indexed_permission_version"] == 43
+
+
+def test_qdrant_vector_index_writer_deletes_points(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _urlopen(request, timeout):
+        captured.update(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "timeout": timeout,
+                "headers": dict(request.header_items()),
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        return _Response({"result": {"operation_id": 1, "status": "acknowledged"}})
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    QdrantVectorIndexWriter(
+        base_url="http://qdrant:6333",
+        api_key="qdrant-key",
+        embedding_client=_EmbeddingClient(),
+        timeout_seconds=2.0,
+    ).delete_points(
+        collection_name="little_bear_p0",
+        vector_ids=(
+            "11111111-1111-5111-8111-111111111111",
+            "11111111-1111-5111-8111-111111111111",
+        ),
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://qdrant:6333/collections/little_bear_p0/points/delete"
+    assert captured["body"] == {"points": ["11111111-1111-5111-8111-111111111111"]}
+
+
+def test_qdrant_ops_client_reads_collection_info_and_count(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    def _urlopen(request, timeout):
+        captured.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "timeout": timeout,
+                "headers": dict(request.header_items()),
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        if request.get_method() == "GET":
+            return _Response(
+                {
+                    "result": {
+                        "status": "green",
+                        "points_count": 12,
+                        "config": {"params": {"vectors": {"size": 768}}},
+                    }
+                }
+            )
+        return _Response({"result": {"count": 11}})
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    info = QdrantOpsClient(
+        base_url="http://qdrant:6333",
+        api_key="qdrant-key",
+        timeout_seconds=2.0,
+    ).collection_info("little_bear_p0")
+
+    assert info.exists is True
+    assert info.status == "green"
+    assert info.vector_size == 768
+    assert info.points_count == 11
+    assert captured[0]["url"] == "http://qdrant:6333/collections/little_bear_p0"
+    assert captured[1]["url"] == "http://qdrant:6333/collections/little_bear_p0/points/count"
+    assert captured[1]["body"] == {"exact": True}
+
+
+def test_qdrant_ops_client_reports_missing_collection(monkeypatch) -> None:
+    def _urlopen(request, timeout):
+        raise HTTPError(
+            request.full_url,
+            404,
+            "not found",
+            hdrs={},
+            fp=BytesIO(b'{"status":{"error":"not found"}}'),
+        )
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    info = QdrantOpsClient(
+        base_url="http://qdrant:6333",
+    ).collection_info("little_bear_p0")
+
+    assert info.exists is False
+    assert info.points_count is None
+
+
+def test_qdrant_ops_client_lists_and_creates_snapshots(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    def _urlopen(request, timeout):
+        captured.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "timeout": timeout,
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        if request.get_method() == "GET":
+            return _Response(
+                {
+                    "result": [
+                        {
+                            "name": "little_bear_p0-2026-05-21.snapshot",
+                            "size": 123,
+                            "creation_time": "2026-05-21T00:00:00Z",
+                            "checksum": "sha256:abc",
+                        }
+                    ]
+                }
+            )
+        return _Response(
+            {
+                "result": {
+                    "name": "little_bear_p0-created.snapshot",
+                    "size": 456,
+                    "creation_time": "2026-05-21T00:01:00Z",
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    client = QdrantOpsClient(base_url="http://qdrant:6333", timeout_seconds=2.0)
+    snapshots = client.list_collection_snapshots("little_bear_p0")
+    created = client.create_collection_snapshot("little_bear_p0")
+
+    assert snapshots[0].name == "little_bear_p0-2026-05-21.snapshot"
+    assert snapshots[0].checksum == "sha256:abc"
+    assert created.name == "little_bear_p0-created.snapshot"
+    assert captured[0]["method"] == "GET"
+    assert captured[0]["url"] == "http://qdrant:6333/collections/little_bear_p0/snapshots"
+    assert captured[1]["method"] == "POST"
+    assert captured[1]["body"] is None
+
+
+def test_qdrant_ops_client_recovers_collection_snapshot(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _urlopen(request, timeout):
+        captured.update(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "timeout": timeout,
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        return _Response({"result": True})
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    result = QdrantOpsClient(
+        base_url="http://qdrant:6333",
+        timeout_seconds=2.0,
+    ).recover_collection_snapshot(
+        "little_bear_p0",
+        location="https://snapshots.example/little_bear.snapshot",
+        priority="Snapshot",
+        checksum="sha256:abc",
+    )
+
+    assert result is True
+    assert captured["method"] == "PUT"
+    assert captured["url"] == "http://qdrant:6333/collections/little_bear_p0/snapshots/recover"
+    assert captured["body"] == {
+        "location": "https://snapshots.example/little_bear.snapshot",
+        "priority": "Snapshot",
+        "checksum": "sha256:abc",
+    }
 
 
 def _draft_point() -> DraftVectorPoint:

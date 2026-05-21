@@ -14,6 +14,11 @@ import {
   type AdminRoleData,
   type ChunkData,
   type AdminUserData,
+  createAdminDocumentIndexJob,
+  createAdminIndexJob,
+  createAdminIndexCollectionRebuildJob,
+  createAdminIndexCollectionSnapshot,
+  createAdminIndexVersionCleanupJob,
   createAdminFolder,
   createAdminKnowledgeBase,
   createAdminDepartment,
@@ -28,12 +33,15 @@ import {
   discardConfigDraft,
   getAdminKnowledgeBase,
   getAdminDocumentPreview,
+  getAdminIndexHealth,
   getCurrentUser,
   getQueryLog,
   getAdminDepartment,
   getSetupState,
   initializeSetup,
   listAdminDocumentChunks,
+  listAdminDocumentIndexVersions,
+  listAdminIndexCollectionSnapshots,
   listAdminDocuments,
   listAdminDocumentVersions,
   listAdminFolders,
@@ -57,8 +65,10 @@ import {
   putKnowledgeBasePermissions,
   publishConfigVersion,
   refreshSession,
+  recoverAdminIndexCollectionSnapshot,
   replaceAdminUserDepartments,
   resetAdminUserPassword,
+  retryAdminIndexJobs,
   revokeAdminUserRoleBinding,
   saveConfigDraft,
   unlockAdminUser,
@@ -70,6 +80,9 @@ import {
   type ConfigVersionData,
   type CurrentUserData,
   type DocumentVersionData,
+  type IndexCollectionHealthData,
+  type IndexCollectionSnapshotData,
+  type IndexVersionData,
   type ImportJobData,
   type ImportJobStage,
   type ImportJobStatus,
@@ -111,7 +124,14 @@ type ActiveView = "loading" | "setup" | "login" | "dashboard";
 type ActiveAdminTab = "config" | "departments" | "users" | "knowledge" | "diagnostics";
 type ConfigModalMode = "create" | "edit" | "delete" | null;
 type DepartmentModalMode = "create" | "edit" | "delete" | null;
-type KnowledgeBaseModalMode = "create" | "edit" | "delete" | "upload" | "permissions" | null;
+type KnowledgeBaseModalMode =
+  | "create"
+  | "edit"
+  | "delete"
+  | "upload"
+  | "permissions"
+  | "rebuildIndex"
+  | null;
 type FolderModalMode = "create" | "edit" | "delete" | null;
 type DocumentModalMode = "permissions" | null;
 type UserModalMode = "create" | "edit" | "departments" | "roles" | "password" | "delete" | null;
@@ -228,11 +248,22 @@ const importAdminBusy = reactive({
   managingFolder: false,
   uploading: false,
   updatingPermissions: false,
+  loadingIndexVersions: false,
+  rebuildingIndex: false,
+  rebuildingBatchIndex: false,
+  cleaningIndexVersions: false,
+  loadingFailedIndexJobs: false,
+  retryingIndexJobs: false,
 });
 const diagnosticsBusy = reactive({
   loadingQueryLogs: false,
   loadingModelCallLogs: false,
   loadingQueryDetail: false,
+  loadingIndexHealth: false,
+  loadingIndexSnapshots: false,
+  creatingIndexSnapshot: false,
+  recoveringIndexSnapshot: false,
+  rebuildingIndexCollection: false,
 });
 const loginForm = reactive({
   username: "",
@@ -252,6 +283,7 @@ const knowledgeBaseSearchForm = reactive({
 });
 const importSearchForm = reactive({
   kbId: "",
+  jobType: "",
   status: "",
   stage: "",
 });
@@ -327,6 +359,9 @@ const knowledgeBasePermissionForm = reactive({
   accessDepartmentIds: [] as string[],
   confirmedReplace: false,
 });
+const knowledgeBaseIndexForm = reactive({
+  confirmedRebuild: false,
+});
 const folderCreateForm = reactive({
   name: "",
   parentId: "",
@@ -340,6 +375,23 @@ const documentPermissionForm = reactive({
   visibility: "department" as "department" | "enterprise",
   ownerDepartmentId: "",
   confirmedReplace: false,
+});
+const documentIndexForm = reactive({
+  confirmedRebuild: false,
+  confirmedBatchRebuild: false,
+  confirmedCleanup: false,
+});
+const indexRetryForm = reactive({
+  confirmedRetry: false,
+});
+const indexCollectionOpsForm = reactive({
+  selectedCollectionName: "",
+  snapshotLocation: "",
+  snapshotChecksum: "",
+  recoverPriority: "Snapshot" as "Snapshot" | "Replica",
+  confirmedSnapshot: false,
+  confirmedRestore: false,
+  confirmedRebuild: false,
 });
 const userEditForm = reactive({
   name: "",
@@ -405,6 +457,8 @@ const configVersions = ref<ConfigVersionData[]>([]);
 const auditLogs = ref<AuditLogData[]>([]);
 const queryLogs = ref<QueryLogData[]>([]);
 const modelCallLogs = ref<ModelCallLogData[]>([]);
+const indexHealth = ref<IndexCollectionHealthData[]>([]);
+const indexCollectionSnapshots = ref<IndexCollectionSnapshotData[]>([]);
 const selectedQueryLog = ref<QueryLogData | null>(null);
 const selectedConfigKey = ref<string>("");
 const configEditorText = ref("");
@@ -419,11 +473,16 @@ const adminKnowledgeBases = ref<AdminKnowledgeBaseData[]>([]);
 const adminFolders = ref<AdminFolderData[]>([]);
 const adminDocuments = ref<AdminDocumentData[]>([]);
 const selectedDocumentVersions = ref<DocumentVersionData[]>([]);
+const selectedDocumentIndexVersions = ref<IndexVersionData[]>([]);
 const selectedDocumentChunks = ref<ChunkData[]>([]);
 const selectedDocumentPreview = ref<AdminDocumentPreviewData | null>(null);
 const highlightedDocumentChunkId = ref("");
 const adminRoles = ref<AdminRoleData[]>([]);
 const adminImportJobs = ref<ImportJobData[]>([]);
+const failedIndexJobs = ref<ImportJobData[]>([]);
+const selectedFailedIndexJobIds = ref<string[]>([]);
+const selectedBatchDocumentIds = ref<string[]>([]);
+const selectedCleanupIndexVersionIds = ref<string[]>([]);
 const selectedImportFiles = ref<File[]>([]);
 const importFileInputKey = ref(0);
 const selectedDepartmentId = ref<string>("");
@@ -996,6 +1055,10 @@ const canManageKnowledgeBases = computed(() =>
 const canManageDocuments = computed(() =>
   hasScope(currentUser.value?.scopes ?? [], "document:manage"),
 );
+const canIndexDocuments = computed(() =>
+  hasScope(currentUser.value?.scopes ?? [], "document:index"),
+);
+const canLoadIndexOps = computed(() => canIndexDocuments.value);
 const canManageFolders = computed(() =>
   hasScope(currentUser.value?.scopes ?? [], "folder:manage"),
 );
@@ -1015,6 +1078,7 @@ const canLoadImportAdmin = computed(
     canManageKnowledgeBases.value ||
     canManageFolders.value ||
     canManageDocuments.value ||
+    canIndexDocuments.value ||
     canManagePermissions.value,
 );
 const selectedConfigItem = computed(() =>
@@ -1156,6 +1220,13 @@ const canDeleteSelectedKnowledgeBase = computed(
     knowledgeBaseDangerForm.confirmedDelete &&
     !importAdminBusy.deleting,
 );
+const canRebuildSelectedKnowledgeBaseIndex = computed(
+  () =>
+    canIndexDocuments.value &&
+    selectedKnowledgeBase.value?.status === "active" &&
+    knowledgeBaseIndexForm.confirmedRebuild &&
+    !importAdminBusy.rebuildingIndex,
+);
 const canCreateFolder = computed(
   () =>
     canManageFolders.value &&
@@ -1195,6 +1266,105 @@ const canReplaceSelectedDocumentPermissions = computed(
     !documentPermissionParentConflict.value &&
     documentPermissionForm.confirmedReplace &&
     !importAdminBusy.updatingPermissions,
+);
+const canRebuildSelectedDocumentIndex = computed(
+  () =>
+    canIndexDocuments.value &&
+    selectedAdminDocument.value?.lifecycle_status === "active" &&
+    Boolean(selectedAdminDocument.value?.current_version_id) &&
+    documentIndexForm.confirmedRebuild &&
+    !importAdminBusy.rebuildingIndex,
+);
+const batchRebuildEligibleDocuments = computed(() =>
+  adminDocuments.value.filter((document) => isDocumentBatchRebuildEligible(document)),
+);
+const selectedBatchDocumentSet = computed(() => new Set(selectedBatchDocumentIds.value));
+const selectedBatchRebuildDocumentIds = computed(() => {
+  const eligibleIds = new Set(batchRebuildEligibleDocuments.value.map((document) => document.id));
+  return selectedBatchDocumentIds.value.filter((documentId) => eligibleIds.has(documentId));
+});
+const allBatchRebuildEligibleDocumentsSelected = computed(
+  () =>
+    batchRebuildEligibleDocuments.value.length > 0 &&
+    selectedBatchRebuildDocumentIds.value.length === batchRebuildEligibleDocuments.value.length,
+);
+const canRebuildSelectedDocumentsIndex = computed(
+  () =>
+    canIndexDocuments.value &&
+    selectedBatchRebuildDocumentIds.value.length > 0 &&
+    documentIndexForm.confirmedBatchRebuild &&
+    !importAdminBusy.rebuildingBatchIndex,
+);
+const cleanupEligibleIndexVersions = computed(() =>
+  selectedDocumentIndexVersions.value.filter((version) => version.status === "pending_delete"),
+);
+const selectedCleanupIndexVersionSet = computed(() => new Set(selectedCleanupIndexVersionIds.value));
+const selectedCleanupPendingDeleteIndexVersionIds = computed(() => {
+  const eligibleIds = new Set(cleanupEligibleIndexVersions.value.map((version) => version.id));
+  return selectedCleanupIndexVersionIds.value.filter((indexVersionId) =>
+    eligibleIds.has(indexVersionId),
+  );
+});
+const allCleanupEligibleIndexVersionsSelected = computed(
+  () =>
+    cleanupEligibleIndexVersions.value.length > 0 &&
+    selectedCleanupPendingDeleteIndexVersionIds.value.length ===
+      cleanupEligibleIndexVersions.value.length,
+);
+const canCleanupSelectedIndexVersions = computed(
+  () =>
+    canIndexDocuments.value &&
+    selectedCleanupPendingDeleteIndexVersionIds.value.length > 0 &&
+    documentIndexForm.confirmedCleanup &&
+    !importAdminBusy.cleaningIndexVersions,
+);
+const selectedFailedIndexJobSet = computed(() => new Set(selectedFailedIndexJobIds.value));
+const failedIndexJobStageSummary = computed(() => {
+  const counts = new Map<string, number>();
+  for (const job of failedIndexJobs.value) {
+    counts.set(job.stage, (counts.get(job.stage) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort(([leftStage], [rightStage]) => leftStage.localeCompare(rightStage))
+    .map(([stage, count]) => `${importJobStageLabel(stage as ImportJobStage)} ${count}`);
+});
+const failedIndexJobDocumentCount = computed(
+  () => new Set(failedIndexJobs.value.flatMap((job) => job.document_ids)).size,
+);
+const canRetrySelectedFailedIndexJobs = computed(
+  () =>
+    canIndexDocuments.value &&
+    selectedFailedIndexJobIds.value.length > 0 &&
+    indexRetryForm.confirmedRetry &&
+    !importAdminBusy.retryingIndexJobs,
+);
+const selectedIndexCollectionHealth = computed(
+  () =>
+    indexHealth.value.find(
+      (item) => item.collection_name === indexCollectionOpsForm.selectedCollectionName,
+    ) ?? null,
+);
+const canCreateIndexCollectionSnapshot = computed(
+  () =>
+    canLoadIndexOps.value &&
+    Boolean(selectedIndexCollectionHealth.value) &&
+    indexCollectionOpsForm.confirmedSnapshot &&
+    !diagnosticsBusy.creatingIndexSnapshot,
+);
+const canRecoverIndexCollectionSnapshot = computed(
+  () =>
+    canLoadIndexOps.value &&
+    Boolean(selectedIndexCollectionHealth.value) &&
+    indexCollectionOpsForm.snapshotLocation.trim().length > 0 &&
+    indexCollectionOpsForm.confirmedRestore &&
+    !diagnosticsBusy.recoveringIndexSnapshot,
+);
+const canRebuildIndexCollection = computed(
+  () =>
+    canLoadIndexOps.value &&
+    Boolean(selectedIndexCollectionHealth.value) &&
+    indexCollectionOpsForm.confirmedRebuild &&
+    !diagnosticsBusy.rebuildingIndexCollection,
 );
 const roleBindingCandidates = computed<RoleBindingCandidate[]>(() =>
   assignableRoles.value.flatMap((role): RoleBindingCandidate[] => {
@@ -1870,6 +2040,7 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
   }
 
   importAdminBusy.loading = true;
+  let failedIndexJobsLoaded = true;
   try {
     if (canReadDepartments.value) {
       const departmentsResponse = await listAdminDepartments(accessToken, { status: "active" });
@@ -1914,17 +2085,23 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
     if (canReadImportJobs.value) {
       const jobsResponse = await listAdminImportJobs(accessToken, {
         kb_id: importSearchForm.kbId || undefined,
+        job_type: importSearchForm.jobType || undefined,
         status: importSearchForm.status || undefined,
         stage: importSearchForm.stage || undefined,
       });
       adminImportJobs.value = jobsResponse.data;
+      failedIndexJobsLoaded = await refreshFailedIndexJobs(accessToken);
     } else {
       adminImportJobs.value = [];
+      failedIndexJobs.value = [];
+      selectedFailedIndexJobIds.value = [];
     }
-    importAdminFeedback.value = {
-      tone: "success",
-      message: "知识库管理数据已刷新。",
-    };
+    if (failedIndexJobsLoaded) {
+      importAdminFeedback.value = {
+        tone: "success",
+        message: "知识库管理数据已刷新。",
+      };
+    }
   } catch (error) {
     importAdminFeedback.value = {
       tone: "error",
@@ -1932,6 +2109,112 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
     };
   } finally {
     importAdminBusy.loading = false;
+  }
+}
+
+async function refreshFailedIndexJobs(existingAccessToken?: string): Promise<boolean> {
+  if (!canReadImportJobs.value) {
+    failedIndexJobs.value = [];
+    selectedFailedIndexJobIds.value = [];
+    return true;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return false;
+  }
+
+  importAdminBusy.loadingFailedIndexJobs = true;
+  try {
+    const response = await listAdminImportJobs(accessToken, {
+      kb_id: importSearchForm.kbId || undefined,
+      status: "failed",
+      job_type: "index_rebuild",
+      page_size: 100,
+    });
+    failedIndexJobs.value = response.data;
+    const availableIds = new Set(response.data.map((job) => job.id));
+    selectedFailedIndexJobIds.value = selectedFailedIndexJobIds.value.filter((id) =>
+      availableIds.has(id),
+    );
+    if (selectedFailedIndexJobIds.value.length === 0) {
+      indexRetryForm.confirmedRetry = false;
+    }
+    return true;
+  } catch (error) {
+    failedIndexJobs.value = [];
+    selectedFailedIndexJobIds.value = [];
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取失败索引任务失败"),
+    };
+    return false;
+  } finally {
+    importAdminBusy.loadingFailedIndexJobs = false;
+  }
+}
+
+function toggleFailedIndexJob(jobId: string, checked: boolean): void {
+  const next = new Set(selectedFailedIndexJobIds.value);
+  if (checked) {
+    next.add(jobId);
+  } else {
+    next.delete(jobId);
+  }
+  selectedFailedIndexJobIds.value = Array.from(next);
+  if (selectedFailedIndexJobIds.value.length === 0) {
+    indexRetryForm.confirmedRetry = false;
+  }
+}
+
+function onFailedIndexJobToggle(jobId: string, event: Event): void {
+  toggleFailedIndexJob(jobId, (event.target as HTMLInputElement).checked);
+}
+
+function toggleAllFailedIndexJobs(checked: boolean): void {
+  selectedFailedIndexJobIds.value = checked ? failedIndexJobs.value.map((job) => job.id) : [];
+  if (!checked) {
+    indexRetryForm.confirmedRetry = false;
+  }
+}
+
+function onAllFailedIndexJobsToggle(event: Event): void {
+  toggleAllFailedIndexJobs((event.target as HTMLInputElement).checked);
+}
+
+async function retrySelectedFailedIndexJobs(): Promise<void> {
+  if (!canRetrySelectedFailedIndexJobs.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "批量重试前必须选择失败索引任务，并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.retryingIndexJobs = true;
+  try {
+    const response = await retryAdminIndexJobs(
+      { job_ids: selectedFailedIndexJobIds.value },
+      accessToken,
+      true,
+    );
+    indexRetryForm.confirmedRetry = false;
+    selectedFailedIndexJobIds.value = [];
+    await refreshKnowledgeBaseAdminState();
+    importAdminFeedback.value = {
+      tone: "success",
+      message: `已创建 ${response.data.length} 个索引重试任务。`,
+    };
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "批量重试索引任务失败"),
+    };
+  } finally {
+    importAdminBusy.retryingIndexJobs = false;
   }
 }
 
@@ -2013,9 +2296,22 @@ async function refreshSelectedKnowledgeBaseFolders(existingAccessToken?: string)
 
 function clearSelectedDocumentDetails(): void {
   selectedDocumentVersions.value = [];
+  selectedDocumentIndexVersions.value = [];
   selectedDocumentChunks.value = [];
   selectedDocumentPreview.value = null;
   highlightedDocumentChunkId.value = "";
+  documentIndexForm.confirmedRebuild = false;
+  clearIndexVersionCleanupSelection();
+}
+
+function clearBatchDocumentSelection(): void {
+  selectedBatchDocumentIds.value = [];
+  documentIndexForm.confirmedBatchRebuild = false;
+}
+
+function clearIndexVersionCleanupSelection(): void {
+  selectedCleanupIndexVersionIds.value = [];
+  documentIndexForm.confirmedCleanup = false;
 }
 
 async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: string): Promise<void> {
@@ -2024,6 +2320,7 @@ async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: strin
     adminDocuments.value = [];
     selectedDocumentId.value = "";
     clearSelectedDocumentDetails();
+    clearBatchDocumentSelection();
     return;
   }
   const accessToken = existingAccessToken ?? (await ensureAccessToken());
@@ -2038,6 +2335,7 @@ async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: strin
       page_size: 100,
     });
     adminDocuments.value = response.data;
+    pruneSelectedBatchDocuments();
     if (
       selectedDocumentId.value &&
       !adminDocuments.value.some((document) => document.id === selectedDocumentId.value)
@@ -2074,36 +2372,165 @@ async function refreshSelectedDocumentDetails(existingAccessToken?: string): Pro
   }
 
   importAdminBusy.loadingDocumentDetails = true;
+  importAdminBusy.loadingIndexVersions = canIndexDocuments.value;
   try {
-    const [versionsResponse, chunksResponse, previewResponse] = await Promise.all([
+    const [versionsResponse, chunksResponse, previewResponse, indexVersionsResponse] = await Promise.all([
       listAdminDocumentVersions(document.id, accessToken),
       listAdminDocumentChunks(document.id, accessToken),
       getAdminDocumentPreview(document.id, accessToken),
+      canIndexDocuments.value
+        ? listAdminDocumentIndexVersions(document.id, accessToken)
+        : Promise.resolve({ request_id: "", data: [] as IndexVersionData[] }),
     ]);
     selectedDocumentVersions.value = versionsResponse.data;
     selectedDocumentChunks.value = chunksResponse.data;
     selectedDocumentPreview.value = previewResponse.data;
+    selectedDocumentIndexVersions.value = indexVersionsResponse.data;
     highlightedDocumentChunkId.value = previewResponse.data.chunks[0]?.id ?? "";
+    documentIndexForm.confirmedRebuild = false;
+    pruneSelectedIndexVersionsForCleanup();
     syncDocumentPermissionForm();
   } catch (error) {
     clearSelectedDocumentDetails();
     importAdminFeedback.value = {
       tone: "error",
-      message: normalizeErrorMessage(error, "读取文档版本、chunk 或全文预览失败"),
+      message: normalizeErrorMessage(error, "读取文档版本、chunk、索引版本或全文预览失败"),
     };
   } finally {
     importAdminBusy.loadingDocumentDetails = false;
+    importAdminBusy.loadingIndexVersions = false;
   }
 }
 
+async function refreshSelectedDocumentIndexVersions(existingAccessToken?: string): Promise<void> {
+  const document = selectedAdminDocument.value;
+  if (!document || !canIndexDocuments.value) {
+    selectedDocumentIndexVersions.value = [];
+    clearIndexVersionCleanupSelection();
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.loadingIndexVersions = true;
+  try {
+    const response = await listAdminDocumentIndexVersions(document.id, accessToken);
+    selectedDocumentIndexVersions.value = response.data;
+    pruneSelectedIndexVersionsForCleanup();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取文档索引版本失败"),
+    };
+  } finally {
+    importAdminBusy.loadingIndexVersions = false;
+  }
+}
+
+function isDocumentBatchRebuildEligible(document: AdminDocumentData): boolean {
+  return document.lifecycle_status === "active" && Boolean(document.current_version_id);
+}
+
+function pruneSelectedBatchDocuments(): void {
+  const visibleEligibleIds = new Set(
+    adminDocuments.value
+      .filter((document) => isDocumentBatchRebuildEligible(document))
+      .map((document) => document.id),
+  );
+  selectedBatchDocumentIds.value = selectedBatchDocumentIds.value.filter((documentId) =>
+    visibleEligibleIds.has(documentId),
+  );
+  if (selectedBatchDocumentIds.value.length === 0) {
+    documentIndexForm.confirmedBatchRebuild = false;
+  }
+}
+
+function toggleBatchDocumentSelection(documentId: string, checked: boolean): void {
+  const next = new Set(selectedBatchDocumentIds.value);
+  if (checked) {
+    next.add(documentId);
+  } else {
+    next.delete(documentId);
+  }
+  selectedBatchDocumentIds.value = Array.from(next);
+  if (selectedBatchDocumentIds.value.length === 0) {
+    documentIndexForm.confirmedBatchRebuild = false;
+  }
+}
+
+function onBatchDocumentSelectionToggle(documentId: string, event: Event): void {
+  toggleBatchDocumentSelection(documentId, (event.target as HTMLInputElement).checked);
+}
+
+function toggleAllBatchDocuments(checked: boolean): void {
+  selectedBatchDocumentIds.value = checked
+    ? batchRebuildEligibleDocuments.value.map((document) => document.id)
+    : [];
+  if (!checked) {
+    documentIndexForm.confirmedBatchRebuild = false;
+  }
+}
+
+function onAllBatchDocumentsToggle(event: Event): void {
+  toggleAllBatchDocuments((event.target as HTMLInputElement).checked);
+}
+
+function pruneSelectedIndexVersionsForCleanup(): void {
+  const eligibleIds = new Set(
+    selectedDocumentIndexVersions.value
+      .filter((version) => version.status === "pending_delete")
+      .map((version) => version.id),
+  );
+  selectedCleanupIndexVersionIds.value = selectedCleanupIndexVersionIds.value.filter(
+    (indexVersionId) => eligibleIds.has(indexVersionId),
+  );
+  if (selectedCleanupIndexVersionIds.value.length === 0) {
+    documentIndexForm.confirmedCleanup = false;
+  }
+}
+
+function toggleIndexVersionCleanupSelection(indexVersionId: string, checked: boolean): void {
+  const next = new Set(selectedCleanupIndexVersionIds.value);
+  if (checked) {
+    next.add(indexVersionId);
+  } else {
+    next.delete(indexVersionId);
+  }
+  selectedCleanupIndexVersionIds.value = Array.from(next);
+  if (selectedCleanupIndexVersionIds.value.length === 0) {
+    documentIndexForm.confirmedCleanup = false;
+  }
+}
+
+function onIndexVersionCleanupSelectionToggle(indexVersionId: string, event: Event): void {
+  toggleIndexVersionCleanupSelection(indexVersionId, (event.target as HTMLInputElement).checked);
+}
+
+function toggleAllIndexVersionsForCleanup(checked: boolean): void {
+  selectedCleanupIndexVersionIds.value = checked
+    ? cleanupEligibleIndexVersions.value.map((version) => version.id)
+    : [];
+  if (!checked) {
+    documentIndexForm.confirmedCleanup = false;
+  }
+}
+
+function onAllIndexVersionsForCleanupToggle(event: Event): void {
+  toggleAllIndexVersionsForCleanup((event.target as HTMLInputElement).checked);
+}
+
 async function refreshDiagnosticsState(): Promise<void> {
-  if (!canLoadDiagnostics.value) {
+  if (!canLoadDiagnostics.value && !canLoadIndexOps.value) {
     queryLogs.value = [];
     modelCallLogs.value = [];
+    indexHealth.value = [];
+    indexCollectionSnapshots.value = [];
     selectedQueryLog.value = null;
     diagnosticsFeedback.value = {
       tone: "error",
-      message: "当前账号缺少 audit:read，无法查看查询诊断和模型调用日志。",
+      message: "当前账号缺少 audit:read 和 document:index，无法查看查询诊断或索引运维。",
     };
     return;
   }
@@ -2113,7 +2540,214 @@ async function refreshDiagnosticsState(): Promise<void> {
   }
 
   diagnosticsFeedback.value = null;
-  await Promise.all([refreshQueryLogs(accessToken), refreshModelCallLogs(accessToken)]);
+  const tasks: Promise<void>[] = [];
+  if (canLoadDiagnostics.value) {
+    tasks.push(refreshQueryLogs(accessToken), refreshModelCallLogs(accessToken));
+  } else {
+    queryLogs.value = [];
+    modelCallLogs.value = [];
+    selectedQueryLog.value = null;
+  }
+  if (canLoadIndexOps.value) {
+    tasks.push(refreshIndexHealth(accessToken));
+  } else {
+    indexHealth.value = [];
+    indexCollectionSnapshots.value = [];
+  }
+  await Promise.all(tasks);
+}
+
+function syncIndexCollectionSelection(): void {
+  const selected = indexCollectionOpsForm.selectedCollectionName;
+  if (selected && indexHealth.value.some((item) => item.collection_name === selected)) {
+    return;
+  }
+  indexCollectionOpsForm.selectedCollectionName = indexHealth.value[0]?.collection_name ?? "";
+  indexCollectionOpsForm.confirmedSnapshot = false;
+  indexCollectionOpsForm.confirmedRestore = false;
+  indexCollectionOpsForm.confirmedRebuild = false;
+}
+
+async function refreshIndexHealth(existingAccessToken?: string): Promise<void> {
+  if (!canLoadIndexOps.value) {
+    indexHealth.value = [];
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  diagnosticsBusy.loadingIndexHealth = true;
+  try {
+    const response = await getAdminIndexHealth(accessToken);
+    indexHealth.value = response.data;
+    diagnosticsFeedback.value = null;
+    syncIndexCollectionSelection();
+    if (indexCollectionOpsForm.selectedCollectionName) {
+      await refreshIndexCollectionSnapshots(accessToken);
+    } else {
+      indexCollectionSnapshots.value = [];
+    }
+  } catch (error) {
+    indexHealth.value = [];
+    indexCollectionSnapshots.value = [];
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取索引运维诊断失败"),
+    };
+  } finally {
+    diagnosticsBusy.loadingIndexHealth = false;
+  }
+}
+
+async function refreshIndexCollectionSnapshots(existingAccessToken?: string): Promise<void> {
+  if (!canLoadIndexOps.value || !indexCollectionOpsForm.selectedCollectionName) {
+    indexCollectionSnapshots.value = [];
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  diagnosticsBusy.loadingIndexSnapshots = true;
+  try {
+    const response = await listAdminIndexCollectionSnapshots(
+      indexCollectionOpsForm.selectedCollectionName,
+      accessToken,
+    );
+    indexCollectionSnapshots.value = response.data;
+    diagnosticsFeedback.value = null;
+  } catch (error) {
+    indexCollectionSnapshots.value = [];
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取 collection 快照失败"),
+    };
+  } finally {
+    diagnosticsBusy.loadingIndexSnapshots = false;
+  }
+}
+
+async function onIndexCollectionSelectionChange(): Promise<void> {
+  indexCollectionOpsForm.confirmedSnapshot = false;
+  indexCollectionOpsForm.confirmedRestore = false;
+  indexCollectionOpsForm.confirmedRebuild = false;
+  await refreshIndexCollectionSnapshots();
+}
+
+async function createSelectedIndexCollectionSnapshot(): Promise<void> {
+  if (!canCreateIndexCollectionSnapshot.value) {
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: "创建快照前必须选择 collection，并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  diagnosticsBusy.creatingIndexSnapshot = true;
+  try {
+    const response = await createAdminIndexCollectionSnapshot(
+      indexCollectionOpsForm.selectedCollectionName,
+      accessToken,
+      true,
+    );
+    indexCollectionOpsForm.confirmedSnapshot = false;
+    await refreshIndexCollectionSnapshots(accessToken);
+    diagnosticsFeedback.value = {
+      tone: "success",
+      message: `Qdrant 快照已创建：${response.data.name}`,
+    };
+  } catch (error) {
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "创建 Qdrant 快照失败"),
+    };
+  } finally {
+    diagnosticsBusy.creatingIndexSnapshot = false;
+  }
+}
+
+async function recoverSelectedIndexCollectionSnapshot(): Promise<void> {
+  if (!canRecoverIndexCollectionSnapshot.value) {
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: "恢复快照前必须填写 snapshot URL 或 file URI，并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  diagnosticsBusy.recoveringIndexSnapshot = true;
+  try {
+    const response = await recoverAdminIndexCollectionSnapshot(
+      indexCollectionOpsForm.selectedCollectionName,
+      {
+        location: indexCollectionOpsForm.snapshotLocation.trim(),
+        priority: indexCollectionOpsForm.recoverPriority,
+        checksum: indexCollectionOpsForm.snapshotChecksum.trim() || null,
+      },
+      accessToken,
+      true,
+    );
+    indexCollectionOpsForm.confirmedRestore = false;
+    await refreshIndexHealth(accessToken);
+    diagnosticsFeedback.value = {
+      tone: "success",
+      message: `Qdrant 快照恢复已提交：${response.data.result === false ? "未完成" : "已接受"}`,
+    };
+  } catch (error) {
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "恢复 Qdrant 快照失败"),
+    };
+  } finally {
+    diagnosticsBusy.recoveringIndexSnapshot = false;
+  }
+}
+
+async function rebuildSelectedIndexCollection(): Promise<void> {
+  if (!canRebuildIndexCollection.value) {
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: "重建 collection 索引前必须选择 collection，并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  diagnosticsBusy.rebuildingIndexCollection = true;
+  try {
+    const response = await createAdminIndexCollectionRebuildJob(
+      indexCollectionOpsForm.selectedCollectionName,
+      accessToken,
+      true,
+    );
+    indexCollectionOpsForm.confirmedRebuild = false;
+    await refreshIndexHealth(accessToken);
+    diagnosticsFeedback.value = {
+      tone: "success",
+      message: `Collection 重建索引任务已创建：${response.data.job_id ?? "-"}`,
+    };
+  } catch (error) {
+    diagnosticsFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "创建 collection 重建索引任务失败"),
+    };
+  } finally {
+    diagnosticsBusy.rebuildingIndexCollection = false;
+  }
 }
 
 async function refreshQueryLogs(existingAccessToken?: string): Promise<void> {
@@ -2358,6 +2992,12 @@ async function openKnowledgeBasePermissionsModal(knowledgeBase: AdminKnowledgeBa
   syncKnowledgeBasePermissionForm();
 }
 
+async function openRebuildKnowledgeBaseIndexModal(knowledgeBase: AdminKnowledgeBaseData): Promise<void> {
+  knowledgeBaseIndexForm.confirmedRebuild = false;
+  knowledgeBaseModalMode.value = "rebuildIndex";
+  await selectKnowledgeBase(knowledgeBase.id);
+}
+
 async function openUploadKnowledgeBaseModal(knowledgeBase: AdminKnowledgeBaseData): Promise<void> {
   knowledgeBaseModalMode.value = "upload";
   await selectKnowledgeBase(knowledgeBase.id);
@@ -2377,6 +3017,7 @@ function closeKnowledgeBaseModal(): void {
   knowledgeBaseCreateForm.confirmedEnterpriseVisibility = false;
   knowledgeBaseEditForm.confirmedVisibilityExpand = false;
   knowledgeBasePermissionForm.confirmedReplace = false;
+  knowledgeBaseIndexForm.confirmedRebuild = false;
 }
 
 function ensureImportKnowledgeBaseSelection(): void {
@@ -2674,6 +3315,7 @@ async function selectKnowledgeBase(kbId: string): Promise<void> {
   selectedFolderId.value = "";
   selectedDocumentId.value = "";
   clearSelectedDocumentDetails();
+  clearBatchDocumentSelection();
   knowledgeBaseDangerForm.confirmedDelete = false;
   folderDangerForm.confirmedDelete = false;
   syncKnowledgeBaseEditForm();
@@ -2835,6 +3477,52 @@ async function deleteSelectedKnowledgeBase(): Promise<void> {
   }
 }
 
+async function rebuildSelectedKnowledgeBaseIndex(): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase || !canRebuildSelectedKnowledgeBaseIndex.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "重建知识库索引前必须选择 active 知识库，并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.rebuildingIndex = true;
+  try {
+    const response = await createAdminIndexJob({ kb_id: knowledgeBase.id }, accessToken, true);
+    knowledgeBaseIndexForm.confirmedRebuild = false;
+    await refreshSelectedKnowledgeBaseDocuments(accessToken);
+    if (canReadImportJobs.value) {
+      const jobsResponse = await listAdminImportJobs(accessToken, {
+        kb_id: importSearchForm.kbId || knowledgeBase.id,
+        job_type: importSearchForm.jobType || undefined,
+        status: importSearchForm.status || undefined,
+        stage: importSearchForm.stage || undefined,
+      });
+      adminImportJobs.value = jobsResponse.data;
+    }
+    if (canLoadIndexOps.value) {
+      await refreshIndexHealth(accessToken);
+    }
+    importAdminFeedback.value = {
+      tone: "success",
+      message: `知识库索引重建任务已创建：${response.data.job_id ?? "-"}`,
+    };
+    closeKnowledgeBaseModal();
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "创建知识库索引重建任务失败"),
+    };
+  } finally {
+    importAdminBusy.rebuildingIndex = false;
+  }
+}
+
 function upsertKnowledgeBase(knowledgeBase: AdminKnowledgeBaseData): void {
   const index = adminKnowledgeBases.value.findIndex((item) => item.id === knowledgeBase.id);
   if (index >= 0) {
@@ -2907,6 +3595,142 @@ async function submitDocumentPermissions(): Promise<void> {
     };
   } finally {
     importAdminBusy.updatingPermissions = false;
+  }
+}
+
+async function rebuildSelectedDocumentIndex(): Promise<void> {
+  const document = selectedAdminDocument.value;
+  if (!document || !canRebuildSelectedDocumentIndex.value) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "重建索引前必须选择 active 文档、确认当前版本存在，并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.rebuildingIndex = true;
+  try {
+    const response = await createAdminDocumentIndexJob(document.id, accessToken, true);
+    documentIndexForm.confirmedRebuild = false;
+    await refreshSelectedKnowledgeBaseDocuments(accessToken);
+    if (canReadImportJobs.value) {
+      const jobsResponse = await listAdminImportJobs(accessToken, {
+        kb_id: importSearchForm.kbId || undefined,
+        job_type: importSearchForm.jobType || undefined,
+        status: importSearchForm.status || undefined,
+        stage: importSearchForm.stage || undefined,
+      });
+      adminImportJobs.value = jobsResponse.data;
+    }
+    importAdminFeedback.value = {
+      tone: "success",
+      message: `索引重建任务已创建：${response.data.job_id ?? "-"}`,
+    };
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "创建索引重建任务失败"),
+    };
+  } finally {
+    importAdminBusy.rebuildingIndex = false;
+  }
+}
+
+async function rebuildSelectedDocumentsIndex(): Promise<void> {
+  const documentIds = selectedBatchRebuildDocumentIds.value;
+  if (!canRebuildSelectedDocumentsIndex.value || documentIds.length === 0) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "批量重建索引前必须选择可重建文档，并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.rebuildingBatchIndex = true;
+  try {
+    const response = await createAdminIndexJob({ document_ids: documentIds }, accessToken, true);
+    clearBatchDocumentSelection();
+    await refreshSelectedKnowledgeBaseDocuments(accessToken);
+    if (canReadImportJobs.value) {
+      const jobsResponse = await listAdminImportJobs(accessToken, {
+        kb_id: importSearchForm.kbId || selectedKnowledgeBase.value?.id || undefined,
+        job_type: importSearchForm.jobType || undefined,
+        status: importSearchForm.status || undefined,
+        stage: importSearchForm.stage || undefined,
+      });
+      adminImportJobs.value = jobsResponse.data;
+    }
+    if (canLoadIndexOps.value) {
+      await refreshIndexHealth(accessToken);
+    }
+    importAdminFeedback.value = {
+      tone: "success",
+      message: `已为 ${documentIds.length} 个文档创建批量索引重建任务：${response.data.job_id ?? "-"}`,
+    };
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "创建批量索引重建任务失败"),
+    };
+  } finally {
+    importAdminBusy.rebuildingBatchIndex = false;
+  }
+}
+
+async function cleanupSelectedIndexVersions(): Promise<void> {
+  const indexVersionIds = selectedCleanupPendingDeleteIndexVersionIds.value;
+  if (!canCleanupSelectedIndexVersions.value || indexVersionIds.length === 0) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: "清理索引前必须选择 pending_delete 索引版本，并勾选确认项。",
+    };
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.cleaningIndexVersions = true;
+  try {
+    const response = await createAdminIndexVersionCleanupJob(
+      { index_version_ids: indexVersionIds },
+      accessToken,
+      true,
+    );
+    clearIndexVersionCleanupSelection();
+    await refreshSelectedDocumentIndexVersions(accessToken);
+    if (canReadImportJobs.value) {
+      const jobsResponse = await listAdminImportJobs(accessToken, {
+        kb_id: importSearchForm.kbId || selectedKnowledgeBase.value?.id || undefined,
+        job_type: importSearchForm.jobType || undefined,
+        status: importSearchForm.status || undefined,
+        stage: importSearchForm.stage || undefined,
+      });
+      adminImportJobs.value = jobsResponse.data;
+    }
+    if (canLoadIndexOps.value) {
+      await refreshIndexHealth(accessToken);
+    }
+    importAdminFeedback.value = {
+      tone: "success",
+      message: `已创建 ${indexVersionIds.length} 个索引版本的清理任务：${response.data.job_id ?? "-"}`,
+    };
+  } catch (error) {
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "创建索引清理任务失败"),
+    };
+  } finally {
+    importAdminBusy.cleaningIndexVersions = false;
   }
 }
 
@@ -4012,6 +4836,8 @@ function clearAuthSession(): void {
   auditLogs.value = [];
   queryLogs.value = [];
   modelCallLogs.value = [];
+  indexHealth.value = [];
+  indexCollectionSnapshots.value = [];
   selectedQueryLog.value = null;
   adminUsers.value = [];
   adminDepartments.value = [];
@@ -4021,6 +4847,9 @@ function clearAuthSession(): void {
   clearSelectedDocumentDetails();
   adminRoles.value = [];
   adminImportJobs.value = [];
+  failedIndexJobs.value = [];
+  selectedFailedIndexJobIds.value = [];
+  selectedBatchDocumentIds.value = [];
   selectedKnowledgeBaseId.value = "";
   selectedFolderId.value = "";
   selectedDocumentId.value = "";
@@ -4035,10 +4864,23 @@ function clearAuthSession(): void {
   folderDangerForm.confirmedDelete = false;
   knowledgeBasePermissionForm.confirmedReplace = false;
   documentPermissionForm.confirmedReplace = false;
+  knowledgeBaseIndexForm.confirmedRebuild = false;
+  documentIndexForm.confirmedRebuild = false;
+  documentIndexForm.confirmedBatchRebuild = false;
+  documentIndexForm.confirmedCleanup = false;
+  indexRetryForm.confirmedRetry = false;
+  indexCollectionOpsForm.selectedCollectionName = "";
+  indexCollectionOpsForm.snapshotLocation = "";
+  indexCollectionOpsForm.snapshotChecksum = "";
+  indexCollectionOpsForm.recoverPriority = "Snapshot";
+  indexCollectionOpsForm.confirmedSnapshot = false;
+  indexCollectionOpsForm.confirmedRestore = false;
+  indexCollectionOpsForm.confirmedRebuild = false;
   importUploadForm.kbId = "";
   importUploadForm.folderId = "";
   importUploadForm.idempotencyKey = "";
   importSearchForm.kbId = "";
+  importSearchForm.jobType = "";
   importSearchForm.status = "";
   importSearchForm.stage = "";
   documentSearchForm.status = "";
@@ -4392,6 +5234,19 @@ function documentIndexStatusTone(status: AdminDocumentData["index_status"]): Ton
     return "warning";
   }
   if (status === "index_failed" || status === "blocked") {
+    return "error";
+  }
+  return "neutral";
+}
+
+function indexVersionStatusTone(status: IndexVersionData["status"]): Tone {
+  if (status === "active") {
+    return "success";
+  }
+  if (status === "ready" || status === "draft" || status === "pending_delete") {
+    return "warning";
+  }
+  if (status === "failed") {
     return "error";
   }
   return "neutral";
@@ -4930,6 +5785,30 @@ function modelCallStatusTone(log: ModelCallLogData): Tone {
     return "warning";
   }
   return "error";
+}
+
+function indexHealthTone(item: IndexCollectionHealthData): Tone {
+  if (item.issues.length === 0) {
+    return "success";
+  }
+  if (
+    item.issues.some((issue) =>
+      [
+        "qdrant_unreachable",
+        "qdrant_collection_missing",
+        "qdrant_vector_size_mismatch",
+        "qdrant_points_less_than_active_refs",
+        "active_index_ref_count_mismatch",
+      ].includes(issue),
+    )
+  ) {
+    return "error";
+  }
+  return "warning";
+}
+
+function formatIssueList(issues: string[]): string {
+  return issues.length ? issues.join(" / ") : "无";
 }
 
 function formatLatency(value: number): string {
@@ -5767,6 +6646,14 @@ function isComposeDemoProvider(value: string): boolean {
                   <button
                     class="button button--secondary button--small"
                     type="button"
+                    @click="openRebuildKnowledgeBaseIndexModal(knowledgeBase)"
+                    :disabled="!canIndexDocuments || knowledgeBase.status !== 'active'"
+                  >
+                    重建索引
+                  </button>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
                     @click="openEditKnowledgeBaseModal(knowledgeBase)"
                     :disabled="!canManageKnowledgeBases"
                   >
@@ -5866,14 +6753,19 @@ function isComposeDemoProvider(value: string): boolean {
                     <h4>文档管理</h4>
                     <p>{{ formatKnowledgeBaseLabel(selectedKnowledgeBase) }} / {{ selectedKnowledgeBase.id }}</p>
                   </div>
-                  <button
-                    class="button button--secondary button--small"
-                    type="button"
-                    @click="refreshSelectedKnowledgeBaseDocuments()"
-                    :disabled="importAdminBusy.loadingDocuments"
-                  >
-                    {{ importAdminBusy.loadingDocuments ? "刷新中" : "刷新文档" }}
-                  </button>
+                  <div class="panel__actions">
+                    <span v-if="canIndexDocuments">
+                      已选 {{ selectedBatchRebuildDocumentIds.length }} / 可重建 {{ batchRebuildEligibleDocuments.length }}
+                    </span>
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      @click="refreshSelectedKnowledgeBaseDocuments()"
+                      :disabled="importAdminBusy.loadingDocuments"
+                    >
+                      {{ importAdminBusy.loadingDocuments ? "刷新中" : "刷新文档" }}
+                    </button>
+                  </div>
                 </header>
 
                 <form class="list-filter list-filter--documents" @submit.prevent="refreshSelectedKnowledgeBaseDocuments()">
@@ -5892,8 +6784,42 @@ function isComposeDemoProvider(value: string): boolean {
                   </button>
                 </form>
 
-                <div v-if="adminDocuments.length" class="entity-table entity-table--documents">
+                <div v-if="canIndexDocuments" class="batch-action-bar">
+                  <label class="confirm confirm--inline">
+                    <input
+                      v-model="documentIndexForm.confirmedBatchRebuild"
+                      type="checkbox"
+                      :disabled="selectedBatchRebuildDocumentIds.length === 0"
+                    />
+                    <span>确认重建选中文档索引</span>
+                  </label>
+                  <button
+                    class="button"
+                    type="button"
+                    @click="rebuildSelectedDocumentsIndex"
+                    :disabled="!canRebuildSelectedDocumentsIndex"
+                  >
+                    {{ importAdminBusy.rebuildingBatchIndex ? "创建中..." : "批量重建索引" }}
+                  </button>
+                </div>
+
+                <div
+                  v-if="adminDocuments.length"
+                  :class="[
+                    'entity-table',
+                    'entity-table--documents',
+                    { 'entity-table--documents-selectable': canIndexDocuments },
+                  ]"
+                >
                   <div class="entity-table__row entity-table__row--header">
+                    <span v-if="canIndexDocuments">
+                      <input
+                        type="checkbox"
+                        :checked="allBatchRebuildEligibleDocumentsSelected"
+                        :disabled="batchRebuildEligibleDocuments.length === 0"
+                        @change="onAllBatchDocumentsToggle"
+                      />
+                    </span>
                     <span>文档</span>
                     <span>文件夹</span>
                     <span>生命周期</span>
@@ -5907,6 +6833,14 @@ function isComposeDemoProvider(value: string): boolean {
                     :key="document.id"
                     :class="['entity-table__row', { 'entity-table__row--selected': document.id === selectedDocumentId }]"
                   >
+                    <div v-if="canIndexDocuments" class="entity-cell">
+                      <input
+                        type="checkbox"
+                        :checked="selectedBatchDocumentSet.has(document.id)"
+                        :disabled="!isDocumentBatchRebuildEligible(document)"
+                        @change="onBatchDocumentSelectionToggle(document.id, $event)"
+                      />
+                    </div>
                     <div class="entity-main">
                       <strong>{{ document.title }}</strong>
                       <span>{{ document.id }}</span>
@@ -5964,6 +6898,124 @@ function isComposeDemoProvider(value: string): boolean {
                       </article>
                     </div>
                     <p v-else class="empty-state empty-state--plain">当前文档尚未读取到版本。</p>
+                  </div>
+
+                  <div class="document-detail-pane">
+                    <header class="document-detail-pane__header">
+                      <div>
+                        <h4>索引版本</h4>
+                        <p>用于确认当前检索生效版本和旧索引清理状态。</p>
+                      </div>
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        @click="refreshSelectedDocumentIndexVersions()"
+                        :disabled="!canIndexDocuments || importAdminBusy.loadingIndexVersions"
+                      >
+                        {{ importAdminBusy.loadingIndexVersions ? "刷新中" : "刷新索引" }}
+                      </button>
+                    </header>
+                    <p v-if="!canIndexDocuments" class="empty-state empty-state--plain">
+                      当前账号缺少 document:index，无法查看或重建索引。
+                    </p>
+                    <template v-else>
+                      <div v-if="cleanupEligibleIndexVersions.length" class="batch-action-bar">
+                        <label class="confirm confirm--inline">
+                          <input
+                            type="checkbox"
+                            :checked="allCleanupEligibleIndexVersionsSelected"
+                            @change="onAllIndexVersionsForCleanupToggle"
+                          />
+                          <span>
+                            已选 {{ selectedCleanupPendingDeleteIndexVersionIds.length }} /
+                            可清理 {{ cleanupEligibleIndexVersions.length }}
+                          </span>
+                        </label>
+                        <label class="confirm confirm--inline">
+                          <input
+                            v-model="documentIndexForm.confirmedCleanup"
+                            type="checkbox"
+                            :disabled="selectedCleanupPendingDeleteIndexVersionIds.length === 0"
+                          />
+                          <span>确认清理选中索引版本</span>
+                        </label>
+                        <button
+                          class="button button--secondary button--small"
+                          type="button"
+                          @click="cleanupSelectedIndexVersions"
+                          :disabled="!canCleanupSelectedIndexVersions"
+                        >
+                          {{ importAdminBusy.cleaningIndexVersions ? "创建中..." : "清理索引" }}
+                        </button>
+                      </div>
+                      <div v-if="selectedDocumentIndexVersions.length" class="index-version-list">
+                        <article
+                          v-for="version in selectedDocumentIndexVersions"
+                          :key="version.id"
+                          :class="[
+                            'index-version-row',
+                            { 'index-version-row--selectable': version.status === 'pending_delete' },
+                          ]"
+                        >
+                          <input
+                            v-if="version.status === 'pending_delete'"
+                            class="index-version-row__selector"
+                            type="checkbox"
+                            :checked="selectedCleanupIndexVersionSet.has(version.id)"
+                            @change="onIndexVersionCleanupSelectionToggle(version.id, $event)"
+                          />
+                          <div class="index-version-row__body">
+                            <header>
+                              <strong>{{ version.id }}</strong>
+                              <span :class="toneClass(indexVersionStatusTone(version.status))">
+                                {{ version.status }}
+                              </span>
+                            </header>
+                            <dl>
+                              <div>
+                                <dt>模型</dt>
+                                <dd>{{ version.embedding_model }} / {{ version.model_version }}</dd>
+                              </div>
+                              <div>
+                                <dt>维度</dt>
+                                <dd>{{ version.dimension }}</dd>
+                              </div>
+                              <div>
+                                <dt>片段</dt>
+                                <dd>{{ version.chunk_count }}</dd>
+                              </div>
+                              <div>
+                                <dt>集合</dt>
+                                <dd>{{ version.collection_name }}</dd>
+                              </div>
+                              <div>
+                                <dt>创建</dt>
+                                <dd>{{ formatAuditTime(version.created_at) }}</dd>
+                              </div>
+                              <div>
+                                <dt>激活</dt>
+                                <dd>{{ formatAuditTime(version.activated_at) }}</dd>
+                              </div>
+                            </dl>
+                          </div>
+                        </article>
+                      </div>
+                      <p v-else class="empty-state empty-state--plain">当前文档尚未读取到索引版本。</p>
+                      <div class="index-rebuild-panel">
+                        <label class="confirm confirm--inline">
+                          <input v-model="documentIndexForm.confirmedRebuild" type="checkbox" />
+                          <span>确认为当前文档重建索引</span>
+                        </label>
+                        <button
+                          class="button button--secondary button--small"
+                          type="button"
+                          @click="rebuildSelectedDocumentIndex"
+                          :disabled="!canRebuildSelectedDocumentIndex"
+                        >
+                          {{ importAdminBusy.rebuildingIndex ? "创建中..." : "重建索引" }}
+                        </button>
+                      </div>
+                    </template>
                   </div>
 
                   <div class="document-detail-pane">
@@ -6081,6 +7133,18 @@ function isComposeDemoProvider(value: string): boolean {
                 </select>
               </label>
               <label class="field">
+                <span class="field__label">任务类型</span>
+                <p class="field__hint">按导入或索引任务类型过滤。</p>
+                <select v-model="importSearchForm.jobType" class="control">
+                  <option value="">全部</option>
+                  <option value="upload">upload</option>
+                  <option value="url">url</option>
+                  <option value="metadata_batch">metadata_batch</option>
+                  <option value="index_rebuild">index_rebuild</option>
+                  <option value="permission_refresh">permission_refresh</option>
+                </select>
+              </label>
+              <label class="field">
                 <span class="field__label">阶段</span>
                 <p class="field__hint">按导入阶段过滤。</p>
                 <select v-model="importSearchForm.stage" class="control">
@@ -6101,9 +7165,83 @@ function isComposeDemoProvider(value: string): boolean {
               </button>
             </form>
 
+            <section v-if="canReadImportJobs" class="resource-block">
+              <header class="resource-section__header">
+                <div>
+                  <h4>失败索引任务</h4>
+                  <p>
+                    {{ failedIndexJobs.length }} 个失败任务 /
+                    {{ failedIndexJobDocumentCount }} 个文档 /
+                    {{ failedIndexJobStageSummary.length ? failedIndexJobStageSummary.join("，") : "无失败阶段" }}
+                  </p>
+                </div>
+                <div class="panel__actions">
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="refreshFailedIndexJobs()"
+                    :disabled="importAdminBusy.loadingFailedIndexJobs"
+                  >
+                    {{ importAdminBusy.loadingFailedIndexJobs ? "刷新中" : "刷新失败任务" }}
+                  </button>
+                  <button
+                    class="button button--small"
+                    type="button"
+                    @click="retrySelectedFailedIndexJobs"
+                    :disabled="!canRetrySelectedFailedIndexJobs"
+                  >
+                    {{ importAdminBusy.retryingIndexJobs ? "创建中..." : "批量重试" }}
+                  </button>
+                </div>
+              </header>
+              <label class="confirm confirm--inline">
+                <input
+                  v-model="indexRetryForm.confirmedRetry"
+                  type="checkbox"
+                  :disabled="!selectedFailedIndexJobIds.length || !canIndexDocuments"
+                />
+                <span>确认重试选中的失败索引任务</span>
+              </label>
+              <div v-if="failedIndexJobs.length" class="entity-table entity-table--index-jobs">
+                <div class="entity-table__row entity-table__row--header">
+                  <span>
+                    <input
+                      type="checkbox"
+                      :checked="selectedFailedIndexJobIds.length === failedIndexJobs.length"
+                      @change="onAllFailedIndexJobsToggle"
+                    />
+                  </span>
+                  <span>任务</span>
+                  <span>知识库</span>
+                  <span>阶段</span>
+                  <span>文档</span>
+                  <span>错误</span>
+                </div>
+                <article v-for="job in failedIndexJobs" :key="job.id" class="entity-table__row">
+                  <div class="entity-cell">
+                    <input
+                      type="checkbox"
+                      :checked="selectedFailedIndexJobSet.has(job.id)"
+                      @change="onFailedIndexJobToggle(job.id, $event)"
+                    />
+                  </div>
+                  <div class="entity-main">
+                    <strong>{{ job.id }}</strong>
+                    <span>{{ job.job_type ?? "-" }}</span>
+                  </div>
+                  <div class="entity-cell">{{ formatImportJobKnowledgeBase(job) }}</div>
+                  <div class="entity-cell">{{ importJobStageLabel(job.stage) }} / {{ job.stage }}</div>
+                  <div class="entity-cell">{{ formatDocumentIds(job.document_ids) }}</div>
+                  <div class="entity-cell">{{ job.error_summary ?? "-" }}</div>
+                </article>
+              </div>
+              <p v-else class="empty-state empty-state--plain">当前没有失败的索引重建任务。</p>
+            </section>
+
             <div v-if="canReadImportJobs && adminImportJobs.length" class="entity-table entity-table--imports">
               <div class="entity-table__row entity-table__row--header">
                 <span>任务</span>
+                <span>类型</span>
                 <span>知识库</span>
                 <span>状态</span>
                 <span>阶段</span>
@@ -6115,6 +7253,7 @@ function isComposeDemoProvider(value: string): boolean {
                   <strong>{{ job.id }}</strong>
                   <span>{{ job.document_ids.length }} 个文档</span>
                 </div>
+                <div class="entity-cell">{{ job.job_type ?? "-" }}</div>
                 <div class="entity-cell">{{ formatImportJobKnowledgeBase(job) }}</div>
                 <div class="entity-cell">
                   <span :class="toneClass(importJobStatusTone(job.status))">{{ job.status }}</span>
@@ -6132,9 +7271,17 @@ function isComposeDemoProvider(value: string): boolean {
         <section v-if="selectedAdminTab === 'diagnostics'" class="panel panel--wide">
           <header class="panel__header">
             <div>
-              <h3>查询诊断</h3>
-              <p :class="toneClass(canLoadDiagnostics ? 'success' : 'warning')">
-                {{ canLoadDiagnostics ? "可读取查询日志与模型调用日志" : "缺少 audit:read" }}
+              <h3>诊断与索引运维</h3>
+              <p :class="toneClass(canLoadDiagnostics || canLoadIndexOps ? 'success' : 'warning')">
+                {{
+                  canLoadDiagnostics && canLoadIndexOps
+                    ? "可读取查询日志、模型调用日志与索引健康"
+                    : canLoadDiagnostics
+                      ? "可读取查询日志与模型调用日志，缺少 document:index"
+                      : canLoadIndexOps
+                        ? "可读取索引健康，缺少 audit:read"
+                        : "缺少 audit:read 和 document:index"
+                }}
               </p>
             </div>
             <div class="panel__actions">
@@ -6142,9 +7289,9 @@ function isComposeDemoProvider(value: string): boolean {
                 class="button button--secondary"
                 type="button"
                 @click="refreshDiagnosticsState"
-                :disabled="!canLoadDiagnostics || diagnosticsBusy.loadingQueryLogs || diagnosticsBusy.loadingModelCallLogs"
+                :disabled="(!canLoadDiagnostics && !canLoadIndexOps) || diagnosticsBusy.loadingQueryLogs || diagnosticsBusy.loadingModelCallLogs || diagnosticsBusy.loadingIndexHealth"
               >
-                {{ diagnosticsBusy.loadingQueryLogs || diagnosticsBusy.loadingModelCallLogs ? "刷新中" : "刷新诊断" }}
+                {{ diagnosticsBusy.loadingQueryLogs || diagnosticsBusy.loadingModelCallLogs || diagnosticsBusy.loadingIndexHealth ? "刷新中" : "刷新诊断" }}
               </button>
             </div>
           </header>
@@ -6153,6 +7300,189 @@ function isComposeDemoProvider(value: string): boolean {
             <div v-if="diagnosticsFeedback" :class="['feedback feedback--wide', `feedback--${diagnosticsFeedback.tone}`]">
               {{ diagnosticsFeedback.message }}
             </div>
+
+            <section class="diagnostics-pane">
+              <header class="resource-section__header">
+                <div>
+                  <h4>索引运维</h4>
+                  <p>对比 PostgreSQL 索引账本与 Qdrant collection 状态，暴露 pending_delete、维度和引用数量异常。</p>
+                </div>
+                <div class="panel__actions">
+                  <span>{{ diagnosticsBusy.loadingIndexHealth ? "读取中" : `${indexHealth.length} 个集合` }}</span>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    @click="refreshIndexHealth()"
+                    :disabled="!canLoadIndexOps || diagnosticsBusy.loadingIndexHealth"
+                  >
+                    {{ diagnosticsBusy.loadingIndexHealth ? "刷新中" : "刷新索引" }}
+                  </button>
+                </div>
+              </header>
+
+              <template v-if="indexHealth.length">
+                <div class="entity-table entity-table--index-health">
+                  <div class="entity-table__row entity-table__row--header">
+                    <span>Collection</span>
+                    <span>Qdrant</span>
+                    <span>版本</span>
+                    <span>Refs</span>
+                    <span>问题</span>
+                  </div>
+                  <article v-for="item in indexHealth" :key="item.collection_name" class="entity-table__row">
+                    <div class="entity-main">
+                      <strong>{{ item.collection_name }}</strong>
+                      <span>期望维度 {{ item.expected_dimension ?? "-" }}</span>
+                    </div>
+                    <div class="entity-cell">
+                      <span :class="toneClass(indexHealthTone(item))">
+                        {{
+                          item.qdrant_reachable
+                            ? `${item.qdrant_status ?? "unknown"} / ${item.qdrant_vector_size ?? "-"}d`
+                            : "unreachable"
+                        }}
+                      </span>
+                      <span>points {{ item.qdrant_points_count ?? "-" }} / exists {{ item.qdrant_exists === null ? "-" : formatBoolean(item.qdrant_exists) }}</span>
+                    </div>
+                    <div class="entity-cell">
+                      active {{ item.active_index_version_count }} /
+                      pending {{ item.pending_delete_index_version_count }} /
+                      failed {{ item.failed_index_version_count }}
+                    </div>
+                    <div class="entity-cell">
+                      active {{ item.active_ref_count }} /
+                      draft {{ item.draft_ref_count }} /
+                      deleted {{ item.deleted_ref_count }} /
+                      pending refs {{ item.pending_delete_ref_count }}
+                    </div>
+                    <div class="entity-cell">{{ formatIssueList(item.issues) }}</div>
+                  </article>
+                </div>
+
+                <section class="resource-block index-ops-panel">
+                  <header class="resource-section__header">
+                    <div>
+                      <h4>Qdrant 恢复入口</h4>
+                      <p>对选中的 collection 创建快照、从快照恢复，或把该 collection 的 active 文档重新排入索引重建任务。</p>
+                    </div>
+                    <span>{{ diagnosticsBusy.loadingIndexSnapshots ? "读取快照中" : `${indexCollectionSnapshots.length} 个快照` }}</span>
+                  </header>
+
+                  <form class="list-filter list-filter--index-ops" @submit.prevent="refreshIndexCollectionSnapshots()">
+                    <label class="field">
+                      <span class="field__label">Collection</span>
+                      <select
+                        v-model="indexCollectionOpsForm.selectedCollectionName"
+                        class="control"
+                        @change="onIndexCollectionSelectionChange"
+                      >
+                        <option
+                          v-for="item in indexHealth"
+                          :key="item.collection_name"
+                          :value="item.collection_name"
+                        >
+                          {{ item.collection_name }}
+                        </option>
+                      </select>
+                    </label>
+                    <button
+                      class="button button--secondary"
+                      type="submit"
+                      :disabled="!canLoadIndexOps || diagnosticsBusy.loadingIndexSnapshots"
+                    >
+                      {{ diagnosticsBusy.loadingIndexSnapshots ? "刷新中" : "刷新快照" }}
+                    </button>
+                    <label class="confirm confirm--inline">
+                      <input
+                        v-model="indexCollectionOpsForm.confirmedSnapshot"
+                        type="checkbox"
+                        :disabled="!selectedIndexCollectionHealth"
+                      />
+                      <span>确认创建 Qdrant 快照</span>
+                    </label>
+                    <button
+                      class="button"
+                      type="button"
+                      @click="createSelectedIndexCollectionSnapshot"
+                      :disabled="!canCreateIndexCollectionSnapshot"
+                    >
+                      {{ diagnosticsBusy.creatingIndexSnapshot ? "创建中..." : "创建快照" }}
+                    </button>
+                    <label class="confirm confirm--inline">
+                      <input
+                        v-model="indexCollectionOpsForm.confirmedRebuild"
+                        type="checkbox"
+                        :disabled="!selectedIndexCollectionHealth"
+                      />
+                      <span>确认重建 collection 索引</span>
+                    </label>
+                    <button
+                      class="button"
+                      type="button"
+                      @click="rebuildSelectedIndexCollection"
+                      :disabled="!canRebuildIndexCollection"
+                    >
+                      {{ diagnosticsBusy.rebuildingIndexCollection ? "创建中..." : "重建索引" }}
+                    </button>
+                  </form>
+
+                  <form class="list-filter list-filter--index-restore" @submit.prevent="recoverSelectedIndexCollectionSnapshot">
+                    <label class="field field--wide">
+                      <span class="field__label">Snapshot URL / File URI</span>
+                      <input
+                        v-model.trim="indexCollectionOpsForm.snapshotLocation"
+                        class="control"
+                        type="text"
+                        placeholder="https://example.com/snapshot.snapshot 或 file:///qdrant/snapshots/name.snapshot"
+                      />
+                    </label>
+                    <label class="field">
+                      <span class="field__label">Priority</span>
+                      <select v-model="indexCollectionOpsForm.recoverPriority" class="control">
+                        <option value="Snapshot">Snapshot</option>
+                        <option value="Replica">Replica</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span class="field__label">Checksum</span>
+                      <input v-model.trim="indexCollectionOpsForm.snapshotChecksum" class="control" type="text" />
+                    </label>
+                    <label class="confirm confirm--inline">
+                      <input
+                        v-model="indexCollectionOpsForm.confirmedRestore"
+                        type="checkbox"
+                        :disabled="!selectedIndexCollectionHealth || !indexCollectionOpsForm.snapshotLocation.trim()"
+                      />
+                      <span>确认恢复会覆盖当前 Qdrant collection 数据</span>
+                    </label>
+                    <button class="button button--danger" type="submit" :disabled="!canRecoverIndexCollectionSnapshot">
+                      {{ diagnosticsBusy.recoveringIndexSnapshot ? "恢复中..." : "恢复快照" }}
+                    </button>
+                  </form>
+
+                  <div v-if="indexCollectionSnapshots.length" class="entity-table entity-table--snapshots">
+                    <div class="entity-table__row entity-table__row--header">
+                      <span>快照</span>
+                      <span>大小</span>
+                      <span>创建时间</span>
+                      <span>Checksum</span>
+                    </div>
+                    <article v-for="snapshot in indexCollectionSnapshots" :key="snapshot.name" class="entity-table__row">
+                      <div class="entity-main">
+                        <strong>{{ snapshot.name }}</strong>
+                        <span>{{ snapshot.collection_name }}</span>
+                      </div>
+                      <div class="entity-cell">{{ snapshot.size ?? "-" }}</div>
+                      <div class="entity-cell">{{ snapshot.creation_time ?? "-" }}</div>
+                      <div class="entity-cell">{{ snapshot.checksum ?? "-" }}</div>
+                    </article>
+                  </div>
+                  <p v-else class="empty-state empty-state--plain">当前 collection 尚未读取到 Qdrant 快照。</p>
+                </section>
+              </template>
+              <p v-else-if="canLoadIndexOps" class="empty-state empty-state--plain">当前尚未读取到索引 collection。</p>
+              <p v-else class="empty-state empty-state--plain">当前账号缺少 document:index，无法查看索引运维诊断。</p>
+            </section>
 
             <section class="diagnostics-grid">
               <div class="diagnostics-pane">
@@ -6721,7 +8051,9 @@ function isComposeDemoProvider(value: string): boolean {
                         ? "权限策略"
                         : knowledgeBaseModalMode === "upload"
                           ? "添加文件"
-                          : "删除知识库"
+                          : knowledgeBaseModalMode === "rebuildIndex"
+                            ? "重建索引"
+                            : "删除知识库"
                 }}
               </h3>
             </div>
@@ -7026,8 +8358,52 @@ function isComposeDemoProvider(value: string): boolean {
             </footer>
           </form>
 
-          <form v-else-if="knowledgeBaseModalMode === 'upload' && selectedImportKnowledgeBase" @submit.prevent="submitDocumentUpload">
+          <div v-else-if="knowledgeBaseModalMode === 'rebuildIndex' && selectedKnowledgeBase">
             <div class="modal__body">
+              <dl class="summary summary--compact modal-summary">
+                <div class="summary__row">
+                  <dt>知识库</dt>
+                  <dd>{{ formatKnowledgeBaseLabel(selectedKnowledgeBase) }}</dd>
+                </div>
+                <div class="summary__row">
+                  <dt>当前策略</dt>
+                  <dd>
+                    {{ knowledgeBaseVisibilityLabel(selectedKnowledgeBase.kb_visibility) }} /
+                    默认文档{{ documentVisibilityLabel(selectedKnowledgeBase.default_document_visibility) }}
+                  </dd>
+                </div>
+              </dl>
+              <div class="danger-panel">
+                <h4>确认重建知识库索引</h4>
+                <p>
+                  将为该知识库下 active 且已有当前版本的文档创建批量 index_rebuild 任务。任务会从 embed 阶段重新生成向量并发布新索引版本。
+                </p>
+                <label class="confirm confirm--inline">
+                  <input v-model="knowledgeBaseIndexForm.confirmedRebuild" type="checkbox" />
+                  <span>确认重建该知识库索引</span>
+                </label>
+              </div>
+              <div v-if="importAdminFeedback" :class="['feedback feedback--wide', `feedback--${importAdminFeedback.tone}`]">
+                {{ importAdminFeedback.message }}
+              </div>
+            </div>
+            <footer class="modal__footer">
+              <button class="button button--secondary" type="button" @click="closeKnowledgeBaseModal">
+                取消
+              </button>
+              <button
+                class="button"
+                type="button"
+                @click="rebuildSelectedKnowledgeBaseIndex"
+                :disabled="!canRebuildSelectedKnowledgeBaseIndex"
+              >
+                {{ importAdminBusy.rebuildingIndex ? "创建中..." : "创建重建任务" }}
+              </button>
+            </footer>
+          </div>
+
+	          <form v-else-if="knowledgeBaseModalMode === 'upload' && selectedImportKnowledgeBase" @submit.prevent="submitDocumentUpload">
+	            <div class="modal__body">
               <dl class="summary summary--compact modal-summary">
                 <div class="summary__row">
                   <dt>目标知识库</dt>
@@ -8627,6 +10003,14 @@ function isComposeDemoProvider(value: string): boolean {
   grid-template-columns: repeat(4, minmax(150px, 1fr)) auto;
 }
 
+.list-filter--index-ops {
+  grid-template-columns: minmax(220px, 1fr) auto minmax(180px, 0.7fr) auto minmax(190px, 0.75fr) auto;
+}
+
+.list-filter--index-restore {
+  grid-template-columns: minmax(260px, 1.2fr) minmax(130px, 0.45fr) minmax(160px, 0.6fr) minmax(260px, 1fr) auto;
+}
+
 .list-filter--model-calls {
   grid-template-columns: repeat(6, minmax(130px, 1fr)) auto;
 }
@@ -8670,6 +10054,11 @@ function isComposeDemoProvider(value: string): boolean {
   min-width: 0;
   display: grid;
   gap: 14px;
+}
+
+.index-ops-panel {
+  padding-top: 12px;
+  border-top: 1px solid #e7ebf0;
 }
 
 .resource-section__header,
@@ -8722,6 +10111,80 @@ function isComposeDemoProvider(value: string): boolean {
 
 .document-detail-pane--preview {
   grid-column: 1 / -1;
+}
+
+.index-version-list {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.index-version-row {
+  min-width: 0;
+  border: 1px solid #e1e6ee;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.index-version-row--selectable {
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+}
+
+.index-version-row__selector {
+  margin-top: 3px;
+}
+
+.index-version-row__body {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.index-version-row header {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: start;
+}
+
+.index-version-row strong,
+.index-version-row dd {
+  overflow-wrap: anywhere;
+}
+
+.index-version-row dl {
+  min-width: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.index-version-row dt {
+  margin: 0 0 2px;
+  color: #667182;
+  font-size: 12px;
+}
+
+.index-version-row dd {
+  margin: 0;
+  color: #1d2935;
+  font-size: 12px;
+}
+
+.index-rebuild-panel {
+  min-width: 0;
+  border-top: 1px solid #e7ebf0;
+  padding-top: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
 }
 
 .chunk-preview-list {
@@ -8941,6 +10404,18 @@ function isComposeDemoProvider(value: string): boolean {
   gap: 10px;
 }
 
+.batch-action-bar {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 12px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
 .entity-table {
   min-width: 0;
   display: grid;
@@ -8982,8 +10457,24 @@ function isComposeDemoProvider(value: string): boolean {
   grid-template-columns: minmax(220px, 1.25fr) minmax(120px, 0.6fr) minmax(100px, 0.5fr) minmax(110px, 0.55fr) minmax(190px, 0.9fr) minmax(150px, 0.75fr) minmax(190px, 0.9fr);
 }
 
+.entity-table--documents-selectable .entity-table__row {
+  grid-template-columns: 44px minmax(220px, 1.25fr) minmax(120px, 0.6fr) minmax(100px, 0.5fr) minmax(110px, 0.55fr) minmax(190px, 0.9fr) minmax(150px, 0.75fr) minmax(190px, 0.9fr);
+}
+
 .entity-table--imports .entity-table__row {
-  grid-template-columns: minmax(220px, 1.2fr) minmax(160px, 0.8fr) minmax(100px, 0.5fr) minmax(130px, 0.65fr) minmax(140px, 0.7fr) minmax(160px, 0.8fr);
+  grid-template-columns: minmax(220px, 1.2fr) minmax(100px, 0.5fr) minmax(160px, 0.8fr) minmax(100px, 0.5fr) minmax(130px, 0.65fr) minmax(140px, 0.7fr) minmax(160px, 0.8fr);
+}
+
+.entity-table--index-jobs .entity-table__row {
+  grid-template-columns: 44px minmax(220px, 1.2fr) minmax(160px, 0.8fr) minmax(130px, 0.65fr) minmax(140px, 0.7fr) minmax(180px, 0.9fr);
+}
+
+.entity-table--index-health .entity-table__row {
+  grid-template-columns: minmax(220px, 1.2fr) minmax(170px, 0.8fr) minmax(160px, 0.75fr) minmax(230px, 1fr) minmax(180px, 0.9fr);
+}
+
+.entity-table--snapshots .entity-table__row {
+  grid-template-columns: minmax(240px, 1.2fr) minmax(90px, 0.4fr) minmax(180px, 0.8fr) minmax(180px, 0.8fr);
 }
 
 .entity-table--query-logs .entity-table__row {
@@ -9829,6 +11320,9 @@ function isComposeDemoProvider(value: string): boolean {
   .entity-table--folders .entity-table__row,
   .entity-table--documents .entity-table__row,
   .entity-table--imports .entity-table__row,
+  .entity-table--index-jobs .entity-table__row,
+  .entity-table--index-health .entity-table__row,
+  .entity-table--snapshots .entity-table__row,
   .entity-table--query-logs .entity-table__row,
   .entity-table--model-calls .entity-table__row {
     grid-template-columns: 1fr;
@@ -9872,6 +11366,8 @@ function isComposeDemoProvider(value: string): boolean {
   .list-filter--imports,
   .list-filter--documents,
   .list-filter--diagnostics,
+  .list-filter--index-ops,
+  .list-filter--index-restore,
   .list-filter--model-calls,
   .modal__header,
   .modal__footer,

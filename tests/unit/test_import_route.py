@@ -56,6 +56,7 @@ def _auth_context() -> AuthContext:
                     "import_job:read:self",
                     "import_job:manage:self",
                     "import_job:read",
+                    "document:index",
                 ),
             ),
         ),
@@ -73,6 +74,7 @@ def _auth_context() -> AuthContext:
             "import_job:read:self",
             "import_job:manage:self",
             "import_job:read",
+            "document:index",
         ),
     )
     return AuthContext(
@@ -281,18 +283,72 @@ def test_admin_import_job_list_route(monkeypatch) -> None:
         "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
         lambda *_args, **_kwargs: _auth_context(),
     )
+    captured: dict[str, object] = {}
+
+    def _list_import_jobs(_self, _session, **kwargs):
+        captured.update(kwargs)
+        return ImportJobList(items=(_job(),), total=1)
+
     monkeypatch.setattr(
         "app.api.routes.import_pipeline.ImportService.list_import_jobs",
-        lambda *_args, **_kwargs: ImportJobList(items=(_job(),), total=1),
+        _list_import_jobs,
     )
 
     response = TestClient(app).get(
-        "/internal/v1/admin/import-jobs",
+        "/internal/v1/admin/import-jobs?job_type=index_rebuild",
         headers={"Authorization": "Bearer token"},
     )
 
     assert response.status_code == 200
+    assert captured["job_type"] == "index_rebuild"
     assert response.json()["pagination"]["total"] == 1
+
+
+def test_admin_index_job_retry_route_requires_document_index(monkeypatch) -> None:
+    app = _create_test_app()
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    captured: dict[str, object] = {}
+
+    def _authenticate(*_args, **kwargs):
+        captured["required_scope"] = kwargs["required_scope"]
+        return _auth_context()
+
+    def _retry_index_jobs(_self, _session, **kwargs):
+        captured.update(kwargs)
+        return ImportJobList(
+            items=(
+                ImportJob(
+                    id="88888888-8888-8888-8888-888888888888",
+                    kb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    status="queued",
+                    stage="embed",
+                    document_ids=("44444444-4444-4444-4444-444444444444",),
+                    job_type="index_rebuild",
+                ),
+            ),
+            total=1,
+        )
+
+    monkeypatch.setattr(
+        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        _authenticate,
+    )
+    monkeypatch.setattr(
+        "app.api.routes.import_pipeline.ImportService.create_index_job_retries",
+        _retry_index_jobs,
+    )
+
+    response = TestClient(app).post(
+        "/internal/v1/admin/index-jobs/retries",
+        headers={"Authorization": "Bearer token", "x-index-confirm": "retry"},
+        json={"job_ids": ["99999999-9999-9999-9999-999999999999"]},
+    )
+
+    assert response.status_code == 202
+    assert captured["required_scope"] == "document:index"
+    assert captured["job_ids"] == ["99999999-9999-9999-9999-999999999999"]
+    assert response.json()["data"][0]["job_type"] == "index_rebuild"
 
 
 def test_import_route_returns_service_error(monkeypatch) -> None:

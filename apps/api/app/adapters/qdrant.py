@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -14,6 +15,24 @@ from app.modules.retrieval import RetrievalCandidate, VectorSearchResult
 
 if TYPE_CHECKING:
     from app.modules.indexing.schemas import DraftVectorPoint, VectorPayloadUpdate
+
+
+@dataclass(frozen=True)
+class QdrantCollectionInfo:
+    collection_name: str
+    exists: bool
+    status: str | None = None
+    vector_size: int | None = None
+    points_count: int | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class QdrantSnapshotInfo:
+    name: str
+    size: int | None = None
+    creation_time: str | None = None
+    checksum: str | None = None
 
 
 class QdrantVectorRetriever:
@@ -254,6 +273,129 @@ class QdrantVectorIndexWriter:
                 api_key=self.api_key,
             )
 
+    def delete_points(self, *, collection_name: str, vector_ids: tuple[str, ...]) -> None:
+        if not vector_ids:
+            return
+        if not collection_name:
+            raise QdrantClientError("qdrant collection name is empty")
+        _send_json(
+            _points_delete_url(self.base_url, collection_name),
+            {"points": list(dict.fromkeys(vector_ids))},
+            method="POST",
+            timeout_seconds=self.timeout_seconds,
+            api_key=self.api_key,
+        )
+
+
+class QdrantOpsClient:
+    """Qdrant 运维客户端。
+
+    高风险确认、权限和审计由上层 Index Ops Service 负责，这里只封装 Qdrant
+    collection 级诊断、snapshot 和 recover HTTP 调用。
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None = None,
+        timeout_seconds: float = 3.0,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+
+    def collection_info(self, collection_name: str) -> QdrantCollectionInfo:
+        if not collection_name:
+            raise QdrantClientError("qdrant collection name is empty")
+        try:
+            response = _send_json(
+                _collection_url(self.base_url, collection_name),
+                None,
+                method="GET",
+                timeout_seconds=self.timeout_seconds,
+                api_key=self.api_key,
+            )
+        except QdrantClientError as exc:
+            if exc.status_code == 404:
+                return QdrantCollectionInfo(collection_name=collection_name, exists=False)
+            raise
+
+        points_count = _collection_points_count(response)
+        count_error: str | None = None
+        try:
+            count_response = _send_json(
+                _points_count_url(self.base_url, collection_name),
+                {"exact": True},
+                method="POST",
+                timeout_seconds=self.timeout_seconds,
+                api_key=self.api_key,
+            )
+            points_count = _count_points(count_response)
+        except QdrantClientError as exc:
+            count_error = str(exc)
+        return QdrantCollectionInfo(
+            collection_name=collection_name,
+            exists=True,
+            status=_collection_status(response),
+            vector_size=_collection_vector_size(response),
+            points_count=points_count,
+            error=count_error,
+        )
+
+    def list_collection_snapshots(self, collection_name: str) -> tuple[QdrantSnapshotInfo, ...]:
+        if not collection_name:
+            raise QdrantClientError("qdrant collection name is empty")
+        response = _send_json(
+            _collection_snapshots_url(self.base_url, collection_name),
+            None,
+            method="GET",
+            timeout_seconds=self.timeout_seconds,
+            api_key=self.api_key,
+        )
+        return tuple(_snapshot_info(item) for item in _snapshot_list(response))
+
+    def create_collection_snapshot(self, collection_name: str) -> QdrantSnapshotInfo:
+        if not collection_name:
+            raise QdrantClientError("qdrant collection name is empty")
+        response = _send_json(
+            _collection_snapshots_url(self.base_url, collection_name),
+            None,
+            method="POST",
+            timeout_seconds=self.timeout_seconds,
+            api_key=self.api_key,
+        )
+        return _snapshot_info(_result_object(response))
+
+    def recover_collection_snapshot(
+        self,
+        collection_name: str,
+        *,
+        location: str,
+        priority: str | None = None,
+        checksum: str | None = None,
+    ) -> bool:
+        if not collection_name:
+            raise QdrantClientError("qdrant collection name is empty")
+        if not location:
+            raise QdrantClientError("qdrant snapshot location is empty")
+        payload: dict[str, Any] = {"location": location}
+        if priority:
+            payload["priority"] = priority
+        if checksum:
+            payload["checksum"] = checksum
+        response = _send_json(
+            _collection_snapshot_recover_url(self.base_url, collection_name),
+            payload,
+            method="PUT",
+            timeout_seconds=self.timeout_seconds,
+            api_key=self.api_key,
+        )
+        result = response.get("result") if isinstance(response, dict) else None
+        if not isinstance(result, bool):
+            raise QdrantClientError("qdrant snapshot recover response is invalid")
+        return result
+
 
 class QdrantClientError(Exception):
     """Qdrant 请求或响应不可用。"""
@@ -401,6 +543,16 @@ def _points_url(base_url: str, collection_name: str) -> str:
     return f"{base_url.rstrip('/')}/collections/{encoded_collection}/points"
 
 
+def _points_count_url(base_url: str, collection_name: str) -> str:
+    encoded_collection = quote(collection_name, safe="")
+    return f"{base_url.rstrip('/')}/collections/{encoded_collection}/points/count"
+
+
+def _points_delete_url(base_url: str, collection_name: str) -> str:
+    encoded_collection = quote(collection_name, safe="")
+    return f"{base_url.rstrip('/')}/collections/{encoded_collection}/points/delete"
+
+
 def _payload_url(base_url: str, collection_name: str) -> str:
     encoded_collection = quote(collection_name, safe="")
     return f"{base_url.rstrip('/')}/collections/{encoded_collection}/points/payload"
@@ -409,6 +561,16 @@ def _payload_url(base_url: str, collection_name: str) -> str:
 def _collection_url(base_url: str, collection_name: str) -> str:
     encoded_collection = quote(collection_name, safe="")
     return f"{base_url.rstrip('/')}/collections/{encoded_collection}"
+
+
+def _collection_snapshots_url(base_url: str, collection_name: str) -> str:
+    encoded_collection = quote(collection_name, safe="")
+    return f"{base_url.rstrip('/')}/collections/{encoded_collection}/snapshots"
+
+
+def _collection_snapshot_recover_url(base_url: str, collection_name: str) -> str:
+    encoded_collection = quote(collection_name, safe="")
+    return f"{base_url.rstrip('/')}/collections/{encoded_collection}/snapshots/recover"
 
 
 def _collection_vector_size(response: Any) -> int | None:
@@ -432,6 +594,72 @@ def _collection_vector_size(response: Any) -> int | None:
         if isinstance(default_vector, dict) and isinstance(default_vector.get("size"), int):
             return int(default_vector["size"])
     return None
+
+
+def _collection_status(response: Any) -> str | None:
+    if not isinstance(response, dict):
+        return None
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None
+    status = result.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _collection_points_count(response: Any) -> int | None:
+    if not isinstance(response, dict):
+        return None
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None
+    value = result.get("points_count")
+    if isinstance(value, int):
+        return value
+    value = result.get("vectors_count")
+    return value if isinstance(value, int) else None
+
+
+def _count_points(response: Any) -> int | None:
+    if not isinstance(response, dict):
+        return None
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None
+    count = result.get("count")
+    return count if isinstance(count, int) else None
+
+
+def _snapshot_list(response: Any) -> list[dict[str, Any]]:
+    if not isinstance(response, dict):
+        raise QdrantClientError("qdrant response must be a JSON object")
+    result = response.get("result")
+    if not isinstance(result, list):
+        raise QdrantClientError("qdrant response does not contain snapshot list")
+    return [item for item in result if isinstance(item, dict)]
+
+
+def _result_object(response: Any) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise QdrantClientError("qdrant response must be a JSON object")
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise QdrantClientError("qdrant response does not contain result object")
+    return result
+
+
+def _snapshot_info(item: dict[str, Any]) -> QdrantSnapshotInfo:
+    name = item.get("name")
+    if not isinstance(name, str) or not name:
+        raise QdrantClientError("qdrant snapshot response does not contain name")
+    size = item.get("size")
+    creation_time = item.get("creation_time")
+    checksum = item.get("checksum")
+    return QdrantSnapshotInfo(
+        name=name,
+        size=int(size) if isinstance(size, (int, float)) else None,
+        creation_time=creation_time if isinstance(creation_time, str) else None,
+        checksum=checksum if isinstance(checksum, str) else None,
+    )
 
 
 def _http_error_message(status: int, response_body: bytes | None) -> str:

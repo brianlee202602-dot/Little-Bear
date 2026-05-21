@@ -11,8 +11,6 @@ CONTRACT_PATH = Path("docs/contracts/openapi.yaml")
 # OpenAPI 中已经冻结、但当前后端尚未挂载的 P0/P1 契约。后续每实现一个接口，
 # 都应从这里删除对应项，让测试成为开发进度的细颗粒提醒。
 EXPECTED_CONTRACT_ONLY_OPERATIONS = {
-    ("/internal/v1/admin/documents/{doc_id}/index-jobs", "POST"),
-    ("/internal/v1/admin/documents/{doc_id}/index-versions", "GET"),
     ("/internal/v1/admin/roles", "POST"),
     ("/internal/v1/admin/roles/{role_id}", "DELETE"),
     ("/internal/v1/admin/roles/{role_id}", "PATCH"),

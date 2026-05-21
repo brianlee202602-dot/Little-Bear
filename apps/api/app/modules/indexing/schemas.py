@@ -62,3 +62,41 @@ class ReadyIndexVersion:
     dimension: int
     chunk_count: int
     permission_version: int
+
+
+@dataclass(frozen=True)
+class IndexCollectionHealth:
+    collection_name: str
+    expected_dimension: int | None
+    qdrant_reachable: bool
+    qdrant_exists: bool | None
+    qdrant_status: str | None
+    qdrant_vector_size: int | None
+    qdrant_points_count: int | None
+    db_index_version_count: int
+    active_index_version_count: int
+    pending_delete_index_version_count: int
+    failed_index_version_count: int
+    active_ref_count: int
+    draft_ref_count: int
+    deleted_ref_count: int
+    pending_delete_ref_count: int
+    active_ref_mismatch_count: int
+    issues: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class IndexCollectionSnapshot:
+    collection_name: str
+    name: str
+    size: int | None = None
+    creation_time: str | None = None
+    checksum: str | None = None
+
+
+@dataclass(frozen=True)
+class IndexCollectionOperationResult:
+    collection_name: str
+    operation: str
+    accepted: bool
+    result: bool | None = None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 
@@ -139,6 +140,21 @@ class AdminDocumentVersion:
     document_id: str
     version_no: int
     status: str
+
+
+@dataclass(frozen=True)
+class AdminIndexVersion:
+    id: str
+    document_id: str
+    document_version_id: str
+    embedding_model: str
+    model_version: str
+    dimension: int
+    collection_name: str
+    status: str
+    chunk_count: int
+    created_at: datetime | None = None
+    activated_at: datetime | None = None
 
 
 @dataclass(frozen=True)

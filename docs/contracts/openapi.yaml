@@ -575,6 +575,10 @@ paths:
           in: query
           schema:
             type: string
+        - name: job_type
+          in: query
+          schema:
+            type: string
         - name: created_by
           in: query
           schema:
@@ -605,6 +609,39 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ImportJobResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/index-jobs/retries:
+    post:
+      tags: [AdminIndexOps]
+      summary: Retry failed index rebuild jobs
+      operationId: adminRetryIndexJobs
+      x-token-type: access
+      x-required-scope: document:index
+      x-audit-required: true
+      x-confirmation-required: true
+      x-confirmation-condition: always
+      parameters:
+        - name: x-index-confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: [retry]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IndexJobRetryRequest"
+      responses:
+        "202":
+          description: Retry jobs queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportJobListResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -926,9 +963,81 @@ paths:
       x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/DocId"
+        - name: x-index-confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: [rebuild]
       responses:
         "202":
           description: Index job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/index-jobs:
+    post:
+      tags: [AdminIndexOps]
+      summary: Create batch index rebuild job
+      operationId: adminCreateIndexJob
+      x-token-type: access
+      x-required-scope: document:index
+      x-audit-required: true
+      x-confirmation-required: true
+      x-confirmation-condition: always
+      parameters:
+        - name: x-index-confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: [rebuild]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IndexJobCreateRequest"
+      responses:
+        "202":
+          description: Index job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/index-versions/cleanup-jobs:
+    post:
+      tags: [AdminIndexOps]
+      summary: Create index version cleanup job
+      operationId: adminCreateIndexVersionCleanupJob
+      x-token-type: access
+      x-required-scope: document:index
+      x-audit-required: true
+      x-confirmation-required: true
+      x-confirmation-condition: always
+      parameters:
+        - name: x-index-confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: [cleanup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IndexVersionCleanupJobCreateRequest"
+      responses:
+        "202":
+          description: Index cleanup job accepted
           content:
             application/json:
               schema:
@@ -1011,6 +1120,140 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IndexVersionListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/index-health:
+    get:
+      tags: [AdminIndexOps]
+      summary: Admin inspect index collection health
+      operationId: adminGetIndexHealth
+      x-token-type: access
+      x-required-scope: document:index
+      responses:
+        "200":
+          description: Index collection health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexHealthResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/index-collections/{collection_name}/snapshots:
+    get:
+      tags: [AdminIndexOps]
+      summary: Admin list Qdrant collection snapshots
+      operationId: adminListIndexCollectionSnapshots
+      x-token-type: access
+      x-required-scope: document:index
+      parameters:
+        - name: collection_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Collection snapshots
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexCollectionSnapshotListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [AdminIndexOps]
+      summary: Admin create Qdrant collection snapshot
+      operationId: adminCreateIndexCollectionSnapshot
+      x-token-type: access
+      x-required-scope: document:index
+      x-audit-required: true
+      parameters:
+        - name: collection_name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: x-index-confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: [snapshot]
+      responses:
+        "200":
+          description: Created collection snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexCollectionSnapshotResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/index-collections/{collection_name}/snapshot-recoveries:
+    put:
+      tags: [AdminIndexOps]
+      summary: Admin recover Qdrant collection from snapshot
+      operationId: adminRecoverIndexCollectionSnapshot
+      x-token-type: access
+      x-required-scope: document:index
+      x-audit-required: true
+      parameters:
+        - name: collection_name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: x-index-confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: [restore]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IndexCollectionSnapshotRecoverRequest"
+      responses:
+        "202":
+          description: Snapshot recovery accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexCollectionOperationResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/index-collections/{collection_name}/rebuild-jobs:
+    post:
+      tags: [AdminIndexOps]
+      summary: Admin create Qdrant collection index rebuild job
+      operationId: adminCreateIndexCollectionRebuildJob
+      x-token-type: access
+      x-required-scope: document:index
+      x-audit-required: true
+      parameters:
+        - name: collection_name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: x-index-confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            enum: [rebuild]
+      responses:
+        "202":
+          description: Collection index rebuild job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -3097,11 +3340,26 @@ components:
           type: string
         document_id:
           type: string
+        document_version_id:
+          type: string
+        embedding_model:
+          type: string
+        model_version:
+          type: string
+        dimension:
+          type: integer
+        collection_name:
+          type: string
         status:
           type: string
           enum: [draft, ready, active, archived, pending_delete, failed]
         chunk_count:
           type: integer
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        activated_at:
+          type: [string, "null"]
+          format: date-time
     IndexVersionListResponse:
       type: object
       properties:
@@ -3111,6 +3369,141 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/IndexVersion"
+
+    IndexCollectionHealth:
+      type: object
+      properties:
+        collection_name:
+          type: string
+        expected_dimension:
+          type: [integer, "null"]
+        qdrant_reachable:
+          type: boolean
+        qdrant_exists:
+          type: [boolean, "null"]
+        qdrant_status:
+          type: [string, "null"]
+        qdrant_vector_size:
+          type: [integer, "null"]
+        qdrant_points_count:
+          type: [integer, "null"]
+        db_index_version_count:
+          type: integer
+        active_index_version_count:
+          type: integer
+        pending_delete_index_version_count:
+          type: integer
+        failed_index_version_count:
+          type: integer
+        active_ref_count:
+          type: integer
+        draft_ref_count:
+          type: integer
+        deleted_ref_count:
+          type: integer
+        pending_delete_ref_count:
+          type: integer
+        active_ref_mismatch_count:
+          type: integer
+        issues:
+          type: array
+          items:
+            type: string
+    IndexHealthResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/IndexCollectionHealth"
+
+    IndexCollectionSnapshot:
+      type: object
+      properties:
+        collection_name:
+          type: string
+        name:
+          type: string
+        size:
+          type: [integer, "null"]
+        creation_time:
+          type: [string, "null"]
+        checksum:
+          type: [string, "null"]
+    IndexCollectionSnapshotResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/IndexCollectionSnapshot"
+    IndexCollectionSnapshotListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/IndexCollectionSnapshot"
+    IndexCollectionSnapshotRecoverRequest:
+      type: object
+      required: [location]
+      properties:
+        location:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        priority:
+          type: [string, "null"]
+          enum: [Snapshot, Replica, null]
+          default: Snapshot
+        checksum:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+    IndexCollectionOperation:
+      type: object
+      properties:
+        collection_name:
+          type: string
+        operation:
+          type: string
+          enum: [snapshot_recover]
+        accepted:
+          type: boolean
+        result:
+          type: [boolean, "null"]
+    IndexCollectionOperationResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/IndexCollectionOperation"
+
+    IndexJobCreateRequest:
+      type: object
+      properties:
+        kb_id:
+          type: [string, "null"]
+        document_ids:
+          type: array
+          maxItems: 200
+          items:
+            type: string
+    IndexVersionCleanupJobCreateRequest:
+      type: object
+      required: [index_version_ids]
+      properties:
+        index_version_ids:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            type: string
 
     DocumentUploadRequest:
       type: object
@@ -3163,7 +3556,9 @@ components:
         id:
           type: string
         kb_id:
-          type: string
+          type: [string, "null"]
+        job_type:
+          type: [string, "null"]
         status:
           $ref: "#/components/schemas/ImportJobStatus"
         stage:
@@ -3175,6 +3570,16 @@ components:
             type: string
         error_summary:
           type: [string, "null"]
+    IndexJobRetryRequest:
+      type: object
+      required: [job_ids]
+      properties:
+        job_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: string
     ImportJobPatchRequest:
       type: object
       required: [status]

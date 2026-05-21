@@ -34,11 +34,18 @@ class ImportJobPatchRequest(BaseModel):
     status: Literal["cancelled"]
 
 
+class IndexJobRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_ids: list[str] = Field(min_length=1, max_length=100)
+
+
 class ImportJobData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
     kb_id: str | None = None
+    job_type: str | None = None
     status: Literal[
         "queued",
         "running",

@@ -388,6 +388,95 @@ export interface DocumentVersionListResponse {
   data: DocumentVersionData[];
 }
 
+export interface IndexVersionData {
+  id: string;
+  document_id: string;
+  document_version_id: string;
+  embedding_model: string;
+  model_version: string;
+  dimension: number;
+  collection_name: string;
+  status: "draft" | "ready" | "active" | "archived" | "pending_delete" | "failed";
+  chunk_count: number;
+  created_at: string | null;
+  activated_at: string | null;
+}
+
+export interface IndexVersionListResponse {
+  request_id: string;
+  data: IndexVersionData[];
+}
+
+export interface IndexCollectionHealthData {
+  collection_name: string;
+  expected_dimension: number | null;
+  qdrant_reachable: boolean;
+  qdrant_exists: boolean | null;
+  qdrant_status: string | null;
+  qdrant_vector_size: number | null;
+  qdrant_points_count: number | null;
+  db_index_version_count: number;
+  active_index_version_count: number;
+  pending_delete_index_version_count: number;
+  failed_index_version_count: number;
+  active_ref_count: number;
+  draft_ref_count: number;
+  deleted_ref_count: number;
+  pending_delete_ref_count: number;
+  active_ref_mismatch_count: number;
+  issues: string[];
+}
+
+export interface IndexHealthResponse {
+  request_id: string;
+  data: IndexCollectionHealthData[];
+}
+
+export interface IndexCollectionSnapshotData {
+  collection_name: string;
+  name: string;
+  size: number | null;
+  creation_time: string | null;
+  checksum: string | null;
+}
+
+export interface IndexCollectionSnapshotResponse {
+  request_id: string;
+  data: IndexCollectionSnapshotData;
+}
+
+export interface IndexCollectionSnapshotListResponse {
+  request_id: string;
+  data: IndexCollectionSnapshotData[];
+}
+
+export interface IndexCollectionSnapshotRecoverRequest {
+  location: string;
+  priority?: "Snapshot" | "Replica" | null;
+  checksum?: string | null;
+}
+
+export interface IndexCollectionOperationData {
+  collection_name: string;
+  operation: "snapshot_recover";
+  accepted: boolean;
+  result: boolean | null;
+}
+
+export interface IndexCollectionOperationResponse {
+  request_id: string;
+  data: IndexCollectionOperationData;
+}
+
+export interface IndexJobCreateRequest {
+  kb_id?: string | null;
+  document_ids?: string[];
+}
+
+export interface IndexVersionCleanupJobCreateRequest {
+  index_version_ids: string[];
+}
+
 export interface ChunkData {
   id: string;
   document_id: string;
@@ -495,6 +584,7 @@ export type ImportJobStage =
 export interface ImportJobData {
   id: string;
   kb_id: string | null;
+  job_type: string | null;
   status: ImportJobStatus;
   stage: ImportJobStage;
   document_ids: string[];
@@ -510,6 +600,10 @@ export interface ImportJobListResponse {
   request_id: string;
   data: ImportJobData[];
   pagination: PaginationData;
+}
+
+export interface IndexJobRetryRequest {
+  job_ids: string[];
 }
 
 export interface AdminRoleData {
@@ -1291,6 +1385,130 @@ export async function getAdminDocumentPreview(
   );
 }
 
+export async function listAdminDocumentIndexVersions(
+  documentId: string,
+  accessToken: string,
+): Promise<IndexVersionListResponse> {
+  return requestJson<IndexVersionListResponse>(
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/index-versions`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function createAdminDocumentIndexJob(
+  documentId: string,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<AcceptedResponse> {
+  return requestJson<AcceptedResponse>(
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/index-jobs`,
+    {
+      method: "POST",
+      headers: confirmed ? { "x-index-confirm": "rebuild" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function createAdminIndexJob(
+  payload: IndexJobCreateRequest,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<AcceptedResponse> {
+  return requestJson<AcceptedResponse>(
+    "/internal/v1/admin/index-jobs",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: confirmed ? { "x-index-confirm": "rebuild" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function createAdminIndexVersionCleanupJob(
+  payload: IndexVersionCleanupJobCreateRequest,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<AcceptedResponse> {
+  return requestJson<AcceptedResponse>(
+    "/internal/v1/admin/index-versions/cleanup-jobs",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: confirmed ? { "x-index-confirm": "cleanup" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function getAdminIndexHealth(accessToken: string): Promise<IndexHealthResponse> {
+  return requestJson<IndexHealthResponse>(
+    "/internal/v1/admin/index-health",
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminIndexCollectionSnapshots(
+  collectionName: string,
+  accessToken: string,
+): Promise<IndexCollectionSnapshotListResponse> {
+  return requestJson<IndexCollectionSnapshotListResponse>(
+    `/internal/v1/admin/index-collections/${encodeURIComponent(collectionName)}/snapshots`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function createAdminIndexCollectionSnapshot(
+  collectionName: string,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<IndexCollectionSnapshotResponse> {
+  return requestJson<IndexCollectionSnapshotResponse>(
+    `/internal/v1/admin/index-collections/${encodeURIComponent(collectionName)}/snapshots`,
+    {
+      method: "POST",
+      headers: confirmed ? { "x-index-confirm": "snapshot" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function recoverAdminIndexCollectionSnapshot(
+  collectionName: string,
+  payload: IndexCollectionSnapshotRecoverRequest,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<IndexCollectionOperationResponse> {
+  return requestJson<IndexCollectionOperationResponse>(
+    `/internal/v1/admin/index-collections/${encodeURIComponent(collectionName)}/snapshot-recoveries`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+      headers: confirmed ? { "x-index-confirm": "restore" } : undefined,
+    },
+    accessToken,
+  );
+}
+
+export async function createAdminIndexCollectionRebuildJob(
+  collectionName: string,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<AcceptedResponse> {
+  return requestJson<AcceptedResponse>(
+    `/internal/v1/admin/index-collections/${encodeURIComponent(collectionName)}/rebuild-jobs`,
+    {
+      method: "POST",
+      headers: confirmed ? { "x-index-confirm": "rebuild" } : undefined,
+    },
+    accessToken,
+  );
+}
+
 export async function putKnowledgeBasePermissions(
   kbId: string,
   payload: KnowledgeBasePermissionPutRequest,
@@ -1370,6 +1588,7 @@ export async function listAdminImportJobs(
     status?: string;
     stage?: string;
     kb_id?: string;
+    job_type?: string;
   } = {},
 ): Promise<ImportJobListResponse> {
   const params = new URLSearchParams({
@@ -1385,9 +1604,28 @@ export async function listAdminImportJobs(
   if (filters.kb_id) {
     params.set("kb_id", filters.kb_id);
   }
+  if (filters.job_type) {
+    params.set("job_type", filters.job_type);
+  }
   return requestJson<ImportJobListResponse>(
     `/internal/v1/admin/import-jobs?${params.toString()}`,
     { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function retryAdminIndexJobs(
+  payload: IndexJobRetryRequest,
+  accessToken: string,
+  confirmed: boolean,
+): Promise<ImportJobListResponse> {
+  return requestJson<ImportJobListResponse>(
+    "/internal/v1/admin/index-jobs/retries",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: confirmed ? { "x-index-confirm": "retry" } : undefined,
+    },
     accessToken,
   );
 }

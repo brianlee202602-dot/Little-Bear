@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
@@ -971,6 +973,248 @@ def test_get_document_preview_reads_full_chunk_text_from_object_storage(monkeypa
     sql, params = session.executed[0]
     assert "FROM chunks" in sql
     assert params["doc_id"] == "44444444-4444-4444-4444-444444444444"
+
+
+def test_list_document_index_versions_filters_by_document(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "index_version_id": "index_1",
+                        "document_id": "44444444-4444-4444-4444-444444444444",
+                        "document_version_id": "77777777-7777-7777-7777-777777777777",
+                        "embedding_model": "bge",
+                        "model_version": "v1",
+                        "dimension": 768,
+                        "collection_name": "little_bear",
+                        "status": "active",
+                        "chunk_count": 5,
+                        "created_at": None,
+                        "activated_at": None,
+                    }
+                )
+            ]
+        )
+    ]
+    monkeypatch.setattr(service, "_load_document", lambda *_args, **_kwargs: _document())
+    monkeypatch.setattr(
+        service,
+        "_load_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id="55555555-5555-5555-5555-555555555555",
+            name="制度知识库",
+            status="active",
+            owner_department_id="22222222-2222-2222-2222-222222222222",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
+        ),
+    )
+
+    versions = service.list_document_index_versions(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        doc_id="44444444-4444-4444-4444-444444444444",
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:index",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert versions[0].collection_name == "little_bear"
+    assert versions[0].chunk_count == 5
+    sql, params = session.executed[0]
+    assert "FROM index_versions" in sql
+    assert params["doc_id"] == "44444444-4444-4444-4444-444444444444"
+
+
+def test_create_document_index_rebuild_job_enqueues_embed_stage(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    monkeypatch.setattr(service, "_load_document", lambda *_args, **_kwargs: _document())
+    monkeypatch.setattr(
+        service,
+        "_load_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id="55555555-5555-5555-5555-555555555555",
+            name="制度知识库",
+            status="active",
+            owner_department_id="22222222-2222-2222-2222-222222222222",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
+        ),
+    )
+
+    result = service.create_document_index_rebuild_job(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        doc_id="44444444-4444-4444-4444-444444444444",
+        confirmed=True,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:index",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.accepted is True
+    statements = [statement for statement, _params in session.executed]
+    assert any(
+        "'index_rebuild'" in statement and "'embed'" in statement for statement in statements
+    )
+    assert any("SET index_status = 'indexing'" in statement for statement in statements)
+
+
+def test_create_index_rebuild_job_enqueues_kb_batch_embed_stage(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    kb_id = "55555555-5555-5555-5555-555555555555"
+    doc_id = "44444444-4444-4444-4444-444444444444"
+    version_id = "77777777-7777-7777-7777-777777777777"
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "document_id": doc_id,
+                        "kb_id": kb_id,
+                        "document_version_id": version_id,
+                    }
+                )
+            ]
+        ),
+    ]
+    monkeypatch.setattr(
+        service,
+        "_load_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id=kb_id,
+            name="制度知识库",
+            status="active",
+            owner_department_id="22222222-2222-2222-2222-222222222222",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
+        ),
+    )
+
+    result = service.create_index_rebuild_job(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        kb_id=kb_id,
+        document_ids=[],
+        confirmed=True,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:index",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.accepted is True
+    statements = [statement for statement, _params in session.executed]
+    assert any(
+        "FROM documents" in statement and "kb_id = CAST(:kb_id AS uuid)" in statement
+        for statement in statements
+    )
+    insert_params = next(
+        params for statement, params in session.executed if "INSERT INTO import_jobs" in statement
+    )
+    request_json = json.loads(insert_params["request_json"])
+    assert request_json["document_ids"] == [doc_id]
+    assert request_json["document_version_ids"] == [version_id]
+    assert request_json["reason"] == "admin_batch_rebuild"
+    assert any("id = ANY(CAST(:document_ids AS uuid[]))" in statement for statement in statements)
+
+
+def test_create_index_version_cleanup_job_enqueues_cleanup_stage(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    kb_id = "55555555-5555-5555-5555-555555555555"
+    doc_id = "44444444-4444-4444-4444-444444444444"
+    version_id = "77777777-7777-7777-7777-777777777777"
+    index_version_id = "88888888-8888-8888-8888-888888888888"
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "index_version_id": index_version_id,
+                        "document_id": doc_id,
+                        "kb_id": kb_id,
+                        "document_version_id": version_id,
+                        "collection_name": "little_bear_p0",
+                        "status": "pending_delete",
+                    }
+                )
+            ]
+        ),
+    ]
+    monkeypatch.setattr(
+        service,
+        "_load_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id=kb_id,
+            name="制度知识库",
+            status="active",
+            owner_department_id="22222222-2222-2222-2222-222222222222",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
+        ),
+    )
+
+    result = service.create_index_version_cleanup_job(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_ACTOR_USER_ID,
+        index_version_ids=[index_version_id],
+        confirmed=True,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:index",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.accepted is True
+    statements = [statement for statement, _params in session.executed]
+    assert any("iv.status = 'pending_delete'" in statement for statement in statements)
+    insert_params = next(
+        params for statement, params in session.executed if "INSERT INTO import_jobs" in statement
+    )
+    request_json = json.loads(insert_params["request_json"])
+    assert request_json["index_version_ids"] == [index_version_id]
+    assert request_json["job_type"] == "index_delete"
+    assert request_json["reason"] == "admin_index_version_cleanup"
+    assert "'index_delete'" in session.executed[1][0]
+    assert "'cleanup'" in session.executed[1][0]
+
+
+def test_create_index_rebuild_job_rejects_conflicting_targets() -> None:
+    with pytest.raises(AdminServiceError) as exc_info:
+        AdminService().create_index_rebuild_job(
+            _FakeSession(),
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_ACTOR_USER_ID,
+            kb_id="55555555-5555-5555-5555-555555555555",
+            document_ids=["44444444-4444-4444-4444-444444444444"],
+            confirmed=True,
+            actor_context=AdminActorContext(
+                user_id=_ACTOR_USER_ID,
+                scopes=("document:index",),
+                can_manage_all_knowledge_bases=True,
+            ),
+        )
+
+    assert exc_info.value.error_code == "ADMIN_INDEX_REBUILD_TARGET_CONFLICT"
 
 
 def test_replace_document_permissions_requires_permission_manage_scope() -> None:

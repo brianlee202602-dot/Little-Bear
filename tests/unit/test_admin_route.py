@@ -15,6 +15,7 @@ from app.modules.admin.schemas import (
     AdminDocumentPreviewChunk,
     AdminDocumentVersion,
     AdminFolder,
+    AdminIndexVersion,
     AdminKnowledgeBase,
     AdminKnowledgeBaseList,
     AdminRole,
@@ -23,6 +24,11 @@ from app.modules.admin.schemas import (
     AdminUserList,
 )
 from app.modules.auth.schemas import AuthContext, AuthDepartment, AuthRole, AuthUser
+from app.modules.indexing.schemas import (
+    IndexCollectionHealth,
+    IndexCollectionOperationResult,
+    IndexCollectionSnapshot,
+)
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
 
@@ -890,6 +896,337 @@ def test_document_preview_route_requires_document_manage_scope(monkeypatch) -> N
     assert payload["data"]["title"] == "员工手册"
     assert payload["data"]["chunks"][0]["text"] == "完整制度正文"
     assert payload["data"]["chunks"][0]["text_status"] == "object"
+
+
+def test_document_index_versions_route_requires_document_index_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_document_index_versions(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return (
+            AdminIndexVersion(
+                id="index_1",
+                document_id=kwargs["doc_id"],
+                document_version_id="version_1",
+                embedding_model="bge",
+                model_version="v1",
+                dimension=768,
+                collection_name="little_bear",
+                status="active",
+                chunk_count=3,
+                created_at=datetime.now(UTC),
+                activated_at=datetime.now(UTC),
+            ),
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.list_document_index_versions",
+        list_document_index_versions,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/documents/doc_1/index-versions",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "document:index"
+    assert seen["doc_id"] == "doc_1"
+    payload = response.json()
+    assert payload["data"][0]["status"] == "active"
+    assert payload["data"][0]["collection_name"] == "little_bear"
+
+
+def test_document_index_job_route_requires_confirmation(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def create_document_index_rebuild_job(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminAcceptedResult(accepted=True, job_id="job_1")
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.create_document_index_rebuild_job",
+        create_document_index_rebuild_job,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.post(
+        "/internal/v1/admin/documents/doc_1/index-jobs",
+        headers={"authorization": "Bearer access.jwt", "x-index-confirm": "rebuild"},
+    )
+
+    assert response.status_code == 202
+    assert seen["required_scope"] == "document:index"
+    assert seen["doc_id"] == "doc_1"
+    assert seen["confirmed"] is True
+    assert response.json()["data"]["job_id"] == "job_1"
+
+
+def test_index_job_route_passes_batch_payload_and_confirmation(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def create_index_rebuild_job(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminAcceptedResult(accepted=True, job_id="job_batch_1")
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.create_index_rebuild_job",
+        create_index_rebuild_job,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.post(
+        "/internal/v1/admin/index-jobs",
+        headers={"authorization": "Bearer access.jwt", "x-index-confirm": "rebuild"},
+        json={"kb_id": "kb_1", "document_ids": []},
+    )
+
+    assert response.status_code == 202
+    assert seen["required_scope"] == "document:index"
+    assert seen["kb_id"] == "kb_1"
+    assert seen["document_ids"] == []
+    assert seen["confirmed"] is True
+    assert response.json()["data"]["job_id"] == "job_batch_1"
+
+
+def test_index_version_cleanup_job_route_passes_payload_and_confirmation(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def create_index_version_cleanup_job(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminAcceptedResult(accepted=True, job_id="job_cleanup_1")
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.create_index_version_cleanup_job",
+        create_index_version_cleanup_job,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.post(
+        "/internal/v1/admin/index-versions/cleanup-jobs",
+        headers={"authorization": "Bearer access.jwt", "x-index-confirm": "cleanup"},
+        json={"index_version_ids": ["index_1"]},
+    )
+
+    assert response.status_code == 202
+    assert seen["required_scope"] == "document:index"
+    assert seen["index_version_ids"] == ["index_1"]
+    assert seen["confirmed"] is True
+    assert response.json()["data"]["job_id"] == "job_cleanup_1"
+
+
+def test_index_health_route_requires_document_index_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    class _FakeIndexOpsService:
+        def list_collection_health(self, _session, **kwargs):
+            seen.update(kwargs)
+            return (
+                IndexCollectionHealth(
+                    collection_name="little_bear_p0",
+                    expected_dimension=768,
+                    qdrant_reachable=True,
+                    qdrant_exists=True,
+                    qdrant_status="green",
+                    qdrant_vector_size=768,
+                    qdrant_points_count=10,
+                    db_index_version_count=2,
+                    active_index_version_count=1,
+                    pending_delete_index_version_count=0,
+                    failed_index_version_count=0,
+                    active_ref_count=5,
+                    draft_ref_count=0,
+                    deleted_ref_count=5,
+                    pending_delete_ref_count=0,
+                    active_ref_mismatch_count=0,
+                    issues=(),
+                ),
+            )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.build_index_ops_service",
+        lambda _session: _FakeIndexOpsService(),
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/index-health",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "document:index"
+    assert seen["enterprise_id"] == "ent_1"
+    payload = response.json()
+    assert payload["data"][0]["collection_name"] == "little_bear_p0"
+    assert payload["data"][0]["qdrant_status"] == "green"
+
+
+def test_index_collection_snapshot_routes_require_document_index_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    class _FakeIndexOpsService:
+        def list_collection_snapshots(self, _session, **kwargs):
+            calls.append(("list", kwargs))
+            return (
+                IndexCollectionSnapshot(
+                    collection_name=kwargs["collection_name"],
+                    name="little_bear_p0.snapshot",
+                    size=123,
+                    creation_time="2026-05-21T00:00:00Z",
+                    checksum="sha256:abc",
+                ),
+            )
+
+        def create_collection_snapshot(self, _session, **kwargs):
+            calls.append(("create", kwargs))
+            return IndexCollectionSnapshot(
+                collection_name=kwargs["collection_name"],
+                name="created.snapshot",
+                size=456,
+            )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.build_index_ops_service",
+        lambda _session: _FakeIndexOpsService(),
+    )
+
+    client = TestClient(_create_test_app())
+    list_response = client.get(
+        "/internal/v1/admin/index-collections/little_bear_p0/snapshots",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+    create_response = client.post(
+        "/internal/v1/admin/index-collections/little_bear_p0/snapshots",
+        headers={"authorization": "Bearer access.jwt", "x-index-confirm": "snapshot"},
+    )
+
+    assert list_response.status_code == 200
+    assert create_response.status_code == 200
+    assert seen["required_scope"] == "document:index"
+    assert calls[0][1]["enterprise_id"] == "ent_1"
+    assert calls[1][1]["confirmed"] is True
+    assert list_response.json()["data"][0]["name"] == "little_bear_p0.snapshot"
+    assert create_response.json()["data"]["name"] == "created.snapshot"
+
+
+def test_index_collection_snapshot_recover_route_requires_confirmation(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    class _FakeIndexOpsService:
+        def recover_collection_snapshot(self, _session, **kwargs):
+            seen.update(kwargs)
+            return IndexCollectionOperationResult(
+                collection_name=kwargs["collection_name"],
+                operation="snapshot_recover",
+                accepted=True,
+                result=True,
+            )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.build_index_ops_service",
+        lambda _session: _FakeIndexOpsService(),
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.put(
+        "/internal/v1/admin/index-collections/little_bear_p0/snapshot-recoveries",
+        headers={"authorization": "Bearer access.jwt", "x-index-confirm": "restore"},
+        json={
+            "location": "https://snapshots.example/little_bear.snapshot",
+            "priority": "Snapshot",
+            "checksum": "sha256:abc",
+        },
+    )
+
+    assert response.status_code == 202
+    assert seen["required_scope"] == "document:index"
+    assert seen["confirmed"] is True
+    assert seen["location"] == "https://snapshots.example/little_bear.snapshot"
+    assert response.json()["data"]["accepted"] is True
+
+
+def test_index_collection_rebuild_route_requires_confirmation(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def create_collection_index_rebuild_job(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminAcceptedResult(accepted=True, job_id="job_collection_1")
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.create_collection_index_rebuild_job",
+        create_collection_index_rebuild_job,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.post(
+        "/internal/v1/admin/index-collections/little_bear_p0/rebuild-jobs",
+        headers={"authorization": "Bearer access.jwt", "x-index-confirm": "rebuild"},
+    )
+
+    assert response.status_code == 202
+    assert seen["required_scope"] == "document:index"
+    assert seen["collection_name"] == "little_bear_p0"
+    assert seen["confirmed"] is True
+    assert response.json()["data"]["job_id"] == "job_collection_1"
 
 
 def test_document_patch_route_passes_visibility_confirmation(monkeypatch) -> None:

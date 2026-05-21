@@ -24,6 +24,7 @@ from app.modules.admin.schemas import (
     AdminDocumentVersion,
     AdminFolder,
     AdminFolderList,
+    AdminIndexVersion,
     AdminKnowledgeBase,
     AdminKnowledgeBaseAccessRule,
     AdminKnowledgeBaseAccessRuleInput,
@@ -57,6 +58,23 @@ HIGH_RISK_SCOPE_PREFIXES = ("config:", "user:", "role:", "permission:")
 SUPPORTED_KB_VISIBILITIES = {"enterprise", "department_acl", "private"}
 SUPPORTED_KB_ACCESS_SUBJECT_TYPES = {"department", "user", "role"}
 SUPPORTED_KB_ACCESS_PERMISSIONS = {"discover", "query", "manage"}
+
+
+@dataclass(frozen=True)
+class _IndexRebuildTarget:
+    document_id: str
+    kb_id: str
+    document_version_id: str
+
+
+@dataclass(frozen=True)
+class _IndexCleanupTarget:
+    index_version_id: str
+    document_id: str
+    kb_id: str
+    document_version_id: str
+    collection_name: str
+    status: str
 
 
 @dataclass(frozen=True)
@@ -1612,6 +1630,444 @@ class AdminService:
             title=document.title,
             chunks=tuple(self._admin_preview_chunk_from_mapping(row._mapping) for row in rows),
         )
+
+    def list_document_index_versions(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        doc_id: str,
+        actor_context: AdminActorContext | None = None,
+    ) -> tuple[AdminIndexVersion, ...]:
+        """读取文档索引版本列表，用于管理端诊断和重建前确认。"""
+
+        self._ensure_actor_can_index_documents(actor_context)
+        document = self._load_document(session, doc_id, enterprise_id=enterprise_id)
+        knowledge_base = self._load_knowledge_base(
+            session,
+            document.kb_id,
+            enterprise_id=enterprise_id,
+        )
+        self._ensure_actor_can_access_knowledge_base(actor_context, knowledge_base)
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text AS index_version_id,
+                        document_id::text AS document_id,
+                        document_version_id::text AS document_version_id,
+                        embedding_model,
+                        model_version,
+                        dimension,
+                        collection_name,
+                        status,
+                        chunk_count,
+                        created_at,
+                        activated_at
+                    FROM index_versions
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND document_id = CAST(:doc_id AS uuid)
+                    ORDER BY
+                        CASE status
+                            WHEN 'active' THEN 0
+                            WHEN 'ready' THEN 1
+                            WHEN 'draft' THEN 2
+                            WHEN 'pending_delete' THEN 3
+                            WHEN 'failed' THEN 4
+                            ELSE 5
+                        END,
+                        created_at DESC,
+                        id
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "doc_id": doc_id},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_INDEX_VERSIONS_UNAVAILABLE",
+                "document index versions cannot be read",
+                exc,
+            ) from exc
+        return tuple(_admin_index_version_from_mapping(row._mapping) for row in rows)
+
+    def create_document_index_rebuild_job(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        actor_user_id: str,
+        doc_id: str,
+        confirmed: bool,
+        actor_context: AdminActorContext | None = None,
+    ) -> AdminAcceptedResult:
+        """创建文档索引重建任务，复用当前 active document version 和 chunks。"""
+
+        self._ensure_actor_can_index_documents(actor_context)
+        if not confirmed:
+            raise AdminServiceError(
+                "ADMIN_CONFIRMATION_REQUIRED",
+                "index rebuild requires confirmation",
+                status_code=428,
+                details={"required_header": "x-index-confirm: rebuild"},
+            )
+        document = self._load_document(session, doc_id, enterprise_id=enterprise_id)
+        knowledge_base = self._load_knowledge_base(
+            session,
+            document.kb_id,
+            enterprise_id=enterprise_id,
+        )
+        self._ensure_actor_can_access_knowledge_base(actor_context, knowledge_base)
+        if document.lifecycle_status != "active" or document.current_version_id is None:
+            raise AdminServiceError(
+                "ADMIN_INDEX_REBUILD_UNAVAILABLE",
+                "only active indexed documents can be rebuilt",
+                status_code=409,
+                details={
+                    "doc_id": doc_id,
+                    "lifecycle_status": document.lifecycle_status,
+                    "current_version_id": document.current_version_id,
+                },
+            )
+        job_id = self._enqueue_index_rebuild_job(
+            session,
+            enterprise_id=enterprise_id,
+            kb_id=document.kb_id,
+            doc_id=document.id,
+            document_version_id=document.current_version_id,
+            actor_user_id=actor_user_id,
+        )
+        try:
+            session.execute(
+                text(
+                    """
+                    UPDATE documents
+                    SET index_status = 'indexing',
+                        updated_at = now()
+                    WHERE id = CAST(:doc_id AS uuid)
+                      AND enterprise_id = CAST(:enterprise_id AS uuid)
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "doc_id": doc_id},
+            )
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_INDEX_REBUILD_DOCUMENT_UPDATE_FAILED",
+                "document index rebuild state cannot be updated",
+                exc,
+            ) from exc
+        self._insert_audit_log(
+            session,
+            enterprise_id=enterprise_id,
+            actor_id=actor_user_id,
+            event_name="document.index_rebuild_requested",
+            resource_type="document",
+            resource_id=doc_id,
+            action="index_rebuild",
+            result="success",
+            risk_level="high",
+            summary={
+                "job_id": job_id,
+                "document_version_id": document.current_version_id,
+            },
+        )
+        return AdminAcceptedResult(accepted=True, job_id=job_id)
+
+    def create_index_rebuild_job(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        actor_user_id: str,
+        kb_id: str | None,
+        document_ids: list[str],
+        confirmed: bool,
+        actor_context: AdminActorContext | None = None,
+    ) -> AdminAcceptedResult:
+        """创建知识库级或指定文档集合的批量索引重建任务。"""
+
+        self._ensure_actor_can_index_documents(actor_context)
+        if not confirmed:
+            raise AdminServiceError(
+                "ADMIN_CONFIRMATION_REQUIRED",
+                "index rebuild requires confirmation",
+                status_code=428,
+                details={"required_header": "x-index-confirm: rebuild"},
+            )
+        document_ids = _unique_strings(document_ids)
+        if kb_id and document_ids:
+            raise AdminServiceError(
+                "ADMIN_INDEX_REBUILD_TARGET_CONFLICT",
+                "index rebuild accepts either kb_id or document_ids, not both",
+                status_code=400,
+            )
+        if kb_id:
+            knowledge_base = self._load_knowledge_base(
+                session,
+                kb_id,
+                enterprise_id=enterprise_id,
+            )
+            self._ensure_actor_can_access_knowledge_base(actor_context, knowledge_base)
+            targets = self._load_index_rebuild_targets_for_kb(
+                session,
+                enterprise_id=enterprise_id,
+                kb_id=kb_id,
+            )
+            resource_type = "knowledge_base"
+            resource_id = kb_id
+        elif document_ids:
+            targets = self._load_index_rebuild_targets_for_documents(
+                session,
+                enterprise_id=enterprise_id,
+                document_ids=document_ids,
+            )
+            returned_ids = {target.document_id for target in targets}
+            missing_ids = [
+                document_id
+                for document_id in document_ids
+                if document_id not in returned_ids
+            ]
+            if missing_ids:
+                raise AdminServiceError(
+                    "ADMIN_INDEX_REBUILD_UNAVAILABLE",
+                    "some documents cannot be rebuilt",
+                    status_code=409,
+                    details={"document_ids": missing_ids},
+                )
+            for target_kb_id in sorted({target.kb_id for target in targets}):
+                knowledge_base = self._load_knowledge_base(
+                    session,
+                    target_kb_id,
+                    enterprise_id=enterprise_id,
+                )
+                self._ensure_actor_can_access_knowledge_base(actor_context, knowledge_base)
+            resource_type = "document"
+            resource_id = document_ids[0] if len(document_ids) == 1 else None
+        else:
+            raise AdminServiceError(
+                "ADMIN_INDEX_REBUILD_TARGET_REQUIRED",
+                "index rebuild requires kb_id or document_ids",
+                status_code=400,
+            )
+
+        if not targets:
+            raise AdminServiceError(
+                "ADMIN_INDEX_REBUILD_TARGET_EMPTY",
+                "no active documents can be rebuilt",
+                status_code=409,
+                details={"kb_id": kb_id, "document_ids": document_ids},
+            )
+        batch_kb_id = targets[0].kb_id if len({target.kb_id for target in targets}) == 1 else None
+        job_id = self._enqueue_index_rebuild_batch_job(
+            session,
+            enterprise_id=enterprise_id,
+            kb_id=batch_kb_id,
+            targets=targets,
+            actor_user_id=actor_user_id,
+        )
+        self._mark_index_rebuild_targets_indexing(
+            session,
+            enterprise_id=enterprise_id,
+            document_ids=[target.document_id for target in targets],
+        )
+        self._insert_audit_log(
+            session,
+            enterprise_id=enterprise_id,
+            actor_id=actor_user_id,
+            event_name="index_rebuild.batch_requested",
+            resource_type=resource_type,
+            resource_id=resource_id,
+            action="index_rebuild",
+            result="success",
+            risk_level="high",
+            summary={
+                "job_id": job_id,
+                "kb_id": batch_kb_id,
+                "document_count": len(targets),
+                "document_ids": [target.document_id for target in targets],
+            },
+        )
+        return AdminAcceptedResult(accepted=True, job_id=job_id)
+
+    def create_collection_index_rebuild_job(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        actor_user_id: str,
+        collection_name: str,
+        confirmed: bool,
+        actor_context: AdminActorContext | None = None,
+    ) -> AdminAcceptedResult:
+        """按 Qdrant collection 创建批量索引重建任务。
+
+        这里不直接删除或重建 Qdrant collection，而是把该 collection 下的 active 文档
+        重新排入现有 index_rebuild pipeline，由 Worker 写入新 active index。
+        """
+
+        self._ensure_actor_can_index_documents(actor_context)
+        collection_name = collection_name.strip()
+        if not confirmed:
+            raise AdminServiceError(
+                "ADMIN_CONFIRMATION_REQUIRED",
+                "collection index rebuild requires confirmation",
+                status_code=428,
+                details={"required_header": "x-index-confirm: rebuild"},
+            )
+        if not collection_name:
+            raise AdminServiceError(
+                "ADMIN_INDEX_COLLECTION_INVALID",
+                "collection name is required",
+                status_code=400,
+            )
+        targets = self._load_index_rebuild_targets_for_collection(
+            session,
+            enterprise_id=enterprise_id,
+            collection_name=collection_name,
+        )
+        if not targets:
+            raise AdminServiceError(
+                "ADMIN_INDEX_REBUILD_TARGET_EMPTY",
+                "no active documents can be rebuilt for collection",
+                status_code=409,
+                details={"collection_name": collection_name},
+            )
+        for target_kb_id in sorted({target.kb_id for target in targets}):
+            knowledge_base = self._load_knowledge_base(
+                session,
+                target_kb_id,
+                enterprise_id=enterprise_id,
+            )
+            self._ensure_actor_can_access_knowledge_base(actor_context, knowledge_base)
+
+        batch_kb_id = targets[0].kb_id if len({target.kb_id for target in targets}) == 1 else None
+        job_id = self._enqueue_index_rebuild_batch_job(
+            session,
+            enterprise_id=enterprise_id,
+            kb_id=batch_kb_id,
+            targets=targets,
+            actor_user_id=actor_user_id,
+        )
+        self._mark_index_rebuild_targets_indexing(
+            session,
+            enterprise_id=enterprise_id,
+            document_ids=[target.document_id for target in targets],
+        )
+        self._insert_audit_log(
+            session,
+            enterprise_id=enterprise_id,
+            actor_id=actor_user_id,
+            event_name="index_collection.rebuild_requested",
+            resource_type="config",
+            resource_id=collection_name,
+            action="index_rebuild",
+            result="success",
+            risk_level="high",
+            summary={
+                "job_id": job_id,
+                "collection_name": collection_name,
+                "kb_id": batch_kb_id,
+                "document_count": len(targets),
+                "document_ids": [target.document_id for target in targets],
+            },
+        )
+        return AdminAcceptedResult(accepted=True, job_id=job_id)
+
+    def create_index_version_cleanup_job(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        actor_user_id: str,
+        index_version_ids: list[str],
+        confirmed: bool,
+        actor_context: AdminActorContext | None = None,
+    ) -> AdminAcceptedResult:
+        """创建按 index_version 精确清理 pending_delete 索引的运维任务。"""
+
+        self._ensure_actor_can_index_documents(actor_context)
+        if not confirmed:
+            raise AdminServiceError(
+                "ADMIN_CONFIRMATION_REQUIRED",
+                "index cleanup requires confirmation",
+                status_code=428,
+                details={"required_header": "x-index-confirm: cleanup"},
+            )
+        normalized_ids = _unique_strings(index_version_ids)
+        if not normalized_ids:
+            raise AdminServiceError(
+                "ADMIN_INDEX_CLEANUP_TARGET_REQUIRED",
+                "index cleanup requires index_version_ids",
+                status_code=400,
+            )
+        targets = self._load_index_cleanup_targets(
+            session,
+            enterprise_id=enterprise_id,
+            index_version_ids=normalized_ids,
+        )
+        returned_ids = {target.index_version_id for target in targets}
+        missing_ids = [
+            index_version_id
+            for index_version_id in normalized_ids
+            if index_version_id not in returned_ids
+        ]
+        if missing_ids:
+            raise AdminServiceError(
+                "ADMIN_INDEX_CLEANUP_TARGET_INVALID",
+                "some index versions cannot be cleaned",
+                status_code=409,
+                details={"index_version_ids": missing_ids},
+            )
+        for target_kb_id in sorted({target.kb_id for target in targets}):
+            knowledge_base = self._load_knowledge_base(
+                session,
+                target_kb_id,
+                enterprise_id=enterprise_id,
+            )
+            self._ensure_actor_can_access_knowledge_base(actor_context, knowledge_base)
+
+        batch_kb_id = (
+            targets[0].kb_id if len({target.kb_id for target in targets}) == 1 else None
+        )
+        batch_document_id = (
+            targets[0].document_id
+            if len({target.document_id for target in targets}) == 1
+            else None
+        )
+        batch_document_version_id = (
+            targets[0].document_version_id
+            if len({target.document_version_id for target in targets}) == 1
+            else None
+        )
+        job_id = self._enqueue_index_version_cleanup_job(
+            session,
+            enterprise_id=enterprise_id,
+            kb_id=batch_kb_id,
+            document_id=batch_document_id,
+            document_version_id=batch_document_version_id,
+            index_version_ids=normalized_ids,
+            actor_user_id=actor_user_id,
+        )
+        self._insert_audit_log(
+            session,
+            enterprise_id=enterprise_id,
+            actor_id=actor_user_id,
+            event_name="index_version.cleanup_requested",
+            resource_type="document",
+            resource_id=batch_document_id,
+            action="index_cleanup",
+            result="success",
+            risk_level="high",
+            summary={
+                "job_id": job_id,
+                "kb_id": batch_kb_id,
+                "document_id": batch_document_id,
+                "index_version_count": len(targets),
+                "index_version_ids": normalized_ids,
+                "collection_names": sorted({target.collection_name for target in targets}),
+            },
+        )
+        return AdminAcceptedResult(accepted=True, job_id=job_id)
 
     def _admin_preview_chunk_from_mapping(self, row: Any) -> AdminDocumentPreviewChunk:
         text_preview = str(row["text_preview"])
@@ -4280,6 +4736,20 @@ class AdminService:
                 details={"required_scope": "document:manage"},
             )
 
+    def _ensure_actor_can_index_documents(
+        self,
+        actor_context: AdminActorContext | None,
+    ) -> None:
+        if actor_context is None:
+            return
+        if not _has_scope(actor_context.scopes, "document:index"):
+            raise AdminServiceError(
+                "ADMIN_SCOPE_REQUIRED",
+                "document indexing requires document:index",
+                status_code=403,
+                details={"required_scope": "document:index"},
+            )
+
     def _ensure_actor_can_manage_permissions(
         self,
         actor_context: AdminActorContext | None,
@@ -5083,6 +5553,332 @@ class AdminService:
         )
         return job_id
 
+    def _load_index_rebuild_targets_for_kb(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        kb_id: str,
+    ) -> list[_IndexRebuildTarget]:
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text AS document_id,
+                        kb_id::text AS kb_id,
+                        current_version_id::text AS document_version_id
+                    FROM documents
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND kb_id = CAST(:kb_id AS uuid)
+                      AND lifecycle_status = 'active'
+                      AND index_status IN ('indexed', 'index_failed')
+                      AND current_version_id IS NOT NULL
+                      AND deleted_at IS NULL
+                    ORDER BY updated_at DESC, id
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "kb_id": kb_id},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_INDEX_REBUILD_TARGETS_UNAVAILABLE",
+                "index rebuild targets cannot be read",
+                exc,
+            ) from exc
+        return [_index_rebuild_target_from_mapping(row._mapping) for row in rows]
+
+    def _load_index_rebuild_targets_for_documents(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        document_ids: list[str],
+    ) -> list[_IndexRebuildTarget]:
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text AS document_id,
+                        kb_id::text AS kb_id,
+                        current_version_id::text AS document_version_id
+                    FROM documents
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND id = ANY(CAST(:document_ids AS uuid[]))
+                      AND lifecycle_status = 'active'
+                      AND index_status IN ('indexed', 'index_failed')
+                      AND current_version_id IS NOT NULL
+                      AND deleted_at IS NULL
+                    ORDER BY updated_at DESC, id
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "document_ids": document_ids},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_INDEX_REBUILD_TARGETS_UNAVAILABLE",
+                "index rebuild targets cannot be read",
+                exc,
+            ) from exc
+        return [_index_rebuild_target_from_mapping(row._mapping) for row in rows]
+
+    def _load_index_rebuild_targets_for_collection(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        collection_name: str,
+    ) -> list[_IndexRebuildTarget]:
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        d.id::text AS document_id,
+                        d.kb_id::text AS kb_id,
+                        d.current_version_id::text AS document_version_id
+                    FROM documents d
+                    JOIN index_versions iv
+                      ON iv.enterprise_id = d.enterprise_id
+                     AND iv.document_id = d.id
+                     AND iv.document_version_id = d.current_version_id
+                    WHERE d.enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND iv.collection_name = :collection_name
+                      AND iv.status = 'active'
+                      AND d.lifecycle_status = 'active'
+                      AND d.index_status IN ('indexed', 'index_failed')
+                      AND d.current_version_id IS NOT NULL
+                      AND d.deleted_at IS NULL
+                    ORDER BY d.updated_at DESC, d.id
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "collection_name": collection_name},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_INDEX_REBUILD_TARGETS_UNAVAILABLE",
+                "index rebuild targets cannot be read",
+                exc,
+            ) from exc
+        return [_index_rebuild_target_from_mapping(row._mapping) for row in rows]
+
+    def _load_index_cleanup_targets(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        index_version_ids: list[str],
+    ) -> list[_IndexCleanupTarget]:
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        iv.id::text AS index_version_id,
+                        iv.document_id::text AS document_id,
+                        iv.kb_id::text AS kb_id,
+                        iv.document_version_id::text AS document_version_id,
+                        iv.collection_name,
+                        iv.status
+                    FROM index_versions iv
+                    JOIN documents d
+                      ON d.enterprise_id = iv.enterprise_id
+                     AND d.id = iv.document_id
+                    WHERE iv.enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND iv.id = ANY(CAST(:index_version_ids AS uuid[]))
+                      AND iv.status = 'pending_delete'
+                      AND d.deleted_at IS NULL
+                    ORDER BY iv.created_at ASC, iv.id
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "index_version_ids": index_version_ids},
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_INDEX_CLEANUP_TARGETS_UNAVAILABLE",
+                "index cleanup targets cannot be read",
+                exc,
+            ) from exc
+        return [_index_cleanup_target_from_mapping(row._mapping) for row in rows]
+
+    def _enqueue_index_rebuild_job(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        kb_id: str,
+        doc_id: str,
+        document_version_id: str,
+        actor_user_id: str,
+    ) -> str:
+        job_id = str(uuid.uuid4())
+        request_json = {
+            "enterprise_id": enterprise_id,
+            "document_ids": [doc_id],
+            "document_version_ids": [document_version_id],
+            "job_type": "index_rebuild",
+            "kb_id": kb_id,
+            "reason": "admin_rebuild",
+            "rebuild": True,
+        }
+        session.execute(
+            text(
+                """
+                INSERT INTO import_jobs(
+                    id, enterprise_id, job_type, kb_id, document_id,
+                    document_version_id, status, stage, request_json,
+                    max_attempts, created_by
+                )
+                VALUES (
+                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid), 'index_rebuild',
+                    CAST(:kb_id AS uuid), CAST(:doc_id AS uuid),
+                    CAST(:document_version_id AS uuid), 'queued', 'embed',
+                    CAST(:request_json AS jsonb), 3, CAST(:actor_user_id AS uuid)
+                )
+                """
+            ),
+            {
+                "id": job_id,
+                "enterprise_id": enterprise_id,
+                "kb_id": kb_id,
+                "doc_id": doc_id,
+                "document_version_id": document_version_id,
+                "request_json": json.dumps(request_json, ensure_ascii=False, sort_keys=True),
+                "actor_user_id": actor_user_id,
+            },
+        )
+        return job_id
+
+    def _enqueue_index_rebuild_batch_job(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        kb_id: str | None,
+        targets: list[_IndexRebuildTarget],
+        actor_user_id: str,
+    ) -> str:
+        job_id = str(uuid.uuid4())
+        document_ids = [target.document_id for target in targets]
+        document_version_ids = [target.document_version_id for target in targets]
+        single_target = targets[0] if len(targets) == 1 else None
+        request_json = {
+            "enterprise_id": enterprise_id,
+            "document_ids": document_ids,
+            "document_version_ids": document_version_ids,
+            "job_type": "index_rebuild",
+            "kb_id": kb_id,
+            "reason": "admin_batch_rebuild",
+            "rebuild": True,
+        }
+        session.execute(
+            text(
+                """
+                INSERT INTO import_jobs(
+                    id, enterprise_id, job_type, kb_id, document_id,
+                    document_version_id, status, stage, request_json,
+                    max_attempts, created_by
+                )
+                VALUES (
+                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid), 'index_rebuild',
+                    CAST(:kb_id AS uuid), CAST(:document_id AS uuid),
+                    CAST(:document_version_id AS uuid), 'queued', 'embed',
+                    CAST(:request_json AS jsonb), 3, CAST(:actor_user_id AS uuid)
+                )
+                """
+            ),
+            {
+                "id": job_id,
+                "enterprise_id": enterprise_id,
+                "kb_id": kb_id,
+                "document_id": single_target.document_id if single_target else None,
+                "document_version_id": (
+                    single_target.document_version_id if single_target else None
+                ),
+                "request_json": json.dumps(request_json, ensure_ascii=False, sort_keys=True),
+                "actor_user_id": actor_user_id,
+            },
+        )
+        return job_id
+
+    def _enqueue_index_version_cleanup_job(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        kb_id: str | None,
+        document_id: str | None,
+        document_version_id: str | None,
+        index_version_ids: list[str],
+        actor_user_id: str,
+    ) -> str:
+        job_id = str(uuid.uuid4())
+        request_json = {
+            "enterprise_id": enterprise_id,
+            "document_id": document_id,
+            "document_version_id": document_version_id,
+            "index_version_ids": index_version_ids,
+            "job_type": "index_delete",
+            "kb_id": kb_id,
+            "reason": "admin_index_version_cleanup",
+            "resource_type": "index_version",
+        }
+        session.execute(
+            text(
+                """
+                INSERT INTO import_jobs(
+                    id, enterprise_id, job_type, kb_id, document_id,
+                    document_version_id, status, stage, request_json,
+                    max_attempts, created_by
+                )
+                VALUES (
+                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid), 'index_delete',
+                    CAST(:kb_id AS uuid), CAST(:document_id AS uuid),
+                    CAST(:document_version_id AS uuid), 'queued', 'cleanup',
+                    CAST(:request_json AS jsonb), 3, CAST(:actor_user_id AS uuid)
+                )
+                """
+            ),
+            {
+                "id": job_id,
+                "enterprise_id": enterprise_id,
+                "kb_id": kb_id,
+                "document_id": document_id,
+                "document_version_id": document_version_id,
+                "request_json": json.dumps(request_json, ensure_ascii=False, sort_keys=True),
+                "actor_user_id": actor_user_id,
+            },
+        )
+        return job_id
+
+    def _mark_index_rebuild_targets_indexing(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        document_ids: list[str],
+    ) -> None:
+        try:
+            session.execute(
+                text(
+                    """
+                    UPDATE documents
+                    SET index_status = 'indexing',
+                        updated_at = now()
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND id = ANY(CAST(:document_ids AS uuid[]))
+                    """
+                ),
+                {"enterprise_id": enterprise_id, "document_ids": document_ids},
+            )
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_INDEX_REBUILD_DOCUMENT_UPDATE_FAILED",
+                "document index rebuild state cannot be updated",
+                exc,
+            ) from exc
+
     def _insert_audit_log(
         self,
         session: Session,
@@ -5091,7 +5887,7 @@ class AdminService:
         actor_id: str,
         event_name: str,
         resource_type: str,
-        resource_id: str,
+        resource_id: str | None,
         action: str,
         result: str,
         risk_level: str,
@@ -5249,6 +6045,41 @@ def _document_version_from_mapping(row: Any) -> AdminDocumentVersion:
         id=row["version_id"],
         document_id=row["document_id"],
         version_no=int(row["version_no"]),
+        status=row["status"],
+    )
+
+
+def _admin_index_version_from_mapping(row: Any) -> AdminIndexVersion:
+    return AdminIndexVersion(
+        id=row["index_version_id"],
+        document_id=row["document_id"],
+        document_version_id=row["document_version_id"],
+        embedding_model=row["embedding_model"],
+        model_version=row["model_version"],
+        dimension=int(row["dimension"]),
+        collection_name=row["collection_name"],
+        status=row["status"],
+        chunk_count=int(row["chunk_count"]),
+        created_at=row["created_at"],
+        activated_at=row["activated_at"],
+    )
+
+
+def _index_rebuild_target_from_mapping(row: Any) -> _IndexRebuildTarget:
+    return _IndexRebuildTarget(
+        document_id=row["document_id"],
+        kb_id=row["kb_id"],
+        document_version_id=row["document_version_id"],
+    )
+
+
+def _index_cleanup_target_from_mapping(row: Any) -> _IndexCleanupTarget:
+    return _IndexCleanupTarget(
+        index_version_id=row["index_version_id"],
+        document_id=row["document_id"],
+        kb_id=row["kb_id"],
+        document_version_id=row["document_version_id"],
+        collection_name=row["collection_name"],
         status=row["status"],
     )
 
@@ -5583,6 +6414,20 @@ def _optional_str(value: Any) -> str | None:
         stripped = value.strip()
         return stripped or None
     return None
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
 
 
 def _json_mapping(value: Any) -> dict[str, Any] | None:

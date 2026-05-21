@@ -78,6 +78,7 @@ def _actor() -> ImportActorContext:
 def _job_row(
     *,
     job_id: str = "99999999-9999-9999-9999-999999999999",
+    job_type: str = "metadata_batch",
     status: str = "queued",
     stage: str = "validate",
     request_json: dict[str, object] | None = None,
@@ -88,7 +89,7 @@ def _job_row(
     return _Row(
         {
             "job_id": job_id,
-            "job_type": "metadata_batch",
+            "job_type": job_type,
             "kb_id": _KB_ID,
             "document_id": "44444444-4444-4444-4444-444444444444",
             "document_version_id": "55555555-5555-5555-5555-555555555555",
@@ -680,6 +681,213 @@ def test_advance_permission_refresh_job_refreshes_payload_and_skips_import_stage
     assert job.stage == "publish"
     assert indexing_service.requests == [request_json]
     assert not any("INSERT INTO chunks" in statement for statement, _ in session.executed)
+
+
+def test_advance_index_rebuild_cleanup_job_deletes_old_index_payloads(monkeypatch) -> None:
+    class _FakeIndexingService:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, object]] = []
+
+        def cleanup_pending_delete_indexes(self, _session, *, request_json):
+            self.requests.append(request_json)
+            return {"index_version_count": 1, "vector_payload_count": 3}
+
+    indexing_service = _FakeIndexingService()
+    request_json = {
+        "enterprise_id": _ENTERPRISE_ID,
+        "job_type": "index_rebuild",
+        "document_ids": ["44444444-4444-4444-4444-444444444444"],
+        "kb_id": _KB_ID,
+        "rebuild": True,
+    }
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_Row(
+                {
+                    "job_id": "99999999-9999-9999-9999-999999999999",
+                    "enterprise_id": _ENTERPRISE_ID,
+                    "job_type": "index_rebuild",
+                    "kb_id": _KB_ID,
+                    "document_id": "44444444-4444-4444-4444-444444444444",
+                    "document_version_id": "55555555-5555-5555-5555-555555555555",
+                    "status": "running",
+                    "stage": "cleanup",
+                    "request_json": request_json,
+                    "result_json": {},
+                    "error_message": None,
+                    "attempt_count": 1,
+                    "max_attempts": 3,
+                    "cancel_requested_at": None,
+                }
+            )
+        ),
+        _Result(one=_job_row(job_type="index_rebuild", status="success", stage="finished")),
+    ]
+    service = ImportService()
+    monkeypatch.setattr(
+        "app.modules.import_pipeline.service.build_indexing_service",
+        lambda _session: indexing_service,
+    )
+    monkeypatch.setattr(service, "_insert_worker_audit_log", lambda *_args, **_kwargs: None)
+
+    job = service.advance_claimed_job(
+        session,
+        job_id="99999999-9999-9999-9999-999999999999",
+        worker_id="worker_1",
+    )
+
+    assert job.status == "success"
+    assert job.stage == "finished"
+    assert indexing_service.requests == [request_json]
+    assert not any("INSERT INTO chunks" in statement for statement, _ in session.executed)
+
+
+def test_advance_upload_cleanup_job_deletes_replaced_index_payloads(monkeypatch) -> None:
+    class _FakeIndexingService:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, object]] = []
+
+        def cleanup_pending_delete_indexes(self, _session, *, request_json):
+            self.requests.append(request_json)
+            return {"index_version_count": 1, "vector_payload_count": 2}
+
+    indexing_service = _FakeIndexingService()
+    request_json = {
+        "document_ids": ["44444444-4444-4444-4444-444444444444"],
+        "document_version_ids": ["55555555-5555-5555-5555-555555555555"],
+        "kb_id": _KB_ID,
+    }
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_Row(
+                {
+                    "job_id": "99999999-9999-9999-9999-999999999999",
+                    "enterprise_id": _ENTERPRISE_ID,
+                    "job_type": "upload",
+                    "kb_id": _KB_ID,
+                    "document_id": "44444444-4444-4444-4444-444444444444",
+                    "document_version_id": "55555555-5555-5555-5555-555555555555",
+                    "status": "running",
+                    "stage": "cleanup",
+                    "request_json": request_json,
+                    "result_json": {},
+                    "error_message": None,
+                    "attempt_count": 1,
+                    "max_attempts": 3,
+                    "cancel_requested_at": None,
+                }
+            )
+        ),
+        _Result(one=_job_row(job_type="upload", status="success", stage="finished")),
+    ]
+    service = ImportService()
+    monkeypatch.setattr(
+        "app.modules.import_pipeline.service.build_indexing_service",
+        lambda _session: indexing_service,
+    )
+    monkeypatch.setattr(service, "_insert_worker_audit_log", lambda *_args, **_kwargs: None)
+
+    job = service.advance_claimed_job(
+        session,
+        job_id="99999999-9999-9999-9999-999999999999",
+        worker_id="worker_1",
+    )
+
+    assert job.status == "success"
+    assert job.stage == "finished"
+    assert indexing_service.requests == [request_json]
+
+
+def test_retry_index_rebuild_job_starts_from_embed_stage(monkeypatch) -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(one_or_none=_job_row(job_type="index_rebuild", status="failed", stage="cleanup"))
+    ]
+    service = ImportService()
+    monkeypatch.setattr(service, "_insert_audit_log", lambda *_args, **_kwargs: None)
+
+    job = service.create_retry(
+        session,
+        "99999999-9999-9999-9999-999999999999",
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_USER_ID,
+        owner_only=False,
+    )
+
+    assert job.stage == "embed"
+    insert_params = next(
+        params for statement, params in session.executed if "INSERT INTO import_jobs" in statement
+    )
+    assert insert_params["initial_stage"] == "embed"
+
+
+def test_create_index_job_retries_retries_failed_index_rebuild_jobs(monkeypatch) -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_job_row(
+                job_id="99999999-9999-9999-9999-999999999999",
+                job_type="index_rebuild",
+                status="failed",
+                stage="index",
+            )
+        ),
+        _Result(
+            one_or_none=_job_row(
+                job_id="88888888-8888-8888-8888-888888888888",
+                job_type="index_rebuild",
+                status="failed",
+                stage="publish",
+            )
+        ),
+    ]
+    service = ImportService()
+    monkeypatch.setattr(service, "_insert_audit_log", lambda *_args, **_kwargs: None)
+
+    result = service.create_index_job_retries(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        actor_user_id=_USER_ID,
+        job_ids=[
+            "99999999-9999-9999-9999-999999999999",
+            "88888888-8888-8888-8888-888888888888",
+        ],
+        owner_only=False,
+    )
+
+    assert result.total == 2
+    assert [job.stage for job in result.items] == ["embed", "embed"]
+    insert_params = [
+        params for statement, params in session.executed if "INSERT INTO import_jobs" in statement
+    ]
+    assert len(insert_params) == 2
+    assert all(params["initial_stage"] == "embed" for params in insert_params)
+
+
+def test_create_index_job_retries_rejects_non_index_jobs() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_job_row(
+                job_id="99999999-9999-9999-9999-999999999999",
+                job_type="upload",
+                status="failed",
+            )
+        ),
+    ]
+
+    with pytest.raises(ImportServiceError) as exc_info:
+        ImportService().create_index_job_retries(
+            session,
+            enterprise_id=_ENTERPRISE_ID,
+            actor_user_id=_USER_ID,
+            job_ids=["99999999-9999-9999-9999-999999999999"],
+            owner_only=False,
+        )
+
+    assert exc_info.value.error_code == "IMPORT_INDEX_RETRY_NOT_ALLOWED"
 
 
 def test_advance_claimed_job_parse_stage_reads_object_and_writes_parsed_text(monkeypatch) -> None:

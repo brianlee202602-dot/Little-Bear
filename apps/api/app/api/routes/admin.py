@@ -28,6 +28,18 @@ from app.api.schemas.admin import (
     FolderListResponse,
     FolderPatchRequest,
     FolderResponse,
+    IndexCollectionHealthData,
+    IndexCollectionOperationData,
+    IndexCollectionOperationResponse,
+    IndexCollectionSnapshotData,
+    IndexCollectionSnapshotListResponse,
+    IndexCollectionSnapshotRecoverRequest,
+    IndexCollectionSnapshotResponse,
+    IndexHealthResponse,
+    IndexJobCreateRequest,
+    IndexVersionCleanupJobCreateRequest,
+    IndexVersionData,
+    IndexVersionListResponse,
     KnowledgeBaseAccessRuleData,
     KnowledgeBaseCreateRequest,
     KnowledgeBaseData,
@@ -66,6 +78,7 @@ from app.modules.admin.schemas import (
     AdminDocumentPreviewChunk,
     AdminDocumentVersion,
     AdminFolder,
+    AdminIndexVersion,
     AdminKnowledgeBase,
     AdminKnowledgeBaseAccessRule,
     AdminKnowledgeBaseAccessRuleInput,
@@ -79,6 +92,13 @@ from app.modules.auth.schemas import AuthContext
 from app.modules.auth.service import AuthService
 from app.modules.config.errors import ConfigServiceError
 from app.modules.config.service import ConfigService
+from app.modules.indexing import build_index_ops_service
+from app.modules.indexing.errors import IndexingServiceError
+from app.modules.indexing.schemas import (
+    IndexCollectionHealth,
+    IndexCollectionOperationResult,
+    IndexCollectionSnapshot,
+)
 from app.modules.secrets.service import SecretStoreError, SecretStoreService
 from app.modules.storage import MinioObjectStorage
 from app.modules.storage.service import ObjectStorage
@@ -999,6 +1019,294 @@ async def get_document_preview(
     )
 
 
+@router.get("/documents/{doc_id}/index-versions", response_model=IndexVersionListResponse)
+async def list_document_index_versions(
+    doc_id: str,
+    authorization: str | None = Header(default=None),
+) -> IndexVersionListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:index")
+            versions = service.list_document_index_versions(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                doc_id=doc_id,
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_document_index_version_list")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_document_index_version_list")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_document_index_version_list")
+    return IndexVersionListResponse(
+        request_id=_request_id(),
+        data=[_index_version_data(version) for version in versions],
+    )
+
+
+@router.post(
+    "/documents/{doc_id}/index-jobs",
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_document_index_job(
+    doc_id: str,
+    authorization: str | None = Header(default=None),
+    x_index_confirm: str | None = Header(default=None),
+) -> AcceptedResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:index")
+            result = service.create_document_index_rebuild_job(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                doc_id=doc_id,
+                confirmed=x_index_confirm == "rebuild",
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_document_index_job_create")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_document_index_job_create")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_document_index_job_create")
+    return AcceptedResponse(request_id=_request_id(), data=_accepted_data(result))
+
+
+@router.get("/index-health", response_model=IndexHealthResponse)
+async def get_index_health(
+    authorization: str | None = Header(default=None),
+) -> IndexHealthResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:index")
+            collections = build_index_ops_service(session).list_collection_health(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_index_health")
+    except IndexingServiceError as exc:
+        return _admin_error_response(
+            AdminServiceError(
+                exc.error_code,
+                exc.message,
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+                details=exc.details,
+            ),
+            stage="admin_index_health",
+        )
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_index_health")
+    return IndexHealthResponse(
+        request_id=_request_id(),
+        data=[_index_collection_health_data(item) for item in collections],
+    )
+
+
+@router.get(
+    "/index-collections/{collection_name}/snapshots",
+    response_model=IndexCollectionSnapshotListResponse,
+)
+async def list_index_collection_snapshots(
+    collection_name: str,
+    authorization: str | None = Header(default=None),
+) -> IndexCollectionSnapshotListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:index")
+            snapshots = build_index_ops_service(session).list_collection_snapshots(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                collection_name=collection_name,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_index_collection_snapshot_list")
+    except IndexingServiceError as exc:
+        return _indexing_error_response(exc, stage="admin_index_collection_snapshot_list")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_index_collection_snapshot_list")
+    return IndexCollectionSnapshotListResponse(
+        request_id=_request_id(),
+        data=[_index_collection_snapshot_data(item) for item in snapshots],
+    )
+
+
+@router.post(
+    "/index-collections/{collection_name}/snapshots",
+    response_model=IndexCollectionSnapshotResponse,
+)
+async def create_index_collection_snapshot(
+    collection_name: str,
+    authorization: str | None = Header(default=None),
+    x_index_confirm: str | None = Header(default=None),
+) -> IndexCollectionSnapshotResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:index")
+            snapshot = build_index_ops_service(session).create_collection_snapshot(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                collection_name=collection_name,
+                confirmed=x_index_confirm == "snapshot",
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_index_collection_snapshot_create")
+    except IndexingServiceError as exc:
+        return _indexing_error_response(exc, stage="admin_index_collection_snapshot_create")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_index_collection_snapshot_create")
+    return IndexCollectionSnapshotResponse(
+        request_id=_request_id(),
+        data=_index_collection_snapshot_data(snapshot),
+    )
+
+
+@router.put(
+    "/index-collections/{collection_name}/snapshot-recoveries",
+    response_model=IndexCollectionOperationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def recover_index_collection_snapshot(
+    collection_name: str,
+    payload: IndexCollectionSnapshotRecoverRequest,
+    authorization: str | None = Header(default=None),
+    x_index_confirm: str | None = Header(default=None),
+) -> IndexCollectionOperationResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:index")
+            result = build_index_ops_service(session).recover_collection_snapshot(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                collection_name=collection_name,
+                location=payload.location,
+                priority=payload.priority,
+                checksum=payload.checksum,
+                confirmed=x_index_confirm == "restore",
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_index_collection_snapshot_recover")
+    except IndexingServiceError as exc:
+        return _indexing_error_response(exc, stage="admin_index_collection_snapshot_recover")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_index_collection_snapshot_recover")
+    return IndexCollectionOperationResponse(
+        request_id=_request_id(),
+        data=_index_collection_operation_data(result),
+    )
+
+
+@router.post(
+    "/index-collections/{collection_name}/rebuild-jobs",
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_index_collection_rebuild_job(
+    collection_name: str,
+    authorization: str | None = Header(default=None),
+    x_index_confirm: str | None = Header(default=None),
+) -> AcceptedResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:index")
+            result = service.create_collection_index_rebuild_job(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                collection_name=collection_name,
+                confirmed=x_index_confirm == "rebuild",
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_index_collection_rebuild")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_index_collection_rebuild")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_index_collection_rebuild")
+    return AcceptedResponse(request_id=_request_id(), data=_accepted_data(result))
+
+
+@router.post(
+    "/index-jobs",
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_index_job(
+    payload: IndexJobCreateRequest,
+    authorization: str | None = Header(default=None),
+    x_index_confirm: str | None = Header(default=None),
+) -> AcceptedResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:index")
+            result = service.create_index_rebuild_job(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                kb_id=payload.kb_id,
+                document_ids=payload.document_ids,
+                confirmed=x_index_confirm == "rebuild",
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_index_job_create")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_index_job_create")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_index_job_create")
+    return AcceptedResponse(request_id=_request_id(), data=_accepted_data(result))
+
+
+@router.post(
+    "/index-versions/cleanup-jobs",
+    response_model=AcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_index_version_cleanup_job(
+    payload: IndexVersionCleanupJobCreateRequest,
+    authorization: str | None = Header(default=None),
+    x_index_confirm: str | None = Header(default=None),
+) -> AcceptedResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="document:index")
+            result = service.create_index_version_cleanup_job(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                actor_user_id=auth_context.user.id,
+                index_version_ids=payload.index_version_ids,
+                confirmed=x_index_confirm == "cleanup",
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_index_version_cleanup_job_create")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_index_version_cleanup_job_create")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_index_version_cleanup_job_create")
+    return AcceptedResponse(request_id=_request_id(), data=_accepted_data(result))
+
+
 @router.patch("/documents/{doc_id}", response_model=DocumentResponse)
 async def patch_document(
     doc_id: str,
@@ -1369,6 +1677,67 @@ def _document_version_data(version: AdminDocumentVersion) -> DocumentVersionData
     )
 
 
+def _index_version_data(version: AdminIndexVersion) -> IndexVersionData:
+    return IndexVersionData(
+        id=version.id,
+        document_id=version.document_id,
+        document_version_id=version.document_version_id,
+        embedding_model=version.embedding_model,
+        model_version=version.model_version,
+        dimension=version.dimension,
+        collection_name=version.collection_name,
+        status=version.status,
+        chunk_count=version.chunk_count,
+        created_at=version.created_at,
+        activated_at=version.activated_at,
+    )
+
+
+def _index_collection_health_data(item: IndexCollectionHealth) -> IndexCollectionHealthData:
+    return IndexCollectionHealthData(
+        collection_name=item.collection_name,
+        expected_dimension=item.expected_dimension,
+        qdrant_reachable=item.qdrant_reachable,
+        qdrant_exists=item.qdrant_exists,
+        qdrant_status=item.qdrant_status,
+        qdrant_vector_size=item.qdrant_vector_size,
+        qdrant_points_count=item.qdrant_points_count,
+        db_index_version_count=item.db_index_version_count,
+        active_index_version_count=item.active_index_version_count,
+        pending_delete_index_version_count=item.pending_delete_index_version_count,
+        failed_index_version_count=item.failed_index_version_count,
+        active_ref_count=item.active_ref_count,
+        draft_ref_count=item.draft_ref_count,
+        deleted_ref_count=item.deleted_ref_count,
+        pending_delete_ref_count=item.pending_delete_ref_count,
+        active_ref_mismatch_count=item.active_ref_mismatch_count,
+        issues=list(item.issues),
+    )
+
+
+def _index_collection_snapshot_data(
+    item: IndexCollectionSnapshot,
+) -> IndexCollectionSnapshotData:
+    return IndexCollectionSnapshotData(
+        collection_name=item.collection_name,
+        name=item.name,
+        size=item.size,
+        creation_time=item.creation_time,
+        checksum=item.checksum,
+    )
+
+
+def _index_collection_operation_data(
+    item: IndexCollectionOperationResult,
+) -> IndexCollectionOperationData:
+    return IndexCollectionOperationData(
+        collection_name=item.collection_name,
+        operation="snapshot_recover",
+        accepted=item.accepted,
+        result=item.result,
+    )
+
+
 def _admin_chunk_data(chunk: AdminChunk) -> ChunkData:
     return ChunkData(
         id=chunk.id,
@@ -1487,6 +1856,20 @@ def _auth_error_response(exc: AuthServiceError, *, stage: str) -> JSONResponse:
 
 
 def _admin_error_response(exc: AdminServiceError, *, stage: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "request_id": _request_id(),
+            "error_code": exc.error_code,
+            "message": exc.message,
+            "stage": stage,
+            "retryable": exc.retryable,
+            "details": exc.details,
+        },
+    )
+
+
+def _indexing_error_response(exc: IndexingServiceError, *, stage: str) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content={

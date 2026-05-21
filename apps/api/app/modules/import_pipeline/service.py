@@ -402,6 +402,7 @@ class ImportService:
         status: str | None = None,
         stage: str | None = None,
         kb_id: str | None = None,
+        job_type: str | None = None,
         actor_user_id: str | None = None,
         owner_only: bool = True,
     ) -> ImportJobList:
@@ -425,6 +426,9 @@ class ImportService:
         if kb_id:
             conditions.append("kb_id = CAST(:kb_id AS uuid)")
             params["kb_id"] = kb_id
+        if job_type:
+            conditions.append("job_type = :job_type")
+            params["job_type"] = job_type
         where_sql = " AND ".join(conditions)
         try:
             rows = session.execute(
@@ -561,6 +565,82 @@ class ImportService:
             actor_user_id=actor_user_id,
             owner_only=owner_only,
         )
+        return self._create_retry_from_row(
+            session,
+            row=row,
+            enterprise_id=enterprise_id,
+            actor_user_id=actor_user_id,
+            retried_from_job_id=job_id,
+        )
+
+    def create_index_job_retries(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        actor_user_id: str,
+        job_ids: list[str],
+        owner_only: bool = False,
+    ) -> ImportJobList:
+        normalized_job_ids = _unique_strings(job_ids)
+        if not normalized_job_ids:
+            raise ImportServiceError(
+                "IMPORT_RETRY_JOBS_REQUIRED",
+                "index job retry requires at least one job id",
+                status_code=400,
+            )
+        rows = [
+            self._load_import_job_row(
+                session,
+                job_id=job_id,
+                enterprise_id=enterprise_id,
+                actor_user_id=actor_user_id,
+                owner_only=owner_only,
+            )
+            for job_id in normalized_job_ids
+        ]
+        invalid_jobs = [
+            {
+                "job_id": row["job_id"],
+                "job_type": row["job_type"],
+                "status": row["status"],
+            }
+            for row in rows
+            if row["job_type"] != "index_rebuild"
+            or row["status"] not in {"failed", "cancelled"}
+        ]
+        if invalid_jobs:
+            raise ImportServiceError(
+                "IMPORT_INDEX_RETRY_NOT_ALLOWED",
+                "only failed or cancelled index rebuild jobs can be retried",
+                status_code=409,
+                details={"invalid_jobs": invalid_jobs},
+            )
+        jobs = tuple(
+            self._create_retry_from_row(
+                session,
+                row=row,
+                enterprise_id=enterprise_id,
+                actor_user_id=actor_user_id,
+                retried_from_job_id=row["job_id"],
+                risk_level="high",
+                batch_job_ids=normalized_job_ids,
+            )
+            for row in rows
+        )
+        return ImportJobList(items=jobs, total=len(jobs))
+
+    def _create_retry_from_row(
+        self,
+        session: Session,
+        *,
+        row: Any,
+        enterprise_id: str,
+        actor_user_id: str,
+        retried_from_job_id: str,
+        risk_level: str = "medium",
+        batch_job_ids: list[str] | None = None,
+    ) -> ImportJob:
         if row["status"] not in {"failed", "cancelled"}:
             raise ImportServiceError(
                 "IMPORT_RETRY_NOT_ALLOWED",
@@ -572,8 +652,9 @@ class ImportService:
         retry_job_id = str(uuid.uuid4())
         retry_request_json = {
             **request_json,
-            "retried_from_job_id": job_id,
+            "retried_from_job_id": retried_from_job_id,
         }
+        initial_stage = "embed" if row["job_type"] == "index_rebuild" else "validate"
         self._insert_import_job(
             session,
             enterprise_id=enterprise_id,
@@ -585,6 +666,7 @@ class ImportService:
             request_json=retry_request_json,
             idempotency_key=None,
             actor_user_id=actor_user_id,
+            initial_stage=initial_stage,
         )
         self._insert_audit_log(
             session,
@@ -595,14 +677,17 @@ class ImportService:
             resource_id=retry_job_id,
             action="retry",
             result="success",
-            risk_level="medium",
-            summary={"retried_from_job_id": job_id},
+            risk_level=risk_level,
+            summary={
+                "retried_from_job_id": retried_from_job_id,
+                "batch_job_ids": batch_job_ids or [],
+            },
         )
         return ImportJob(
             id=retry_job_id,
             kb_id=row["kb_id"],
             status="queued",
-            stage="validate",
+            stage=initial_stage,
             document_ids=tuple(_document_ids_from_request(retry_request_json, row["document_id"])),
             job_type=row["job_type"],
         )
@@ -849,6 +934,21 @@ class ImportService:
                     ) from exc
             if stage in {"publish", "cleanup"}:
                 return
+        if stage == "cleanup":
+            try:
+                build_indexing_service(session).cleanup_pending_delete_indexes(
+                    session,
+                    request_json=_json_mapping(row["request_json"]),
+                )
+                return
+            except IndexingServiceError as exc:
+                raise ImportServiceError(
+                    exc.error_code,
+                    exc.message,
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                    details=exc.details,
+                ) from exc
         if stage == "validate":
             self._mark_documents_indexing(session, request_json=_json_mapping(row["request_json"]))
             return
@@ -1685,6 +1785,7 @@ class ImportService:
         request_json: dict[str, Any],
         idempotency_key: str | None,
         actor_user_id: str,
+        initial_stage: str = "validate",
     ) -> None:
         session.execute(
             text(
@@ -1696,7 +1797,7 @@ class ImportService:
                 VALUES (
                     CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :job_type,
                     CAST(:kb_id AS uuid), CAST(:document_id AS uuid),
-                    CAST(:document_version_id AS uuid), 'queued', 'validate',
+                    CAST(:document_version_id AS uuid), 'queued', :initial_stage,
                     CAST(:request_json AS jsonb), :idempotency_key, 3,
                     CAST(:actor_user_id AS uuid)
                 )
@@ -1712,6 +1813,7 @@ class ImportService:
                 "request_json": json.dumps(request_json, ensure_ascii=False, sort_keys=True),
                 "idempotency_key": idempotency_key,
                 "actor_user_id": actor_user_id,
+                "initial_stage": initial_stage,
             },
         )
 
@@ -2289,6 +2391,20 @@ def _document_version_ids_from_request(
     if isinstance(value, list):
         return [item for item in value if isinstance(item, str)]
     return [fallback] if fallback else []
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
 
 
 def _json_mapping(value: Any) -> dict[str, Any]:

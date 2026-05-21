@@ -52,6 +52,7 @@ class _FakeVectorIndexWriter:
         self.draft_points: tuple[object, ...] = ()
         self.activated: list[dict[str, object]] = []
         self.payload_updates: tuple[object, ...] = ()
+        self.deleted_points: list[dict[str, object]] = []
 
     def upsert_draft_points(self, points) -> None:
         self.draft_points = points
@@ -74,6 +75,14 @@ class _FakeVectorIndexWriter:
     def update_payloads(self, updates) -> None:
         self.payload_updates = updates
 
+    def delete_points(self, *, collection_name: str, vector_ids: tuple[str, ...]) -> None:
+        self.deleted_points.append(
+            {
+                "collection_name": collection_name,
+                "vector_ids": vector_ids,
+            }
+        )
+
 
 class _FailingDraftVectorIndexWriter:
     def upsert_draft_points(self, _points) -> None:
@@ -84,6 +93,9 @@ class _FailingDraftVectorIndexWriter:
 
     def update_payloads(self, _updates) -> None:
         raise RuntimeError("unexpected payload update")
+
+    def delete_points(self, **_kwargs) -> None:
+        raise RuntimeError("unexpected point delete")
 
 
 class _FailingActivateVectorIndexWriter:
@@ -96,6 +108,9 @@ class _FailingActivateVectorIndexWriter:
     def update_payloads(self, _updates) -> None:
         raise RuntimeError("unexpected payload update")
 
+    def delete_points(self, **_kwargs) -> None:
+        raise RuntimeError("unexpected point delete")
+
 
 class _FailingPayloadVectorIndexWriter:
     def upsert_draft_points(self, _points) -> None:
@@ -106,6 +121,14 @@ class _FailingPayloadVectorIndexWriter:
 
     def update_payloads(self, _updates) -> None:
         raise RuntimeError("qdrant payload refresh failed")
+
+    def delete_points(self, **_kwargs) -> None:
+        raise RuntimeError("unexpected point delete")
+
+
+class _FailingDeleteVectorIndexWriter(_FakeVectorIndexWriter):
+    def delete_points(self, **_kwargs) -> None:
+        raise RuntimeError("qdrant point delete failed")
 
 
 _ENTERPRISE_ID = "33333333-3333-3333-3333-333333333333"
@@ -198,6 +221,16 @@ def _permission_refresh_target_mapping() -> dict[str, object]:
     }
 
 
+def _pending_delete_target_mapping() -> dict[str, object]:
+    return {
+        "enterprise_id": _ENTERPRISE_ID,
+        "document_id": _DOC_ID,
+        "index_version_id": _INDEX_VERSION_ID,
+        "collection_name": "little_bear_p0",
+        "vector_id": "11111111-1111-5111-8111-111111111111",
+    }
+
+
 def test_create_draft_indexes_inserts_index_version() -> None:
     session = _FakeSession()
     session.results = [
@@ -235,6 +268,40 @@ def test_create_draft_indexes_inserts_index_version() -> None:
     assert insert_params["chunk_count"] == 2
     assert insert_params["permission_snapshot_hash"] == "perm_hash"
     assert insert_params["embedding_model"] == "p0-placeholder-embedding"
+
+
+def test_create_draft_indexes_allows_rebuild_active_version() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "enterprise_id": _ENTERPRISE_ID,
+                        "kb_id": _KB_ID,
+                        "document_id": _DOC_ID,
+                        "document_version_id": _DOC_VERSION_ID,
+                        "created_by": "11111111-1111-1111-1111-111111111111",
+                        "chunk_count": 2,
+                        "permission_snapshot_hash": "perm_hash",
+                    }
+                )
+            ]
+        ),
+        _Result(one_or_none=None),
+        _Result(),
+        _Result(),
+    ]
+
+    IndexingService().create_draft_indexes(
+        session,
+        request_json={**_request_json(), "job_type": "index_rebuild", "rebuild": True},
+    )
+
+    target_query_params = session.executed[0][1]
+    existing_query_params = session.executed[1][1]
+    assert target_query_params["chunk_statuses"] == ["draft", "active"]
+    assert existing_query_params["statuses"] == ["draft", "ready"]
 
 
 def test_write_draft_indexes_inserts_keyword_refs_and_marks_ready() -> None:
@@ -316,7 +383,7 @@ def test_publish_ready_indexes_activates_version_document_chunks_and_refs() -> N
 
     assert published == [_INDEX_VERSION_ID]
     statements = [statement for statement, _params in session.executed]
-    assert any("SET status = 'archived'" in statement for statement in statements)
+    assert any("SET status = 'pending_delete'" in statement for statement in statements)
     assert any("SET status = 'active'" in statement for statement in statements)
     assert any("current_version_id" in statement for statement in statements)
     assert any("UPDATE chunk_index_refs" in statement for statement in statements)
@@ -349,6 +416,66 @@ def test_publish_ready_indexes_activates_vector_points() -> None:
             "permission_version": 8,
         }
     ]
+
+
+def test_cleanup_pending_delete_indexes_marks_refs_deleted_and_archives_version() -> None:
+    session = _FakeSession()
+    session.results = [_Result(all_rows=[_Row(_pending_delete_target_mapping())])]
+    vector_writer = _FakeVectorIndexWriter()
+
+    result = IndexingService(vector_index_writer=vector_writer).cleanup_pending_delete_indexes(
+        session,
+        request_json={"document_ids": [_DOC_ID]},
+    )
+
+    assert result == {
+        "index_version_count": 1,
+        "vector_payload_count": 1,
+        "vector_physical_delete_count": 1,
+    }
+    assert len(vector_writer.payload_updates) == 1
+    assert vector_writer.payload_updates[0].payload["visibility_state"] == "deleted"
+    assert vector_writer.deleted_points == [
+        {
+            "collection_name": "little_bear_p0",
+            "vector_ids": ("11111111-1111-5111-8111-111111111111",),
+        }
+    ]
+    statements = [statement for statement, _params in session.executed]
+    assert any("UPDATE keyword_index_entries" in statement for statement in statements)
+    assert any("UPDATE chunk_index_refs" in statement for statement in statements)
+    assert any("SET status = 'archived'" in statement for statement in statements)
+
+
+def test_cleanup_pending_delete_indexes_accepts_index_version_ids() -> None:
+    session = _FakeSession()
+    session.results = [_Result(all_rows=[_Row(_pending_delete_target_mapping())])]
+
+    result = IndexingService().cleanup_pending_delete_indexes(
+        session,
+        request_json={"index_version_ids": [_INDEX_VERSION_ID]},
+    )
+
+    assert result["index_version_count"] == 1
+    statement, params = session.executed[0]
+    assert "iv.id = ANY(CAST(:index_version_ids AS uuid[]))" in statement
+    assert params["index_version_ids"] == [_INDEX_VERSION_ID]
+
+
+def test_cleanup_pending_delete_indexes_fails_when_physical_delete_fails() -> None:
+    session = _FakeSession()
+    session.results = [_Result(all_rows=[_Row(_pending_delete_target_mapping())])]
+
+    with pytest.raises(IndexingServiceError) as exc_info:
+        IndexingService(
+            vector_index_writer=_FailingDeleteVectorIndexWriter()
+        ).cleanup_pending_delete_indexes(
+            session,
+            request_json={"document_ids": [_DOC_ID]},
+        )
+
+    assert exc_info.value.error_code == "INDEX_VECTOR_PHYSICAL_DELETE_FAILED"
+    assert exc_info.value.retryable is True
 
 
 def test_publish_ready_indexes_rejects_chunk_count_mismatch() -> None:

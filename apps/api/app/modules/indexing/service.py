@@ -73,6 +73,9 @@ class VectorIndexWriter(Protocol):
     def update_payloads(self, updates: tuple[VectorPayloadUpdate, ...]) -> None:
         ...
 
+    def delete_points(self, *, collection_name: str, vector_ids: tuple[str, ...]) -> None:
+        ...
+
 
 class NoopVectorIndexWriter:
     """本地最小链路默认不触碰外部 VectorStore。"""
@@ -90,6 +93,9 @@ class NoopVectorIndexWriter:
         return None
 
     def update_payloads(self, updates: tuple[VectorPayloadUpdate, ...]) -> None:
+        return None
+
+    def delete_points(self, *, collection_name: str, vector_ids: tuple[str, ...]) -> None:
         return None
 
 
@@ -126,12 +132,14 @@ class IndexingService:
         dimension = self.dimension if dimension is None else dimension
         collection_name = collection_name or self.collection_name
         targets = self._load_index_targets(session, request_json=request_json)
+        force_rebuild = _is_rebuild_request(request_json)
         index_version_ids: list[str] = []
         for target in targets:
             existing = self._load_existing_index_version(
                 session,
                 enterprise_id=target.enterprise_id,
                 document_version_id=target.document_version_id,
+                force_rebuild=force_rebuild,
             )
             if existing:
                 index_version_ids.append(existing["index_version_id"])
@@ -239,6 +247,84 @@ class IndexingService:
             published.append(version.index_version_id)
         return published
 
+    def cleanup_pending_delete_indexes(
+        self,
+        session: Session,
+        *,
+        request_json: dict[str, Any],
+    ) -> dict[str, int]:
+        """清理已被新 active 版本替代的旧索引账本和向量 payload。"""
+
+        targets = self._load_pending_delete_index_refs(session, request_json=request_json)
+        self._mark_vector_points_deleted(targets)
+        index_version_ids = sorted({target["index_version_id"] for target in targets})
+        if not index_version_ids:
+            return {
+                "index_version_count": 0,
+                "vector_payload_count": 0,
+                "vector_physical_delete_count": 0,
+            }
+        try:
+            session.execute(
+                text(
+                    """
+                    UPDATE keyword_index_entries
+                    SET visibility_state = 'deleted',
+                        updated_at = now()
+                    WHERE index_version_id = ANY(CAST(:index_version_ids AS uuid[]))
+                      AND visibility_state != 'deleted'
+                    """
+                ),
+                {"index_version_ids": index_version_ids},
+            )
+            session.execute(
+                text(
+                    """
+                    UPDATE chunk_index_refs
+                    SET visibility_state = 'deleted',
+                        updated_at = now()
+                    WHERE index_version_id = ANY(CAST(:index_version_ids AS uuid[]))
+                      AND visibility_state != 'deleted'
+                    """
+                ),
+                {"index_version_ids": index_version_ids},
+            )
+            session.execute(
+                text(
+                    """
+                    UPDATE index_versions
+                    SET status = 'archived'
+                    WHERE id = ANY(CAST(:index_version_ids AS uuid[]))
+                      AND status = 'pending_delete'
+                    """
+                ),
+                {"index_version_ids": index_version_ids},
+            )
+            physical_delete_count = self._delete_vector_points(targets)
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "INDEX_CLEANUP_FAILED",
+                "pending delete indexes cannot be cleaned",
+                exc,
+            ) from exc
+        if targets:
+            self._insert_audit_log(
+                session,
+                enterprise_id=targets[0]["enterprise_id"],
+                event_name="index_version.cleaned",
+                resource_id=targets[0]["document_id"],
+                summary={
+                    "index_version_ids": index_version_ids,
+                    "vector_payload_count": len(targets),
+                    "vector_physical_delete_count": physical_delete_count,
+                },
+            )
+        return {
+            "index_version_count": len(index_version_ids),
+            "vector_payload_count": len(targets),
+            "vector_physical_delete_count": physical_delete_count,
+        }
+
     def refresh_permission_payloads(
         self,
         session: Session,
@@ -316,6 +402,7 @@ class IndexingService:
                 status_code=409,
             )
         try:
+            chunk_statuses = ["draft", "active"] if _is_rebuild_request(request_json) else ["draft"]
             rows = session.execute(
                 text(
                     """
@@ -332,7 +419,7 @@ class IndexingService:
                     JOIN permission_snapshots ps ON ps.id = d.permission_snapshot_id
                     LEFT JOIN chunks c
                       ON c.document_version_id = dv.id
-                     AND c.status = 'draft'
+                     AND c.status = ANY(CAST(:chunk_statuses AS text[]))
                     WHERE dv.id = ANY(CAST(:document_version_ids AS uuid[]))
                       AND dv.status IN ('chunked', 'indexed', 'active')
                       AND d.lifecycle_status IN ('draft', 'active')
@@ -340,7 +427,7 @@ class IndexingService:
                     ORDER BY d.created_at ASC
                     """
                 ),
-                {"document_version_ids": document_version_ids},
+                {"document_version_ids": document_version_ids, "chunk_statuses": chunk_statuses},
             ).all()
         except SQLAlchemyError as exc:
             raise _database_error(
@@ -367,7 +454,9 @@ class IndexingService:
         *,
         enterprise_id: str,
         document_version_id: str,
+        force_rebuild: bool = False,
     ) -> dict[str, str] | None:
+        statuses = ["draft", "ready"] if force_rebuild else ["draft", "ready", "active"]
         row = session.execute(
             text(
                 """
@@ -375,12 +464,16 @@ class IndexingService:
                 FROM index_versions
                 WHERE enterprise_id = CAST(:enterprise_id AS uuid)
                   AND document_version_id = CAST(:document_version_id AS uuid)
-                  AND status IN ('draft', 'ready', 'active')
+                  AND status = ANY(CAST(:statuses AS text[]))
                 ORDER BY created_at DESC
                 LIMIT 1
                 """
             ),
-            {"enterprise_id": enterprise_id, "document_version_id": document_version_id},
+            {
+                "enterprise_id": enterprise_id,
+                "document_version_id": document_version_id,
+                "statuses": statuses,
+            },
         ).one_or_none()
         return dict(row._mapping) if row else None
 
@@ -444,6 +537,7 @@ class IndexingService:
                 status_code=409,
             )
         try:
+            chunk_statuses = ["draft", "active"] if _is_rebuild_request(request_json) else ["draft"]
             rows = session.execute(
                 text(
                     """
@@ -472,11 +566,11 @@ class IndexingService:
                      AND iv.document_id = c.document_id
                      AND iv.status = 'draft'
                     WHERE c.document_version_id = ANY(CAST(:document_version_ids AS uuid[]))
-                      AND c.status = 'draft'
+                      AND c.status = ANY(CAST(:chunk_statuses AS text[]))
                     ORDER BY c.document_version_id, c.ordinal
                     """
                 ),
-                {"document_version_ids": document_version_ids},
+                {"document_version_ids": document_version_ids, "chunk_statuses": chunk_statuses},
             ).all()
         except SQLAlchemyError as exc:
             raise _database_error(
@@ -751,6 +845,7 @@ class IndexingService:
         version: ReadyIndexVersion,
     ) -> dict[str, int]:
         try:
+            chunk_statuses = ["draft", "active"]
             row = session.execute(
                 text(
                     """
@@ -760,7 +855,7 @@ class IndexingService:
                             SELECT count(*)::integer
                             FROM chunks c
                             WHERE c.document_version_id = iv.document_version_id
-                              AND c.status = 'draft'
+                              AND c.status = ANY(CAST(:chunk_statuses AS text[]))
                         ) AS draft_chunk_count,
                         (
                             SELECT count(*)::integer
@@ -773,7 +868,7 @@ class IndexingService:
                       AND iv.status = 'ready'
                     """
                 ),
-                {"index_version_id": version.index_version_id},
+                {"index_version_id": version.index_version_id, "chunk_statuses": chunk_statuses},
             ).one_or_none()
         except SQLAlchemyError as exc:
             raise _database_error(
@@ -896,7 +991,7 @@ class IndexingService:
             text(
                 """
                 UPDATE index_versions
-                SET status = 'archived'
+                SET status = 'pending_delete'
                 WHERE enterprise_id = CAST(:enterprise_id AS uuid)
                   AND document_id = CAST(:document_id AS uuid)
                   AND status = 'active'
@@ -909,6 +1004,111 @@ class IndexingService:
                 "index_version_id": version.index_version_id,
             },
         )
+
+    def _load_pending_delete_index_refs(
+        self,
+        session: Session,
+        *,
+        request_json: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        index_version_ids = _index_version_ids_from_request(request_json)
+        document_ids = _document_ids_from_request(request_json)
+        kb_id = _optional_str(request_json, "kb_id")
+        conditions = ["iv.status = 'pending_delete'"]
+        params: dict[str, Any] = {}
+        if index_version_ids:
+            conditions.append("iv.id = ANY(CAST(:index_version_ids AS uuid[]))")
+            params["index_version_ids"] = index_version_ids
+        elif document_ids:
+            conditions.append("iv.document_id = ANY(CAST(:document_ids AS uuid[]))")
+            params["document_ids"] = document_ids
+        elif kb_id:
+            conditions.append("iv.kb_id = CAST(:kb_id AS uuid)")
+            params["kb_id"] = kb_id
+        else:
+            return []
+        where_sql = " AND ".join(conditions)
+        try:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT
+                        iv.enterprise_id::text AS enterprise_id,
+                        iv.document_id::text AS document_id,
+                        iv.id::text AS index_version_id,
+                        iv.collection_name,
+                        cir.vector_id
+                    FROM index_versions iv
+                    JOIN chunk_index_refs cir ON cir.index_version_id = iv.id
+                    WHERE {where_sql}
+                      AND cir.visibility_state != 'deleted'
+                    ORDER BY iv.created_at ASC, cir.created_at ASC
+                    """
+                ),
+                params,
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "INDEX_CLEANUP_TARGETS_UNAVAILABLE",
+                "pending delete index cleanup targets cannot be read",
+                exc,
+            ) from exc
+        return [dict(row._mapping) for row in rows]
+
+    def _mark_vector_points_deleted(self, targets: list[dict[str, str]]) -> None:
+        if isinstance(self.vector_index_writer, NoopVectorIndexWriter) or not targets:
+            return
+        updates = tuple(
+            VectorPayloadUpdate(
+                collection_name=target["collection_name"],
+                vector_id=target["vector_id"],
+                payload={
+                    "visibility_state": "deleted",
+                    "document_status": "deleted",
+                    "document_index_status": "blocked",
+                    "chunk_status": "deleted",
+                    "is_deleted": True,
+                },
+            )
+            for target in targets
+        )
+        try:
+            self.vector_index_writer.update_payloads(updates)
+        except Exception as exc:
+            raise IndexingServiceError(
+                "INDEX_VECTOR_CLEANUP_FAILED",
+                "pending delete vector payloads cannot be cleaned",
+                status_code=503,
+                retryable=True,
+                details={
+                    "point_count": len(updates),
+                    "source_error": _source_error(exc),
+                },
+            ) from exc
+
+    def _delete_vector_points(self, targets: list[dict[str, str]]) -> int:
+        if isinstance(self.vector_index_writer, NoopVectorIndexWriter) or not targets:
+            return 0
+        deleted_count = 0
+        try:
+            for collection_name, vector_ids in _group_vector_ids_by_collection(targets).items():
+                self.vector_index_writer.delete_points(
+                    collection_name=collection_name,
+                    vector_ids=tuple(vector_ids),
+                )
+                deleted_count += len(vector_ids)
+        except Exception as exc:
+            raise IndexingServiceError(
+                "INDEX_VECTOR_PHYSICAL_DELETE_FAILED",
+                "pending delete vector points cannot be physically deleted",
+                status_code=503,
+                retryable=True,
+                details={
+                    "point_count": len(targets),
+                    "source_error": _source_error(exc),
+                },
+            ) from exc
+        return deleted_count
 
     def _activate_index_version(self, session: Session, *, version: ReadyIndexVersion) -> None:
         session.execute(
@@ -1283,6 +1483,26 @@ def _document_version_ids_from_request(request_json: dict[str, Any]) -> list[str
     return []
 
 
+def _document_ids_from_request(request_json: dict[str, Any]) -> list[str]:
+    value = request_json.get("document_ids")
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    value = request_json.get("document_id")
+    return [value] if isinstance(value, str) and value else []
+
+
+def _index_version_ids_from_request(request_json: dict[str, Any]) -> list[str]:
+    value = request_json.get("index_version_ids")
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    value = request_json.get("index_version_id")
+    return [value] if isinstance(value, str) and value else []
+
+
+def _is_rebuild_request(request_json: dict[str, Any]) -> bool:
+    return request_json.get("job_type") == "index_rebuild" or request_json.get("rebuild") is True
+
+
 def _vector_id(chunk: DraftIndexChunk) -> str:
     return str(
         uuid.uuid5(
@@ -1377,6 +1597,20 @@ def _permission_refresh_payload_hash(target: _PermissionRefreshTarget) -> str:
             "index_payload_hash": target.index_payload_hash,
         }
     )
+
+
+def _group_vector_ids_by_collection(targets: list[dict[str, str]]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    seen: set[tuple[str, str]] = set()
+    for target in targets:
+        collection_name = target["collection_name"]
+        vector_id = target["vector_id"]
+        key = (collection_name, vector_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        grouped.setdefault(collection_name, []).append(vector_id)
+    return grouped
 
 
 def _required_str(mapping: dict[str, Any], key: str) -> str:
