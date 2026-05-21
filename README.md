@@ -61,6 +61,8 @@ make up
 make ps
 ```
 
+`.env.example` 已覆盖本地 API、Worker、前端、PostgreSQL、MinIO、Qdrant 联调和 smoke/regression 变量。现有 `.env` 不会被 `make env` 覆盖；如果后续示例新增变量，需要手动按需补入当前 `.env`。
+
 PostgreSQL 就绪后执行数据库迁移：
 
 ```bash
@@ -154,6 +156,14 @@ make PYTHON=.venv/bin/python query-regression-p0
 
 默认查询回归样例位于 `docs/examples/query-regression.p0.jsonl`。真实验收时应复制并替换为当前业务知识库的问题、预期引用和必要关键词；执行记录默认写入 `artifacts/`，不会提交到仓库。
 
+发布前可以使用当前非破坏性 P0 验收目标串联 smoke 记录和查询回归：
+
+```bash
+make PYTHON=.venv/bin/python release-smoke-p0
+```
+
+该目标要求 API 已完成初始化、至少存在一个当前账号可访问且已发布索引的知识库，并且 `.env` 或命令行已配置 smoke/regression 登录账号。它不会创建、上传或删除业务数据；文档上传、索引重建、权限收紧、删除阻断等写入型验收仍按发布检查清单人工执行并留存记录。
+
 数据库迁移完成后再启动 API。空库完成迁移但尚未执行业务初始化时，`GET /internal/v1/setup-state` 应返回未初始化状态，随后才能进入 `setup-config-validations` 和 `setup-initialization` 流程。
 
 ## 开发约定
@@ -174,11 +184,11 @@ make PYTHON=.venv/bin/python query-regression-p0
 - Query Service 非流式链路已落地：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、rerank provider、Permission Service filter、候选 gate、Context Builder、LLM provider、citation 校验、query_logs、model_call_logs 和高风险 query audit 写入；rerank、LLM 不可用或 citation 校验失败时结构化降级。
 - Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、provider token 级流式答案、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、降级状态、request_id 和 trace_id 展示。
 - 已新增 P0 主链路 smoke 脚本、脱敏执行记录和查询回归数据集入口；`employee` 内置角色已补齐 `knowledge_base:read` 初始化模板和存量迁移。
-- RAG 数据面仍待补齐：复杂版式 / OCR 解析、查询改写和真实业务回归数据集验证仍待实现。
+- 当前版本暂不纳入复杂版式 / OCR 解析、查询改写、索引自动修复和在线评测平台；这些能力保留为后续增强项，不作为当前投产门禁。
 - 当前开发进度详见根目录 `开发进度追踪.md`。
 
 建议下一步按以下顺序推进：
 
-1. 持续保持实际 FastAPI routes 与 `docs/contracts/openapi.yaml` 的契约对齐。
-2. 用真实业务数据集执行 `make query-regression-p0`，并把 smoke / query regression 记录纳入验收 artifact。
-3. 补齐复杂版式 / OCR 解析、文档全文预览、文档移动 / 生命周期变更和权限收紧真实环境回归记录。
+1. 补齐当前环境 `.env` 中的生产必填项，尤其是数据库、JWT、Secret Store、MinIO、Qdrant、模型 provider 和前端 API 地址。
+2. 启动 Docker / API / Worker 后执行 `make test`、前端构建、`make pg-backup` 和 `make release-smoke-p0`，并保存 `artifacts/` 下的验收记录。
+3. 按 `docs/operations/部署与发布检查清单.md` 完成写入型人工验收：文档上传、导入 Worker、索引重建、权限收紧、删除阻断、查询诊断日志和恢复演练。

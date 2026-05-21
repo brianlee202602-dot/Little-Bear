@@ -4,15 +4,15 @@ services:
     container_name: little-bear-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: little_bear       # 直接指定数据库名称
-      POSTGRES_USER: little_bear     # 直接指定数据库用户名
-      POSTGRES_PASSWORD: little_bear_dev  # 直接指定数据库密码
+      POSTGRES_DB: ${POSTGRES_DB:-little_bear}
+      POSTGRES_USER: ${POSTGRES_USER:-little_bear}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-little_bear_dev}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U little_bear -d little_bear"]  # 直接指定用户名和数据库名称
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -38,8 +38,8 @@ services:
     restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      MINIO_ROOT_USER: minioadmin      # 直接指定 MinIO 用户名
-      MINIO_ROOT_PASSWORD: minioadmin  # 直接指定 MinIO 密码
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -58,9 +58,9 @@ services:
       minio:
         condition: service_healthy
     environment:
-      MINIO_ROOT_USER: minioadmin      # 直接指定 MinIO 用户名
-      MINIO_ROOT_PASSWORD: minioadmin  # 直接指定 MinIO 密码
-      MINIO_BUCKET: little-bear-rag    # 直接指定 Bucket 名称
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-little-bear-rag}
     entrypoint:
       - /bin/sh
       - -c

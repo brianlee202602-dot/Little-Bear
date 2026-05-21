@@ -22,12 +22,15 @@ QUERY_REGRESSION_DATASET ?= docs/examples/query-regression.p0.jsonl
 QUERY_REGRESSION_RECORD_PATH ?= artifacts/query-regression-latest.json
 REGRESSION_KB_ID ?= $(SMOKE_KB_ID)
 REGRESSION_TIMEOUT_SECONDS ?= 30
+BACKUP_DIR ?= artifacts/backups
+BACKUP_TIMESTAMP ?= $(shell date +%Y%m%d-%H%M%S)
+PG_BACKUP_FILE ?= $(BACKUP_DIR)/postgres-$(BACKUP_TIMESTAMP).dump
 
 define env_shell
 set -a; [ ! -f "./$(ENV_FILE)" ] || . "./$(ENV_FILE)"; set +a;
 endef
 
-.PHONY: env up down restart ps logs clean reset db-upgrade db-current api worker web admin test smoke-p0 smoke-p0-record query-regression-p0 test-integration-qdrant
+.PHONY: env up down restart ps logs clean reset db-upgrade db-current pg-backup api worker web admin test smoke-p0 smoke-p0-record query-regression-p0 release-smoke-p0 test-integration-qdrant
 
 env:
 	@if [ ! -f "$(ENV_FILE)" ]; then cp .env.example "$(ENV_FILE)"; fi
@@ -57,6 +60,11 @@ db-upgrade:
 
 db-current:
 	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m alembic.config current
+
+pg-backup:
+	@mkdir -p "$(BACKUP_DIR)"
+	$(COMPOSE) --env-file "$(ENV_FILE)" exec -T postgres sh -lc 'pg_dump -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -Fc' > "$(PG_BACKUP_FILE)"
+	@echo "PostgreSQL backup written to $(PG_BACKUP_FILE)"
 
 api:
 	$(env_shell) PYTHONPATH=apps/api LOG_LEVEL="$(LOG_LEVEL)" $(PYTHON) -m uvicorn app.main:app --host "$(API_HOST)" --port "$(API_PORT)" --reload
@@ -111,6 +119,8 @@ query-regression-p0:
 		LITTLE_BEAR_QUERY_REGRESSION_RECORD_PATH="$${LITTLE_BEAR_QUERY_REGRESSION_RECORD_PATH:-$(QUERY_REGRESSION_RECORD_PATH)}" \
 		LITTLE_BEAR_REGRESSION_TIMEOUT_SECONDS="$${LITTLE_BEAR_REGRESSION_TIMEOUT_SECONDS:-$(REGRESSION_TIMEOUT_SECONDS)}" \
 		$(PYTHON) tools/query_regression.py
+
+release-smoke-p0: smoke-p0-record query-regression-p0
 
 test-integration-qdrant:
 	$(env_shell) LITTLE_BEAR_RUN_QDRANT_INTEGRATION=1 PYTHONPATH=apps/api $(PYTHON) -m pytest -q tests/integration/test_qdrant_indexing_flow.py
