@@ -182,7 +182,7 @@ make PYTHON=.venv/bin/python release-smoke-p0
 - 文档详情、文档版本、chunk 来源、普通用户文档预览，以及知识库 / 文档独立权限变更 API 已补齐。
 - Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、MinIO/S3 对象存储交接、PDF / DOCX / UTF-8 文本 / Markdown parse-clean-chunk、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入、active index 发布，以及权限变更后的索引 payload 刷新任务。
 - Query Service 非流式链路已落地：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、rerank provider、Permission Service filter、候选 gate、Context Builder、LLM provider、citation 校验、query_logs、model_call_logs 和高风险 query audit 写入；rerank、LLM 不可用或 citation 校验失败时结构化降级。
-- Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、provider token 级流式答案、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、降级状态、request_id 和 trace_id 展示。
+- Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、provider token 级流式答案、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、服务端历史会话同步、多轮消息展示、会话删除、降级状态、request_id 和 trace_id 展示。
 - 已新增 P0 主链路 smoke 脚本、脱敏执行记录和查询回归数据集入口；`employee` 内置角色已补齐 `knowledge_base:read` 初始化模板和存量迁移。
 - 当前版本暂不纳入复杂版式 / OCR 解析、查询改写、索引自动修复和在线评测平台；这些能力保留为后续增强项，不作为当前投产门禁。
 - 当前开发进度详见根目录 `开发进度追踪.md`。

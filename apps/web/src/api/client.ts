@@ -76,7 +76,9 @@ export interface KnowledgeBaseData {
   name: string;
   status: "active" | "disabled" | "archived";
   owner_department_id: string;
-  default_visibility: "department" | "enterprise";
+  kb_visibility: "enterprise" | "department_acl" | "private";
+  default_document_visibility: "department" | "enterprise";
+  default_document_owner_department_id: string;
   config_scope_id: string | null;
   policy_version: number;
 }
@@ -172,9 +174,16 @@ export interface CitationSourceResponse {
 export type QueryMode = "answer" | "search";
 export type QueryConfidence = "low" | "medium" | "high";
 
+export interface QueryHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface QueryRequest {
   kb_ids: string[];
   query: string;
+  conversation_id?: string | null;
+  history?: QueryHistoryMessage[];
   mode: QueryMode;
   filters: Record<string, unknown>;
   top_k: number;
@@ -193,6 +202,8 @@ export interface CitationData {
 
 export interface QueryResponse {
   request_id: string;
+  conversation_id: string | null;
+  message_id: string | null;
   answer: string;
   citations: CitationData[];
   confidence: QueryConfidence;
@@ -203,7 +214,13 @@ export interface QueryResponse {
 
 export type QueryStreamMetadata = Pick<
   QueryResponse,
-  "request_id" | "trace_id" | "confidence" | "degraded" | "degrade_reason"
+  | "request_id"
+  | "conversation_id"
+  | "message_id"
+  | "trace_id"
+  | "confidence"
+  | "degraded"
+  | "degrade_reason"
 > & {
   streaming?: boolean;
 };
@@ -215,6 +232,44 @@ export interface QueryStreamHandlers {
   onToken?: (delta: string) => void;
   onCitation?: (citation: CitationData) => void;
   onDone?: (result: QueryStreamDone) => void;
+}
+
+export interface QueryConversationData {
+  id: string;
+  title: string;
+  status: "active" | "deleted";
+  kb_ids: string[];
+  last_message_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface QueryMessageData {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant";
+  content: string;
+  status: "running" | "done" | "error" | "cancelled";
+  citations: CitationData[];
+  confidence: QueryConfidence | null;
+  degraded: boolean;
+  degrade_reason: string | null;
+  request_id: string | null;
+  trace_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface QueryConversationListResponse {
+  request_id: string;
+  data: QueryConversationData[];
+  pagination: PaginationData;
+}
+
+export interface QueryConversationResponse {
+  request_id: string;
+  data: QueryConversationData;
+  messages: QueryMessageData[];
 }
 
 export async function getLiveStatus(): Promise<unknown> {
@@ -346,6 +401,58 @@ export async function getCitationSource(
     `/internal/v1/documents/${encodeURIComponent(documentId)}/sources/${encodeURIComponent(sourceId)}`,
     {
       method: "GET",
+    },
+    accessToken,
+  );
+}
+
+export async function listQueryConversations(
+  accessToken: string,
+): Promise<QueryConversationListResponse> {
+  return requestJson<QueryConversationListResponse>(
+    "/internal/v1/query-conversations?page=1&page_size=50",
+    {
+      method: "GET",
+    },
+    accessToken,
+  );
+}
+
+export async function createQueryConversation(
+  payload: { title?: string | null; kb_ids?: string[] },
+  accessToken: string,
+): Promise<QueryConversationResponse> {
+  return requestJson<QueryConversationResponse>(
+    "/internal/v1/query-conversations",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    accessToken,
+  );
+}
+
+export async function getQueryConversation(
+  conversationId: string,
+  accessToken: string,
+): Promise<QueryConversationResponse> {
+  return requestJson<QueryConversationResponse>(
+    `/internal/v1/query-conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: "GET",
+    },
+    accessToken,
+  );
+}
+
+export async function deleteQueryConversation(
+  conversationId: string,
+  accessToken: string,
+): Promise<void> {
+  await requestVoid(
+    `/internal/v1/query-conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: "DELETE",
     },
     accessToken,
   );

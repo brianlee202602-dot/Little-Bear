@@ -7,6 +7,13 @@ from app.modules.answer.schemas import AnswerGenerationResult
 from app.modules.auth.schemas import AuthContext, AuthRole, AuthUser
 from app.modules.context.schemas import ContextChunk, QueryContext
 from app.modules.permissions.schemas import PermissionContext
+from app.modules.query.conversations import (
+    QueryConversationDetail,
+    QueryConversationList,
+    QueryConversationSummary,
+    QueryConversationWriteContext,
+    QueryMessage,
+)
 from app.modules.query.errors import QueryServiceError
 from app.modules.query.schemas import QueryCitation, QueryResult
 from app.modules.query.service import QueryStreamPlan
@@ -117,6 +124,68 @@ class _FakeStreamingQueryService:
         )
 
 
+class _FakeConversationService:
+    def __init__(self, captured: dict[str, object]) -> None:
+        self.captured = captured
+        self.summary = QueryConversationSummary(
+            id="22222222-2222-2222-2222-222222222222",
+            title="员工手册",
+            status="active",
+            kb_ids=("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",),
+            last_message_at=None,
+            created_at=None,
+            updated_at=None,
+        )
+
+    def list_conversations(self, _session, **kwargs):
+        self.captured["conversation_list_kwargs"] = kwargs
+        return QueryConversationList(items=(self.summary,), total=1)
+
+    def create_conversation(self, _session, **kwargs):
+        self.captured["conversation_create_kwargs"] = kwargs
+        return self.summary
+
+    def get_conversation(self, _session, **kwargs):
+        self.captured["conversation_get_kwargs"] = kwargs
+        return QueryConversationDetail(
+            conversation=self.summary,
+            messages=(
+                QueryMessage(
+                    id="77777777-7777-7777-7777-777777777777",
+                    conversation_id=self.summary.id,
+                    role="user",
+                    content="员工手册",
+                    status="done",
+                    citations=(),
+                    confidence=None,
+                    degraded=False,
+                    degrade_reason=None,
+                    request_id="req_query",
+                    trace_id="trace_query",
+                    created_at=None,
+                    updated_at=None,
+                ),
+            ),
+        )
+
+    def delete_conversation(self, _session, **kwargs):
+        self.captured["conversation_delete_kwargs"] = kwargs
+
+    def prepare_query_messages(self, _session, **kwargs):
+        self.captured["conversation_prepare_kwargs"] = kwargs
+        return QueryConversationWriteContext(
+            conversation_id=self.summary.id,
+            user_message_id="88888888-8888-8888-8888-888888888888",
+            assistant_message_id="99999999-9999-9999-9999-999999999999",
+        )
+
+    def complete_assistant_message(self, _session, **kwargs):
+        self.captured["conversation_complete_kwargs"] = kwargs
+
+    def fail_assistant_message(self, _session, **kwargs):
+        self.captured["conversation_fail_kwargs"] = kwargs
+
+
 def _create_test_app():
     return create_app(run_startup_checks=False)
 
@@ -163,6 +232,11 @@ def _auth_context() -> AuthContext:
     )
 
 
+def _patch_conversation_service(monkeypatch, captured: dict[str, object]) -> None:
+    service = _FakeConversationService(captured)
+    monkeypatch.setattr("app.api.routes.query.QueryConversationService", lambda: service)
+
+
 def test_create_query_route_returns_query_response(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
@@ -199,6 +273,7 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
         "app.api.routes.query.AuthService.authenticate_access_token",
         _authenticate,
     )
+    _patch_conversation_service(monkeypatch, captured)
     monkeypatch.setattr(
         "app.api.routes.query.build_query_service",
         lambda _session: _FakeQueryService(_create_query),
@@ -210,6 +285,10 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
         json={
             "kb_ids": ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
             "query": "员工手册",
+            "history": [
+                {"role": "user", "content": "上一轮问题"},
+                {"role": "assistant", "content": "上一轮回答"},
+            ],
             "mode": "answer",
         },
     )
@@ -217,9 +296,16 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["request_id"] == "req_query"
+    assert body["conversation_id"] == "22222222-2222-2222-2222-222222222222"
+    assert body["message_id"] == "99999999-9999-9999-9999-999999999999"
     assert body["citations"][0]["title"] == "员工手册"
     assert body["degraded"] is True
     assert captured["required_scope"] == "rag:query"
+    assert captured["query_text"] == "员工手册"
+    assert captured["conversation_prepare_kwargs"]["query_text"] == "员工手册"
+    assert captured["conversation_complete_kwargs"]["message_id"] == (
+        "99999999-9999-9999-9999-999999999999"
+    )
 
 
 def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
@@ -258,6 +344,7 @@ def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
         "app.api.routes.query.AuthService.authenticate_access_token",
         _authenticate,
     )
+    _patch_conversation_service(monkeypatch, captured)
     monkeypatch.setattr(
         "app.api.routes.query.build_query_service",
         lambda _session: _FakeQueryService(_create_query),
@@ -279,6 +366,8 @@ def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
     assert 'data: {"delta":"员工年假需要提前申请。"}' in response.text
     assert "event: citation" in response.text
     assert "event: done" in response.text
+    assert '"conversation_id":"22222222-2222-2222-2222-222222222222"' in response.text
+    assert '"message_id":"99999999-9999-9999-9999-999999999999"' in response.text
     assert "员工手册" in response.text
     assert captured["required_scope"] == "rag:query"
 
@@ -297,6 +386,7 @@ def test_create_query_stream_route_uses_provider_token_stream(monkeypatch) -> No
         "app.api.routes.query.AuthService.authenticate_access_token",
         _authenticate,
     )
+    _patch_conversation_service(monkeypatch, captured)
     monkeypatch.setattr(
         "app.api.routes.query.build_query_service",
         lambda _session: _FakeStreamingQueryService(captured),
@@ -321,6 +411,10 @@ def test_create_query_stream_route_uses_provider_token_stream(monkeypatch) -> No
     assert "event: done" in response.text
     assert captured["required_scope"] == "rag:query"
     assert captured["final_answer"] == "员工年假需要提前申请。[source:chunk_1]"
+    assert captured["query_text"] == "员工手册"
+    assert captured["conversation_complete_kwargs"]["answer"] == (
+        "员工年假需要提前申请。[source:chunk_1]"
+    )
 
 
 def test_create_query_route_returns_service_error(monkeypatch) -> None:
@@ -331,6 +425,8 @@ def test_create_query_route_returns_service_error(monkeypatch) -> None:
         "app.api.routes.query.AuthService.authenticate_access_token",
         lambda *_args, **_kwargs: _auth_context(),
     )
+    captured: dict[str, object] = {}
+    _patch_conversation_service(monkeypatch, captured)
 
     def _raise_error(*_args, **_kwargs):
         raise QueryServiceError("QUERY_FILTER_UNSUPPORTED", "unsupported", status_code=400)
@@ -352,6 +448,46 @@ def test_create_query_route_returns_service_error(monkeypatch) -> None:
 
     assert response.status_code == 400
     assert response.json()["error_code"] == "QUERY_FILTER_UNSUPPORTED"
+    assert captured["conversation_fail_kwargs"]["degrade_reason"] == "QUERY_FILTER_UNSUPPORTED"
+
+
+def test_query_conversation_routes_use_current_user_scope(monkeypatch) -> None:
+    app = _create_test_app()
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.query.session_scope", lambda: _FakeSession())
+    captured: dict[str, object] = {}
+    _patch_conversation_service(monkeypatch, captured)
+    monkeypatch.setattr(
+        "app.api.routes.query.AuthService.authenticate_access_token",
+        lambda *_args, **kwargs: (captured.update(kwargs) or _auth_context()),
+    )
+
+    client = TestClient(app)
+    list_response = client.get(
+        "/internal/v1/query-conversations",
+        headers={"Authorization": "Bearer token", "x-request-id": "req_list"},
+    )
+    assert list_response.status_code == 200
+    assert list_response.json()["data"][0]["title"] == "员工手册"
+    assert captured["conversation_list_kwargs"]["user_id"] == (
+        "11111111-1111-1111-1111-111111111111"
+    )
+
+    detail_response = client.get(
+        "/internal/v1/query-conversations/22222222-2222-2222-2222-222222222222",
+        headers={"Authorization": "Bearer token", "x-request-id": "req_get"},
+    )
+    assert detail_response.status_code == 200
+    assert detail_response.json()["messages"][0]["content"] == "员工手册"
+
+    delete_response = client.delete(
+        "/internal/v1/query-conversations/22222222-2222-2222-2222-222222222222",
+        headers={"Authorization": "Bearer token", "x-request-id": "req_delete"},
+    )
+    assert delete_response.status_code == 204
+    assert captured["conversation_delete_kwargs"]["conversation_id"] == (
+        "22222222-2222-2222-2222-222222222222"
+    )
 
 
 def _query_context() -> QueryContext:

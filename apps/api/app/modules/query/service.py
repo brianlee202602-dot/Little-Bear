@@ -108,6 +108,8 @@ class QueryStreamPlan:
     permission_filter_hash: str
     permission_version: int
     index_version_hash: str | None
+    conversation_id: str | None = None
+    message_id: str | None = None
 
 
 class QueryService:

@@ -5,11 +5,14 @@ import {
   ApiRequestError,
   createSession,
   createQuery,
+  deleteQueryConversation,
   deleteCurrentSession,
   getCitationSource,
   getCurrentUser,
+  getQueryConversation,
   listDocumentChunks,
   listKnowledgeBases,
+  listQueryConversations,
   refreshSession,
   streamQuery,
   type CitationSourceData,
@@ -18,6 +21,9 @@ import {
   type CurrentUserData,
   type KnowledgeBaseData,
   type QueryConfidence,
+  type QueryConversationData,
+  type QueryHistoryMessage,
+  type QueryMessageData,
   type QueryMode,
   type QueryRequest,
   type QueryResponse,
@@ -26,7 +32,7 @@ import {
 } from "@/api/client";
 
 type QueryStatus = "idle" | "running" | "done" | "error" | "cancelled";
-type ChatRecordStatus = "running" | "done" | "error" | "cancelled";
+type ChatMessageStatus = "running" | "done" | "error" | "cancelled";
 
 type AuthTokenState = {
   accessToken: string;
@@ -34,26 +40,35 @@ type AuthTokenState = {
   accessTokenExpiresAt: number;
 };
 
-type ChatRecord = {
+type ChatMessage = {
   id: string;
-  title: string;
-  query: string;
-  answer: string;
+  role: "user" | "assistant";
+  content: string;
+  status: ChatMessageStatus;
   citations: CitationData[];
-  status: ChatRecordStatus;
-  confidence: QueryConfidence;
+  confidence: QueryConfidence | null;
   degraded: boolean;
   degradeReason: string | null;
   requestId: string;
   traceId: string;
-  kbIds: string[];
   createdAt: number;
+};
+
+type ChatConversation = {
+  id: string;
+  title: string;
+  status: "active" | "deleted";
+  kbIds: string[];
+  messages: ChatMessage[];
+  createdAt: number;
+  updatedAt: number;
+  lastMessageAt: number | null;
 };
 
 const AUTH_STORAGE_KEY = "little-bear.web.auth";
 const KB_STORAGE_KEY = "little-bear.web.kb-ids";
-const HISTORY_STORAGE_KEY = "little-bear.web.chat-history";
 const TOKEN_REFRESH_SKEW_MS = 60_000;
+const LOCAL_CONVERSATION_PREFIX = "local-";
 
 const form = reactive({
   kbIds: "",
@@ -86,8 +101,8 @@ const highlightedSourceId = ref("");
 const sourceTitle = ref("");
 const browserFeedback = ref("");
 const sourceFeedback = ref("");
-const chatRecords = ref<ChatRecord[]>(loadStoredChatRecords());
-const activeRecordId = ref(chatRecords.value[0]?.id ?? "");
+const chatRecords = ref<ChatConversation[]>([]);
+const activeRecordId = ref("");
 const authBusy = reactive({
   restoring: true,
   loggingIn: false,
@@ -96,7 +111,9 @@ const authBusy = reactive({
 });
 const browserBusy = reactive({
   loadingKnowledgeBases: false,
+  loadingConversations: false,
   loadingSource: false,
+  deletingConversationId: "",
 });
 
 const canSubmit = computed(() => {
@@ -142,7 +159,7 @@ const statusText = computed(() => {
     return form.streaming ? "流式生成中" : "查询中";
   }
   if (status.value === "done") {
-    return metadata.value?.degraded ? "已降级完成" : "已完成";
+    return activeAssistantMessage.value?.degraded ? "已降级完成" : "已完成";
   }
   if (status.value === "error") {
     return "查询失败";
@@ -152,17 +169,26 @@ const statusText = computed(() => {
   }
   return "待查询";
 });
-const degraded = computed(() => Boolean(metadata.value?.degraded ?? lastResponse.value?.degraded));
-const degradeReason = computed(() => metadata.value?.degrade_reason ?? lastResponse.value?.degrade_reason);
+const degraded = computed(() => Boolean(activeAssistantMessage.value?.degraded ?? metadata.value?.degraded));
+const degradeReason = computed(
+  () => activeAssistantMessage.value?.degradeReason ?? metadata.value?.degrade_reason,
+);
 const confidence = computed<QueryConfidence>(() => {
-  return metadata.value?.confidence ?? lastResponse.value?.confidence ?? "low";
+  return activeAssistantMessage.value?.confidence ?? metadata.value?.confidence ?? "low";
 });
 const confidenceText = computed(() => formatConfidence(confidence.value));
-const traceId = computed(() => metadata.value?.trace_id ?? lastResponse.value?.trace_id ?? "");
-const requestId = computed(() => metadata.value?.request_id ?? lastResponse.value?.request_id ?? "");
+const traceId = computed(() => activeAssistantMessage.value?.traceId ?? metadata.value?.trace_id ?? "");
+const requestId = computed(
+  () => activeAssistantMessage.value?.requestId ?? metadata.value?.request_id ?? "",
+);
 const activeRecord = computed(
   () => chatRecords.value.find((record) => record.id === activeRecordId.value) ?? null,
 );
+const activeMessages = computed(() => activeRecord.value?.messages ?? []);
+const activeAssistantMessage = computed(() => {
+  const messages = activeMessages.value.filter((message) => message.role === "assistant");
+  return messages[messages.length - 1] ?? null;
+});
 
 onMounted(async () => {
   form.kbIds = window.sessionStorage.getItem(KB_STORAGE_KEY) ?? "";
@@ -175,15 +201,25 @@ async function submitQuery(): Promise<void> {
   }
   const queryText = form.query.trim();
   const kbIds = [...selectedKbIds.value];
-  resetResult();
-  currentQuestion.value = queryText;
+  resetSourceState();
   status.value = "running";
   window.sessionStorage.setItem(KB_STORAGE_KEY, form.kbIds.trim());
-  const record = createChatRecord(queryText, kbIds);
-  activeRecordId.value = record.id;
-  chatRecords.value = [record, ...chatRecords.value].slice(0, 50);
-  persistChatRecords();
-  const payload = buildPayload(queryText, kbIds);
+  const conversation = activeRecord.value ?? createLocalConversation(queryText, kbIds);
+  if (!activeRecord.value) {
+    chatRecords.value = [conversation, ...chatRecords.value].slice(0, 50);
+    activeRecordId.value = conversation.id;
+  }
+  const history = buildHistoryMessages(conversation.messages);
+  const userMessage = createLocalMessage("user", queryText, "done");
+  const assistantMessage = createLocalMessage("assistant", "", "running");
+  let assistantMessageId = assistantMessage.id;
+  appendMessages(conversation.id, [userMessage, assistantMessage], kbIds);
+  const payload = buildPayload(
+    queryText,
+    kbIds,
+    isServerConversationId(conversation.id) ? conversation.id : null,
+    history,
+  );
   form.query = "";
 
   try {
@@ -200,35 +236,48 @@ async function submitQuery(): Promise<void> {
         {
           onMetadata: (event) => {
             metadata.value = event;
-            updateChatRecord(record.id, {
+            if (event.conversation_id) {
+              replaceConversationId(conversation.id, event.conversation_id);
+            }
+            const nextMessageId = event.message_id || assistantMessageId;
+            updateMessage(assistantMessageId, {
+              id: nextMessageId,
               confidence: event.confidence,
               degraded: event.degraded,
               degradeReason: event.degrade_reason,
               requestId: event.request_id,
               traceId: event.trace_id,
             });
+            assistantMessageId = nextMessageId;
           },
           onToken: (delta) => {
-            answer.value += delta;
-            updateChatRecord(record.id, { answer: answer.value }, false);
+            updateMessage(assistantMessageId, (message) => ({
+              content: message.content + delta,
+            }));
           },
           onCitation: (citation) => {
-            citations.value = mergeCitation(citations.value, citation);
-            updateChatRecord(record.id, { citations: citations.value }, false);
+            updateMessage(assistantMessageId, (message) => ({
+              citations: mergeCitation(message.citations, citation),
+            }));
           },
           onDone: (event) => {
-            answer.value = event.answer;
             metadata.value = {
               request_id: event.request_id,
+              conversation_id: event.conversation_id,
+              message_id: event.message_id,
               trace_id: event.trace_id,
               confidence: event.confidence,
               degraded: event.degraded,
               degrade_reason: event.degrade_reason,
             };
-            citations.value = event.citations;
-            updateChatRecord(record.id, {
+            if (event.conversation_id) {
+              replaceConversationId(conversation.id, event.conversation_id);
+            }
+            const nextMessageId = event.message_id || assistantMessageId;
+            updateMessage(assistantMessageId, {
+              id: nextMessageId,
               status: "done",
-              answer: event.answer,
+              content: event.answer,
               citations: event.citations,
               confidence: event.confidence,
               degraded: event.degraded,
@@ -236,21 +285,25 @@ async function submitQuery(): Promise<void> {
               requestId: event.request_id,
               traceId: event.trace_id,
             });
+            assistantMessageId = nextMessageId;
           },
         },
         controller.signal,
       );
       status.value = "done";
-      updateChatRecord(record.id, { status: "done", answer: answer.value, citations: citations.value });
+      updateMessage(assistantMessageId, { status: "done" });
     } else {
       const result = await createQuery(payload, accessToken);
       lastResponse.value = result;
-      answer.value = result.answer;
-      citations.value = result.citations;
+      if (result.conversation_id) {
+        replaceConversationId(conversation.id, result.conversation_id);
+      }
       status.value = "done";
-      updateChatRecord(record.id, {
+      const nextMessageId = result.message_id || assistantMessageId;
+      updateMessage(assistantMessageId, {
+        id: nextMessageId,
         status: "done",
-        answer: result.answer,
+        content: result.answer,
         citations: result.citations,
         confidence: result.confidence,
         degraded: result.degraded,
@@ -258,24 +311,25 @@ async function submitQuery(): Promise<void> {
         requestId: result.request_id,
         traceId: result.trace_id,
       });
+      assistantMessageId = nextMessageId;
     }
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       status.value = "cancelled";
-      updateChatRecord(record.id, { status: "cancelled" });
+      updateMessage(assistantMessageId, { status: "cancelled" });
       return;
     }
     status.value = "error";
     errorMessage.value = readableError(error);
-    updateChatRecord(record.id, {
+    updateMessage(assistantMessageId, {
       status: "error",
-      answer: errorMessage.value,
+      content: errorMessage.value,
       degraded: true,
       degradeReason: errorMessage.value,
     });
   } finally {
     abortController.value = null;
-    persistChatRecords();
+    void refreshConversations(false);
   }
 }
 
@@ -298,6 +352,7 @@ async function submitLogin(): Promise<void> {
     currentUser.value = userResponse.data;
     loginForm.password = "";
     await refreshKnowledgeBases();
+    await refreshConversations(true);
   } catch (error) {
     clearAuthSession();
     authFeedback.value = readableError(error);
@@ -317,6 +372,7 @@ async function restoreAuthenticatedSession(): Promise<void> {
     const userResponse = await getCurrentUser(accessToken);
     currentUser.value = userResponse.data;
     await refreshKnowledgeBases();
+    await refreshConversations(true);
   } catch {
     clearAuthSession();
   } finally {
@@ -384,6 +440,34 @@ async function refreshKnowledgeBases(): Promise<void> {
     browserFeedback.value = readableError(error);
   } finally {
     browserBusy.loadingKnowledgeBases = false;
+  }
+}
+
+async function refreshConversations(selectFirst: boolean): Promise<void> {
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+  browserBusy.loadingConversations = true;
+  browserFeedback.value = "";
+  try {
+    const response = await listQueryConversations(accessToken);
+    const existingMessages = new Map(
+      chatRecords.value.map((conversation) => [conversation.id, conversation.messages]),
+    );
+    chatRecords.value = response.data.map((item) =>
+      conversationFromData(item, existingMessages.get(item.id) ?? []),
+    );
+    if (activeRecordId.value && !chatRecords.value.some((item) => item.id === activeRecordId.value)) {
+      activeRecordId.value = "";
+    }
+    if (!activeRecordId.value && selectFirst && chatRecords.value.length) {
+      await selectChatRecord(chatRecords.value[0]);
+    }
+  } catch (error) {
+    browserFeedback.value = readableError(error);
+  } finally {
+    browserBusy.loadingConversations = false;
   }
 }
 
@@ -467,6 +551,10 @@ function resetResult(): void {
   metadata.value = null;
   lastResponse.value = null;
   errorMessage.value = "";
+  resetSourceState();
+}
+
+function resetSourceState(): void {
   sourceDetail.value = null;
   sourceChunks.value = [];
   highlightedSourceId.value = "";
@@ -474,10 +562,17 @@ function resetResult(): void {
   sourceFeedback.value = "";
 }
 
-function buildPayload(queryText: string, kbIds: string[]): QueryRequest {
+function buildPayload(
+  queryText: string,
+  kbIds: string[],
+  conversationId: string | null,
+  history: QueryHistoryMessage[],
+): QueryRequest {
   return {
     kb_ids: kbIds,
     query: queryText,
+    conversation_id: conversationId,
+    history,
     mode: form.mode,
     filters: {},
     top_k: form.topK,
@@ -555,7 +650,6 @@ function clearAuthSession(): void {
   chatRecords.value = [];
   activeRecordId.value = "";
   window.sessionStorage.removeItem(AUTH_STORAGE_KEY);
-  window.sessionStorage.removeItem(HISTORY_STORAGE_KEY);
 }
 
 function startNewChat(): void {
@@ -564,96 +658,213 @@ function startNewChat(): void {
   activeRecordId.value = "";
 }
 
-function selectChatRecord(record: ChatRecord): void {
+async function selectChatRecord(record: ChatConversation): Promise<void> {
   activeRecordId.value = record.id;
-  currentQuestion.value = record.query;
-  answer.value = record.answer;
-  citations.value = record.citations;
-  errorMessage.value = record.status === "error" ? record.answer : "";
-  metadata.value = {
-    request_id: record.requestId,
-    trace_id: record.traceId,
-    confidence: record.confidence,
-    degraded: record.degraded,
-    degrade_reason: record.degradeReason,
-  };
-  lastResponse.value = null;
-  status.value = record.status;
-  sourceChunks.value = [];
-  sourceDetail.value = null;
-  highlightedSourceId.value = "";
-  sourceTitle.value = "";
+  status.value = conversationStatus(record);
+  form.kbIds = record.kbIds.join("\n");
+  window.sessionStorage.setItem(KB_STORAGE_KEY, form.kbIds.trim());
+  resetSourceState();
+  if (record.id.startsWith(LOCAL_CONVERSATION_PREFIX)) {
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+  browserBusy.loadingConversations = true;
+  browserFeedback.value = "";
+  try {
+    const response = await getQueryConversation(record.id, accessToken);
+    upsertConversation(
+      conversationFromData(
+        response.data,
+        response.messages.map(messageFromData),
+      ),
+    );
+    status.value = conversationStatus(activeRecord.value);
+  } catch (error) {
+    browserFeedback.value = readableError(error);
+  } finally {
+    browserBusy.loadingConversations = false;
+  }
 }
 
-function createChatRecord(query: string, kbIds: string[]): ChatRecord {
+async function removeChatRecord(record: ChatConversation): Promise<void> {
+  if (busy.value || browserBusy.deletingConversationId) {
+    return;
+  }
+  const confirmed = window.confirm("删除后此会话将不再显示，历史问答不会用于后续查询。");
+  if (!confirmed) {
+    return;
+  }
+  browserBusy.deletingConversationId = record.id;
+  browserFeedback.value = "";
+  try {
+    if (!record.id.startsWith(LOCAL_CONVERSATION_PREFIX)) {
+      const accessToken = await ensureAccessToken();
+      if (!accessToken) {
+        throw new Error("请先登录。");
+      }
+      await deleteQueryConversation(record.id, accessToken);
+    }
+    chatRecords.value = chatRecords.value.filter((item) => item.id !== record.id);
+    if (activeRecordId.value === record.id) {
+      startNewChat();
+    }
+  } catch (error) {
+    browserFeedback.value = readableError(error);
+  } finally {
+    browserBusy.deletingConversationId = "";
+  }
+}
+
+function createLocalConversation(query: string, kbIds: string[]): ChatConversation {
   const now = Date.now();
   return {
-    id: `${now}-${Math.random().toString(16).slice(2)}`,
+    id: `${LOCAL_CONVERSATION_PREFIX}${now}-${Math.random().toString(16).slice(2)}`,
     title: query.length > 28 ? `${query.slice(0, 28)}...` : query,
-    query,
-    answer: "",
+    status: "active",
+    kbIds,
+    messages: [],
+    createdAt: now,
+    updatedAt: now,
+    lastMessageAt: null,
+  };
+}
+
+function createLocalMessage(
+  role: ChatMessage["role"],
+  content: string,
+  statusValue: ChatMessageStatus,
+): ChatMessage {
+  const now = Date.now();
+  return {
+    id: `${LOCAL_CONVERSATION_PREFIX}msg-${now}-${Math.random().toString(16).slice(2)}`,
+    role,
+    content,
+    status: statusValue,
     citations: [],
-    status: "running",
-    confidence: "low",
+    confidence: null,
     degraded: false,
     degradeReason: null,
     requestId: "",
     traceId: "",
-    kbIds,
     createdAt: now,
   };
 }
 
-function updateChatRecord(
-  id: string,
-  patch: Partial<ChatRecord>,
-  persist = true,
+function appendMessages(conversationId: string, messages: ChatMessage[], kbIds: string[]): void {
+  const now = Date.now();
+  chatRecords.value = chatRecords.value.map((conversation) =>
+    conversation.id === conversationId
+      ? {
+          ...conversation,
+          kbIds,
+          messages: [...conversation.messages, ...messages],
+          updatedAt: now,
+          lastMessageAt: now,
+        }
+      : conversation,
+  );
+}
+
+function updateMessage(
+  messageId: string,
+  patch: Partial<ChatMessage> | ((message: ChatMessage) => Partial<ChatMessage>),
 ): void {
-  chatRecords.value = chatRecords.value.map((record) =>
-    record.id === id ? { ...record, ...patch } : record,
+  chatRecords.value = chatRecords.value.map((conversation) => ({
+    ...conversation,
+    messages: conversation.messages.map((message) =>
+      message.id === messageId
+        ? {
+            ...message,
+            ...(typeof patch === "function" ? patch(message) : patch),
+          }
+        : message,
+    ),
+    updatedAt: conversation.messages.some((message) => message.id === messageId)
+      ? Date.now()
+      : conversation.updatedAt,
+  }));
+}
+
+function replaceConversationId(oldId: string, newId: string): void {
+  if (!newId || oldId === newId) {
+    return;
+  }
+  chatRecords.value = chatRecords.value.map((conversation) =>
+    conversation.id === oldId ? { ...conversation, id: newId } : conversation,
   );
-  if (persist) {
-    persistChatRecords();
+  if (activeRecordId.value === oldId) {
+    activeRecordId.value = newId;
   }
 }
 
-function persistChatRecords(): void {
-  try {
-    window.sessionStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(chatRecords.value));
-  } catch {
-    // 历史记录只是本地体验增强，写入失败不影响查询主流程。
-  }
+function upsertConversation(conversation: ChatConversation): void {
+  const exists = chatRecords.value.some((item) => item.id === conversation.id);
+  chatRecords.value = exists
+    ? chatRecords.value.map((item) => (item.id === conversation.id ? conversation : item))
+    : [conversation, ...chatRecords.value];
 }
 
-function loadStoredChatRecords(): ChatRecord[] {
-  try {
-    const raw = window.sessionStorage.getItem(HISTORY_STORAGE_KEY);
-    if (!raw) {
-      return [];
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed.filter(isChatRecord).slice(0, 50);
-  } catch {
-    window.sessionStorage.removeItem(HISTORY_STORAGE_KEY);
-    return [];
-  }
+function conversationFromData(
+  data: QueryConversationData,
+  messages: ChatMessage[] = [],
+): ChatConversation {
+  return {
+    id: data.id,
+    title: data.title,
+    status: data.status,
+    kbIds: data.kb_ids,
+    messages,
+    createdAt: parseDateMs(data.created_at),
+    updatedAt: parseDateMs(data.updated_at),
+    lastMessageAt: data.last_message_at ? parseDateMs(data.last_message_at) : null,
+  };
 }
 
-function isChatRecord(value: unknown): value is ChatRecord {
-  if (!value || typeof value !== "object") {
-    return false;
+function messageFromData(data: QueryMessageData): ChatMessage {
+  return {
+    id: data.id,
+    role: data.role,
+    content: data.content,
+    status: data.status,
+    citations: data.citations,
+    confidence: data.confidence,
+    degraded: data.degraded,
+    degradeReason: data.degrade_reason,
+    requestId: data.request_id ?? "",
+    traceId: data.trace_id ?? "",
+    createdAt: parseDateMs(data.created_at),
+  };
+}
+
+function buildHistoryMessages(messages: ChatMessage[]): QueryHistoryMessage[] {
+  return messages
+    .filter((message) => message.status === "done" && message.content.trim())
+    .slice(-20)
+    .map((message) => ({ role: message.role, content: message.content }));
+}
+
+function isServerConversationId(value: string): boolean {
+  return Boolean(value && !value.startsWith(LOCAL_CONVERSATION_PREFIX));
+}
+
+function conversationStatus(conversation: ChatConversation | null): QueryStatus {
+  if (!conversation || !conversation.messages.length) {
+    return "idle";
   }
-  const item = value as Partial<ChatRecord>;
-  return (
-    typeof item.id === "string" &&
-    typeof item.query === "string" &&
-    typeof item.title === "string" &&
-    Array.isArray(item.kbIds) &&
-    typeof item.createdAt === "number"
-  );
+  const assistants = conversation.messages.filter((message) => message.role === "assistant");
+  const latest = assistants[assistants.length - 1] ?? conversation.messages[conversation.messages.length - 1];
+  return latest.status === "done" ? "done" : latest.status;
+}
+
+function parseDateMs(value: string | null): number {
+  if (!value) {
+    return Date.now();
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : Date.now();
 }
 
 function readableError(error: unknown): string {
@@ -678,6 +889,8 @@ function formatVisibility(value: string): string {
   const labels: Record<string, string> = {
     department: "部门可见",
     enterprise: "企业可见",
+    department_acl: "指定部门可见",
+    private: "私密可见",
   };
   return labels[value] ?? value;
 }
@@ -689,14 +902,16 @@ function formatRecordTime(value: number): string {
   }).format(new Date(value));
 }
 
-function formatRecordStatus(value: ChatRecordStatus): string {
-  const labels: Record<ChatRecordStatus, string> = {
+function formatRecordStatus(value: ChatConversation): string {
+  const statusValue = conversationStatus(value);
+  const labels: Record<QueryStatus, string> = {
+    idle: "新对话",
     running: "生成中",
     done: "已完成",
     error: "失败",
     cancelled: "已取消",
   };
-  return labels[value] ?? value;
+  return labels[statusValue] ?? statusValue;
 }
 
 function formatSourceTextStatus(value: CitationSourceData["text_status"]): string {
@@ -738,16 +953,25 @@ function formatSourceOffsets(value: Record<string, unknown> | null): string {
         </div>
         <button class="new-chat" type="button" @click="startNewChat">新对话</button>
         <div class="history-list">
-          <button
+          <div
             v-for="record in chatRecords"
             :key="record.id"
-            :class="['history-item', { active: activeRecord?.id === record.id }]"
-            type="button"
-            @click="selectChatRecord(record)"
+            :class="['history-item-row', { active: activeRecord?.id === record.id }]"
           >
-            <strong>{{ record.title }}</strong>
-            <span>{{ formatRecordStatus(record.status) }} · {{ formatRecordTime(record.createdAt) }}</span>
-          </button>
+            <button class="history-item" type="button" @click="selectChatRecord(record)">
+              <strong>{{ record.title }}</strong>
+              <span>{{ formatRecordStatus(record) }} · {{ formatRecordTime(record.updatedAt) }}</span>
+            </button>
+            <button
+              class="history-delete"
+              type="button"
+              title="删除会话"
+              :disabled="Boolean(browserBusy.deletingConversationId)"
+              @click.stop="removeChatRecord(record)"
+            >
+              ×
+            </button>
+          </div>
           <p v-if="!chatRecords.length" class="muted">暂无对话记录。</p>
         </div>
       </section>
@@ -799,7 +1023,7 @@ function formatSourceOffsets(value: Record<string, unknown> | null): string {
               />
               <span>
                 <strong>{{ kb.name }}</strong>
-                <small>{{ formatVisibility(kb.default_visibility) }}</small>
+                <small>{{ formatVisibility(kb.kb_visibility) }}</small>
               </span>
             </label>
             <div v-if="!knowledgeBases.length" class="empty-state compact warning">
@@ -886,7 +1110,7 @@ function formatSourceOffsets(value: Record<string, unknown> | null): string {
 
       <template v-else>
         <div class="message-scroll">
-          <section v-if="!currentQuestion && !answer && !errorMessage" class="welcome">
+          <section v-if="!activeMessages.length" class="welcome">
             <h2>今天想查询什么？</h2>
             <p v-if="knowledgeBases.length">
               已选择 {{ selectedKnowledgeBases.length }} 个知识库，可以直接输入问题。
@@ -894,42 +1118,53 @@ function formatSourceOffsets(value: Record<string, unknown> | null): string {
             <p v-else>当前账号暂无可查询知识库，请联系管理员授权或创建知识库。</p>
           </section>
 
-          <article v-if="currentQuestion" class="message message--user">
-            <div class="bubble">{{ currentQuestion }}</div>
-          </article>
+          <article
+            v-for="message in activeMessages"
+            :key="message.id"
+            :class="['message', message.role === 'user' ? 'message--user' : 'message--assistant']"
+          >
+            <div v-if="message.role === 'user'" class="bubble">{{ message.content }}</div>
+            <template v-else>
+              <div class="assistant-avatar">LB</div>
+              <div class="assistant-content">
+                <div class="answer-text">
+                  <p v-if="message.content" :class="{ 'error-text': message.status === 'error' }">
+                    {{ message.content }}
+                  </p>
+                  <p v-else class="muted">正在生成回答...</p>
+                </div>
 
-          <article v-if="answer || errorMessage || busy" class="message message--assistant">
-            <div class="assistant-avatar">LB</div>
-            <div class="assistant-content">
-              <div class="answer-text">
-                <p v-if="answer">{{ answer }}</p>
-                <p v-else-if="errorMessage" class="error-text">{{ errorMessage }}</p>
-                <p v-else class="muted">正在生成回答...</p>
-              </div>
-
-              <div v-if="degradeReason || requestId || traceId" class="result-meta">
-                <span :class="['pill', degraded ? 'pill--warning' : 'pill--success']">
-                  {{ degraded ? "已降级" : "正常" }}
-                </span>
-                <span class="pill">置信度 {{ confidenceText }}</span>
-                <span v-if="degradeReason" class="pill pill--warning">{{ degradeReason }}</span>
-                <span v-if="requestId" class="trace">请求 {{ requestId }}</span>
-                <span v-if="traceId" class="trace">追踪 {{ traceId }}</span>
-              </div>
-
-              <section v-if="citations.length" class="citation-strip">
-                <button
-                  v-for="citation in citations"
-                  :key="citation.source_id"
-                  class="citation-chip"
-                  type="button"
-                  @click="openCitationSource(citation)"
+                <div
+                  v-if="message.degradeReason || message.requestId || message.traceId"
+                  class="result-meta"
                 >
-                  <strong>{{ citation.title }}</strong>
-                  <span>页 {{ citation.page_start }}-{{ citation.page_end }}</span>
-                </button>
-              </section>
-            </div>
+                  <span :class="['pill', message.degraded ? 'pill--warning' : 'pill--success']">
+                    {{ message.degraded ? "已降级" : "正常" }}
+                  </span>
+                  <span v-if="message.confidence" class="pill">
+                    置信度 {{ formatConfidence(message.confidence) }}
+                  </span>
+                  <span v-if="message.degradeReason" class="pill pill--warning">
+                    {{ message.degradeReason }}
+                  </span>
+                  <span v-if="message.requestId" class="trace">请求 {{ message.requestId }}</span>
+                  <span v-if="message.traceId" class="trace">追踪 {{ message.traceId }}</span>
+                </div>
+
+                <section v-if="message.citations.length" class="citation-strip">
+                  <button
+                    v-for="citation in message.citations"
+                    :key="citation.source_id"
+                    class="citation-chip"
+                    type="button"
+                    @click="openCitationSource(citation)"
+                  >
+                    <strong>{{ citation.title }}</strong>
+                    <span>页 {{ citation.page_start }}-{{ citation.page_end }}</span>
+                  </button>
+                </section>
+              </div>
+            </template>
           </article>
 
           <section v-if="sourceDetail || sourceChunks.length || sourceFeedback" class="source-panel">
@@ -1145,8 +1380,8 @@ h1 {
 }
 
 .new-chat:hover,
-.history-item:hover,
-.history-item.active {
+.history-item-row:hover,
+.history-item-row.active {
   background: #ededeb;
 }
 
@@ -1160,10 +1395,41 @@ h1 {
   padding: 0 2px 4px;
 }
 
+.history-item-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  border-radius: 8px;
+}
+
 .history-item {
   display: grid;
   gap: 4px;
   padding: 10px 12px;
+}
+
+.history-delete {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #737373;
+  cursor: pointer;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0;
+}
+
+.history-item-row:hover .history-delete,
+.history-item-row.active .history-delete {
+  opacity: 1;
+}
+
+.history-delete:hover {
+  background: #dededb;
+  color: #171717;
 }
 
 .history-item strong {

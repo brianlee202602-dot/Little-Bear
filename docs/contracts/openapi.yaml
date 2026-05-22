@@ -259,6 +259,98 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /internal/v1/query-conversations:
+    get:
+      tags: [Query]
+      summary: List current user's query conversations
+      operationId: listQueryConversations
+      x-token-type: access
+      x-required-scope: rag:query
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Query conversation list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryConversationListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Query]
+      summary: Create query conversation
+      operationId: createQueryConversation
+      x-token-type: access
+      x-required-scope: rag:query
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryConversationCreateRequest"
+      responses:
+        "200":
+          description: Query conversation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryConversationResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/query-conversations/{conversation_id}:
+    get:
+      tags: [Query]
+      summary: Get current user's query conversation
+      operationId: getQueryConversation
+      x-token-type: access
+      x-required-scope: rag:query
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Query conversation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryConversationResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Query]
+      summary: Delete current user's query conversation
+      operationId: deleteQueryConversation
+      x-token-type: access
+      x-required-scope: rag:query
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Query conversation deleted
+        default:
+          $ref: "#/components/responses/Error"
+
   /internal/v1/knowledge-bases:
     get:
       tags: [KnowledgeBase]
@@ -2935,6 +3027,13 @@ components:
         query:
           type: string
           minLength: 1
+        conversation_id:
+          type: [string, "null"]
+        history:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/QueryHistoryMessage"
         mode:
           type: string
           enum: [answer, search]
@@ -2950,12 +3049,27 @@ components:
         include_sources:
           type: boolean
           default: true
+    QueryHistoryMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+          minLength: 1
+          maxLength: 4000
     QueryResponse:
       type: object
-      required: [request_id, answer, citations, degraded, trace_id]
+      required: [request_id, answer, citations, confidence, degraded, trace_id]
       properties:
         request_id:
           $ref: "#/components/schemas/RequestId"
+        conversation_id:
+          type: [string, "null"]
+        message_id:
+          type: [string, "null"]
         answer:
           type: string
         citations:
@@ -2971,6 +3085,102 @@ components:
           type: [string, "null"]
         trace_id:
           type: string
+    QueryConversationCreateRequest:
+      type: object
+      properties:
+        title:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 120
+        kb_ids:
+          type: array
+          items:
+            type: string
+    QueryConversation:
+      type: object
+      required: [id, title, status, kb_ids]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [active, deleted]
+        kb_ids:
+          type: array
+          items:
+            type: string
+        last_message_at:
+          type: [string, "null"]
+          format: date-time
+        created_at:
+          type: [string, "null"]
+          format: date-time
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+    QueryMessage:
+      type: object
+      required: [id, conversation_id, role, content, status, citations, degraded]
+      properties:
+        id:
+          type: string
+        conversation_id:
+          type: string
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+        status:
+          type: string
+          enum: [running, done, error, cancelled]
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Citation"
+        confidence:
+          type: [string, "null"]
+          enum: [low, medium, high, null]
+        degraded:
+          type: boolean
+        degrade_reason:
+          type: [string, "null"]
+        request_id:
+          type: [string, "null"]
+        trace_id:
+          type: [string, "null"]
+        created_at:
+          type: [string, "null"]
+          format: date-time
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+    QueryConversationListResponse:
+      type: object
+      required: [request_id, data, pagination]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryConversation"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    QueryConversationResponse:
+      type: object
+      required: [request_id, data, messages]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/QueryConversation"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryMessage"
     Citation:
       type: object
       required: [source_id, doc_id, document_version_id, title, page_start, page_end]

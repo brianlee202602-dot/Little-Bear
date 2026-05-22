@@ -832,6 +832,54 @@ P0 内置角色：
 - `idx_query_logs_admin(enterprise_id, user_id, status, degraded, created_at desc)`
 - `idx_query_logs_config_permission(enterprise_id, config_version, permission_version)`
 
+### 9.2.1 `query_conversations`
+
+`query_conversations` 是普通用户查询工作区的会话窗口，不替代 `query_logs`。
+
+| 字段 | 类型 | Null | 约束/索引 | 说明 |
+| --- | --- | --- | --- | --- |
+| `id` | `uuid` | 否 | PK | 会话 ID |
+| `enterprise_id` | `uuid` | 否 | FK `enterprises.id`, idx | 企业 ID |
+| `user_id` | `uuid` | 否 | FK `users.id`, idx | 会话所属用户 |
+| `title` | `text` | 否 |  | 会话标题 |
+| `status` | `text` | 否 | idx, CHECK | active/deleted |
+| `kb_ids` | `uuid[]` | 否 | GIN | 最近一次查询选择的知识库集合 |
+| `last_message_at` | `timestamptz` | 是 | idx | 最近消息时间 |
+| `created_at` | `timestamptz` | 否 |  | 创建时间 |
+| `updated_at` | `timestamptz` | 否 | idx | 更新时间 |
+| `deleted_at` | `timestamptz` | 是 |  | 软删除时间 |
+
+索引：
+
+- `idx_query_conversations_user_recent(enterprise_id, user_id, status, updated_at desc)`
+- `idx_query_conversations_last_message(enterprise_id, user_id, last_message_at desc nulls last)`
+
+### 9.2.2 `query_messages`
+
+`query_messages` 保存用户可见的会话消息；模型调用诊断仍使用 `model_call_logs`。
+
+| 字段 | 类型 | Null | 约束/索引 | 说明 |
+| --- | --- | --- | --- | --- |
+| `id` | `uuid` | 否 | PK | 消息 ID |
+| `conversation_id` | `uuid` | 否 | FK `query_conversations.id`, idx | 所属会话 |
+| `enterprise_id` | `uuid` | 否 | FK `enterprises.id`, idx | 企业 ID |
+| `user_id` | `uuid` | 否 | FK `users.id`, idx | 消息所属用户 |
+| `role` | `text` | 否 | idx, CHECK | user/assistant |
+| `content` | `text` | 否 |  | 消息内容 |
+| `status` | `text` | 否 | idx, CHECK | running/done/error/cancelled |
+| `citations_json` | `jsonb` | 是 |  | assistant 消息引用 |
+| `confidence` | `text` | 是 | CHECK | low/medium/high |
+| `degraded` | `boolean` | 否 |  | 是否降级 |
+| `degrade_reason` | `text` | 是 |  | 降级原因 |
+| `request_id` | `text` | 是 | idx | 请求 ID |
+| `trace_id` | `text` | 是 | idx | Trace ID |
+| `created_at` | `timestamptz` | 否 | idx | 创建时间 |
+| `updated_at` | `timestamptz` | 否 |  | 更新时间 |
+
+索引：
+
+- `idx_query_messages_conversation_order(conversation_id, created_at asc)`
+
 ### 9.3 `model_call_logs`
 
 | 字段 | 类型 | Null | 约束/索引 | 说明 |
@@ -1021,6 +1069,17 @@ AND (
 - 补充 GIN indexes。
 - 补充查询链路组合索引。
 - 补充软删除、active 状态查询索引。
+
+### 14.7 `0007_dept_admin_read_scopes`
+
+- 补齐 department_admin 的 `knowledge_base:read`、`document:read` 和 `rag:query` 权限。
+
+### 14.8 `0008_query_conversations`
+
+创建：
+
+- `query_conversations`
+- `query_messages`
 
 ## 15. 软删除与阻断策略
 
