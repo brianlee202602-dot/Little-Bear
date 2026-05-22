@@ -43,7 +43,7 @@ class _FakeAnswerRunner:
 
     def stream_tokens(self):
         yield "员工年假"
-        yield "需要提前申请。[source:chunk_1]"
+        yield "需要提前申请。"
         self.result = AnswerGenerationResult(
             answer="员工年假需要提前申请。[source:chunk_1]",
             degraded=False,
@@ -114,7 +114,7 @@ class _FakeStreamingQueryService:
         self.captured["final_answer"] = answer_result.answer
         return QueryResult(
             request_id=plan.request_id,
-            answer=answer_result.answer,
+            answer="员工年假需要提前申请。",
             citations=plan.citations,
             confidence=plan.confidence,
             degraded=answer_result.degraded,
@@ -406,15 +406,14 @@ def test_create_query_stream_route_uses_provider_token_stream(monkeypatch) -> No
     assert response.headers["content-type"].startswith("text/event-stream")
     assert '"streaming":true' in response.text
     assert 'data: {"delta":"员工年假"}' in response.text
-    assert 'data: {"delta":"需要提前申请。[source:chunk_1]"}' in response.text
+    assert 'data: {"delta":"需要提前申请。"}' in response.text
+    assert "[source:chunk_1]" not in response.text
     assert "event: citation" in response.text
     assert "event: done" in response.text
     assert captured["required_scope"] == "rag:query"
     assert captured["final_answer"] == "员工年假需要提前申请。[source:chunk_1]"
     assert captured["query_text"] == "员工手册"
-    assert captured["conversation_complete_kwargs"]["answer"] == (
-        "员工年假需要提前申请。[source:chunk_1]"
-    )
+    assert captured["conversation_complete_kwargs"]["answer"] == "员工年假需要提前申请。"
 
 
 def test_create_query_route_returns_service_error(monkeypatch) -> None:

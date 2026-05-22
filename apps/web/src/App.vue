@@ -121,7 +121,6 @@ const canSubmit = computed(() => {
 });
 const authenticated = computed(() => Boolean(currentUser.value && authTokens.value?.accessToken));
 const busy = computed(() => status.value === "running");
-const userScopes = computed(() => currentUser.value?.scopes.join(", ") ?? "");
 const selectedKbIds = computed(() => parseKbIds(form.kbIds));
 const selectedKbSet = computed(() => new Set(parseKbIds(form.kbIds)));
 const selectedKnowledgeBases = computed(() =>
@@ -177,10 +176,6 @@ const confidence = computed<QueryConfidence>(() => {
   return activeAssistantMessage.value?.confidence ?? metadata.value?.confidence ?? "low";
 });
 const confidenceText = computed(() => formatConfidence(confidence.value));
-const traceId = computed(() => activeAssistantMessage.value?.traceId ?? metadata.value?.trace_id ?? "");
-const requestId = computed(
-  () => activeAssistantMessage.value?.requestId ?? metadata.value?.request_id ?? "",
-);
 const activeRecord = computed(
   () => chatRecords.value.find((record) => record.id === activeRecordId.value) ?? null,
 );
@@ -843,7 +838,7 @@ function buildHistoryMessages(messages: ChatMessage[]): QueryHistoryMessage[] {
   return messages
     .filter((message) => message.status === "done" && message.content.trim())
     .slice(-20)
-    .map((message) => ({ role: message.role, content: message.content }));
+    .map((message) => ({ role: message.role, content: displayMessageContent(message.content) }));
 }
 
 function isServerConversationId(value: string): boolean {
@@ -914,6 +909,14 @@ function formatRecordStatus(value: ChatConversation): string {
   return labels[statusValue] ?? statusValue;
 }
 
+function displayMessageContent(value: string): string {
+  return value
+    .replace(/(?:\n\s*)?参考来源：\s*(?:\[source:[^\]\s]+\]\s*)+/g, "")
+    .replace(/\s*\[source:[^\]\s]+\]/g, "")
+    .replace(/\s*\[source:[^\]]*$/g, "")
+    .trim();
+}
+
 function formatSourceTextStatus(value: CitationSourceData["text_status"]): string {
   const labels: Record<CitationSourceData["text_status"], string> = {
     object: "原文对象",
@@ -923,14 +926,6 @@ function formatSourceTextStatus(value: CitationSourceData["text_status"]): strin
   return labels[value] ?? value;
 }
 
-function formatSourceOffsets(value: Record<string, unknown> | null): string {
-  if (!value || !Object.keys(value).length) {
-    return "无";
-  }
-  return Object.entries(value)
-    .map(([key, item]) => `${key}: ${String(item)}`)
-    .join(" · ");
-}
 </script>
 
 <template>
@@ -1051,7 +1046,6 @@ function formatSourceOffsets(value: Record<string, unknown> | null): string {
             退出
           </button>
         </div>
-        <p v-if="authenticated && userScopes" class="scope-line">{{ userScopes }}</p>
       </footer>
     </aside>
 
@@ -1129,13 +1123,13 @@ function formatSourceOffsets(value: Record<string, unknown> | null): string {
               <div class="assistant-content">
                 <div class="answer-text">
                   <p v-if="message.content" :class="{ 'error-text': message.status === 'error' }">
-                    {{ message.content }}
+                    {{ displayMessageContent(message.content) }}
                   </p>
                   <p v-else class="muted">正在生成回答...</p>
                 </div>
 
                 <div
-                  v-if="message.degradeReason || message.requestId || message.traceId"
+                  v-if="message.degradeReason || message.confidence"
                   class="result-meta"
                 >
                   <span :class="['pill', message.degraded ? 'pill--warning' : 'pill--success']">
@@ -1147,8 +1141,6 @@ function formatSourceOffsets(value: Record<string, unknown> | null): string {
                   <span v-if="message.degradeReason" class="pill pill--warning">
                     {{ message.degradeReason }}
                   </span>
-                  <span v-if="message.requestId" class="trace">请求 {{ message.requestId }}</span>
-                  <span v-if="message.traceId" class="trace">追踪 {{ message.traceId }}</span>
                 </div>
 
                 <section v-if="message.citations.length" class="citation-strip">
@@ -1179,7 +1171,7 @@ function formatSourceOffsets(value: Record<string, unknown> | null): string {
                   <strong>{{ sourceDetail.title }}</strong>
                   <span>
                     页 {{ sourceDetail.page_start ?? 0 }}-{{ sourceDetail.page_end ?? sourceDetail.page_start ?? 0 }}
-                    · Chunk {{ sourceDetail.ordinal }}
+                    · 片段 {{ sourceDetail.ordinal }}
                   </span>
                 </div>
                 <span :class="['pill', sourceDetail.text_status === 'object' ? 'pill--success' : 'pill--warning']">
@@ -1188,31 +1180,19 @@ function formatSourceOffsets(value: Record<string, unknown> | null): string {
               </header>
               <dl class="source-proof">
                 <div>
-                  <dt>Source ID</dt>
-                  <dd>{{ sourceDetail.source_id }}</dd>
-                </div>
-                <div>
-                  <dt>版本</dt>
-                  <dd>{{ sourceDetail.document_version_id }}</dd>
-                </div>
-                <div>
                   <dt>标题路径</dt>
                   <dd>{{ sourceDetail.heading_path || "无" }}</dd>
-                </div>
-                <div>
-                  <dt>定位</dt>
-                  <dd>{{ formatSourceOffsets(sourceDetail.source_offsets) }}</dd>
                 </div>
               </dl>
               <p>{{ sourceDetail.text }}</p>
             </article>
             <article
-              v-for="chunk in sourceChunks"
+              v-for="(chunk, index) in sourceChunks"
               :key="chunk.id"
               :class="['source-chunk', { active: chunk.id === highlightedSourceId }]"
             >
               <header>
-                <strong>{{ chunk.id }}</strong>
+                <strong>片段 {{ index + 1 }}</strong>
                 <span>页 {{ chunk.page_start ?? 0 }}-{{ chunk.page_end ?? chunk.page_start ?? 0 }}</span>
               </header>
               <p>{{ chunk.text_preview }}</p>
@@ -1442,10 +1422,8 @@ h1 {
 
 .history-item span,
 .kb-item small,
-.scope-line,
 .muted,
-.submit-hint,
-.trace {
+.submit-hint {
   color: #737373;
   font-size: 12px;
 }
@@ -1568,12 +1546,6 @@ h1 {
 .account-card span {
   color: #737373;
   font-size: 12px;
-}
-
-.scope-line {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .chat-panel {

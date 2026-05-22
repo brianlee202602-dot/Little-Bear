@@ -127,7 +127,7 @@ def test_answer_service_streams_answer_from_query_context() -> None:
 
     tokens = list(runner.stream_tokens())
 
-    assert tokens == ["员工年假", "需要提前申请。", "[source:chunk_1]"]
+    assert tokens == ["员工年假", "需要提前申请。"]
     assert runner.result is not None
     assert runner.result.answer == "员工年假需要提前申请。[source:chunk_1]"
     assert runner.result.degraded is False
@@ -142,7 +142,7 @@ def test_answer_service_stream_filters_thinking_blocks() -> None:
 
     tokens = list(runner.stream_tokens())
 
-    assert "".join(tokens) == "员工年假需要提前申请。[source:chunk_1]"
+    assert "".join(tokens) == "员工年假需要提前申请。"
     assert runner.result is not None
     assert runner.result.answer == "员工年假需要提前申请。[source:chunk_1]"
     assert "<think>" not in runner.result.answer

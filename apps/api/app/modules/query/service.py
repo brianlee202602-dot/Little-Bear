@@ -46,6 +46,11 @@ from sqlalchemy.orm import Session
 MAX_QUERY_LENGTH = 4000
 SUPPORTED_FILTERS = {"department_scope", "updated_after", "source_type", "tags"}
 SOURCE_REF_PATTERN = re.compile(r"\[source:([^\]\s]+)\]")
+SOURCE_REF_DISPLAY_PATTERN = re.compile(r"\s*\[source:[^\]\s]+\]")
+REFERENCE_SOURCE_LINE_PATTERN = re.compile(
+    r"(?:\n\s*)?参考来源：\s*(?:\[source:[^\]\s]+\]\s*)+",
+    re.MULTILINE,
+)
 SOURCE_ID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -346,6 +351,8 @@ class QueryService:
                     citation_count=len(citations),
                     candidate_count=candidate_count,
                 )
+            if mode == "answer" and answer:
+                answer = _strip_source_refs_for_display(answer)
             degraded = bool(degrade_reasons)
             degrade_reason = ";".join(degrade_reasons) if degrade_reasons else None
             result = QueryResult(
@@ -725,6 +732,8 @@ class QueryService:
                 citation_count=len(plan.citations),
                 candidate_count=plan.candidate_count,
             )
+        if plan.mode == "answer" and answer:
+            answer = _strip_source_refs_for_display(answer)
         degraded = bool(degrade_reasons)
         degrade_reason = ";".join(degrade_reasons) if degrade_reasons else None
         result = QueryResult(
@@ -1711,6 +1720,27 @@ def _append_reference_sources(
         return answer
     source_refs = " ".join(f"[source:{source_id}]" for source_id in source_ids)
     return f"{answer}\n\n参考来源：{source_refs}"
+
+
+def _strip_source_refs_for_display(answer: str) -> str:
+    """移除 LLM 引用校验标记，只保留用户可读答案。
+
+    QueryService 会先用 [source:...] 完成 citation 防伪校验；校验后这些内部标记
+    由结构化 citations 承担展示职责，不应继续混在自然语言答案里。
+    """
+
+    without_reference_line = REFERENCE_SOURCE_LINE_PATTERN.sub("", answer)
+    without_inline_refs = SOURCE_REF_DISPLAY_PATTERN.sub("", without_reference_line)
+    lines = [line.rstrip() for line in without_inline_refs.splitlines()]
+    compact_lines: list[str] = []
+    previous_blank = False
+    for line in lines:
+        blank = not line.strip()
+        if blank and previous_blank:
+            continue
+        compact_lines.append(line)
+        previous_blank = blank
+    return "\n".join(compact_lines).strip()
 
 
 def _citation_validation_summary(

@@ -22,6 +22,7 @@ THINK_UNCLOSED_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 THINK_OPEN_PATTERN = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
+SOURCE_REF_DISPLAY_PATTERN = re.compile(r"\s*\[source:[^\]\s]+\]", re.IGNORECASE)
 
 SYSTEM_PROMPT = """你是企业内部知识库问答助手。
 只能基于用户可访问的资料回答。
@@ -168,6 +169,7 @@ class AnswerStreamRunner:
         answer_parts: list[str] = []
         token_usage: dict[str, int] | None = None
         thinking_filter = _ThinkingBlockStreamFilter()
+        source_filter = _SourceRefStreamFilter()
         emitted_visible_content = False
         try:
             stream_complete = getattr(self.chat_client, "stream_complete", None)
@@ -185,6 +187,7 @@ class AnswerStreamRunner:
                         continue
                     answer_parts.append(chunk.content_delta)
                     visible_delta = thinking_filter.feed(chunk.content_delta)
+                    visible_delta = source_filter.feed(visible_delta)
                     if visible_delta:
                         if not emitted_visible_content:
                             visible_delta = visible_delta.lstrip()
@@ -193,6 +196,7 @@ class AnswerStreamRunner:
                         emitted_visible_content = True
                         yield visible_delta
                 final_delta = thinking_filter.flush()
+                final_delta = source_filter.feed(final_delta) + source_filter.flush()
                 if final_delta:
                     if not emitted_visible_content:
                         final_delta = final_delta.lstrip()
@@ -208,7 +212,7 @@ class AnswerStreamRunner:
                 answer = _strip_thinking_blocks(result.content)
                 token_usage = result.token_usage
                 if answer:
-                    yield answer
+                    yield _strip_source_refs_for_display(answer)
             if not answer:
                 raise ModelClientError(
                     "LLM_PROVIDER_RESPONSE_INVALID",
@@ -327,10 +331,49 @@ class _ThinkingBlockStreamFilter:
         return _strip_thinking_blocks(tail)
 
 
+class _SourceRefStreamFilter:
+    def __init__(self) -> None:
+        self.buffer = ""
+
+    def feed(self, text: str) -> str:
+        self.buffer += text
+        hold_start = _source_ref_tail_start(self.buffer)
+        if hold_start is None:
+            ready = self.buffer
+            self.buffer = ""
+        else:
+            ready = self.buffer[:hold_start]
+            self.buffer = self.buffer[hold_start:]
+        return _strip_source_refs_for_display(ready)
+
+    def flush(self) -> str:
+        tail = self.buffer
+        self.buffer = ""
+        return _strip_source_refs_for_display(tail)
+
+
 def _strip_thinking_blocks(content: str) -> str:
     stripped = THINK_BLOCK_PATTERN.sub("", content)
     stripped = THINK_UNCLOSED_PATTERN.sub("", stripped)
     return stripped.strip()
+
+
+def _strip_source_refs_for_display(content: str) -> str:
+    return SOURCE_REF_DISPLAY_PATTERN.sub("", content)
+
+
+def _source_ref_tail_start(value: str) -> int | None:
+    lower = value.lower()
+    marker = "[source:"
+    marker_start = lower.rfind(marker)
+    if marker_start >= 0 and "]" not in lower[marker_start:]:
+        return marker_start
+    start = max(0, len(value) - len(marker) + 1)
+    for index in range(start, len(value)):
+        tail = lower[index:]
+        if marker.startswith(tail) or (tail.startswith(marker) and "]" not in tail):
+            return index
+    return None
 
 
 def _tag_prefix_tail_length(value: str, *, prefixes: tuple[str, ...]) -> int:

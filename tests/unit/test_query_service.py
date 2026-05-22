@@ -546,7 +546,7 @@ def test_create_query_calls_llm_for_answer_mode() -> None:
 
     assert result.degraded is True
     assert result.degrade_reason == "vector_retriever_unavailable"
-    assert result.answer == "员工年假需要提前申请。[source:66666666-6666-6666-6666-666666666666]"
+    assert result.answer == "员工年假需要提前申请。"
     assert result.citations[0].source_id == CHUNK_ID
     assert result.context is not None
     assert result.context.chunks[0].content == "员工年假需要提前申请"
@@ -670,7 +670,8 @@ def test_create_query_auto_attaches_sources_when_llm_omits_citations() -> None:
     )
 
     assert "员工年假需要提前在系统中提交申请。" in result.answer
-    assert f"[source:{CHUNK_ID}]" in result.answer
+    assert f"[source:{CHUNK_ID}]" not in result.answer
+    assert "参考来源" not in result.answer
     assert result.degraded is True
     assert result.degrade_reason == "citation_auto_attached"
     audit_params = next(
