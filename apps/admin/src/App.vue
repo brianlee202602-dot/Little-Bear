@@ -19,18 +19,19 @@ import {
   createAdminIndexCollectionRebuildJob,
   createAdminIndexCollectionSnapshot,
   createAdminIndexVersionCleanupJob,
+  createConfigVersion,
   createAdminFolder,
   createAdminKnowledgeBase,
   createAdminDepartment,
   createAdminUser,
   createSession,
   createAdminUserRoleBindings,
+  archiveConfigVersion,
   deleteAdminFolder,
   deleteAdminKnowledgeBase,
   deleteAdminDepartment,
   deleteAdminUser,
   deleteCurrentSession,
-  discardConfigDraft,
   getAdminKnowledgeBase,
   getAdminDocumentPreview,
   getAdminIndexHealth,
@@ -56,7 +57,6 @@ import {
   listModelCallLogs,
   listQueryLogs,
   listConfigVersions,
-  listConfigs,
   patchAdminFolder,
   patchAdminKnowledgeBase,
   patchAdminDepartment,
@@ -70,8 +70,8 @@ import {
   resetAdminUserPassword,
   retryAdminIndexJobs,
   revokeAdminUserRoleBinding,
-  saveConfigDraft,
   unlockAdminUser,
+  updateConfigVersion,
   uploadKnowledgeBaseDocuments,
   validateAdminConfig,
   validateSetupConfig,
@@ -122,7 +122,7 @@ type Tone = "success" | "error" | "warning" | "neutral";
 type LocalIssueTone = "error" | "warning";
 type ActiveView = "loading" | "setup" | "login" | "dashboard";
 type ActiveAdminTab = "config" | "departments" | "users" | "knowledge" | "diagnostics";
-type ConfigModalMode = "create" | "edit" | "delete" | null;
+type ConfigModalMode = "create" | "edit" | null;
 type DepartmentModalMode = "create" | "edit" | "delete" | null;
 type KnowledgeBaseModalMode =
   | "create"
@@ -417,9 +417,6 @@ const passwordResetForm = reactive({
   confirmed: false,
 });
 const configForm = reactive<SetupFormModel>(createDefaultSetupForm());
-const configDangerForm = reactive({
-  confirmedDelete: false,
-});
 const userDepartmentForm = reactive({
   departmentIds: [] as string[],
   confirmedReplacePrimary: false,
@@ -461,7 +458,9 @@ const indexHealth = ref<IndexCollectionHealthData[]>([]);
 const indexCollectionSnapshots = ref<IndexCollectionSnapshotData[]>([]);
 const selectedQueryLog = ref<QueryLogData | null>(null);
 const selectedConfigKey = ref<string>("");
+const selectedConfigVersionNumber = ref<number | null>(null);
 const configEditorText = ref("");
+const configJsonText = ref("");
 const configValidationResult = ref<SetupValidationData | null>(null);
 const selectedDraftVersion = ref<number | null>(null);
 const lastConfigValidatedText = ref<string | null>(null);
@@ -818,6 +817,143 @@ const cacheSection: FieldSection = {
   ],
 };
 
+const advancedConfigSection: FieldSection = {
+  title: "高级运行策略",
+  fields: [
+    { key: "llmTemperature", label: "LLM temperature", input: "number", hint: "控制答案生成随机性；越低越稳定，越高越发散。", min: 0, step: 0.01 },
+    { key: "llmMaxTokens", label: "LLM 最大输出 Token", input: "number", hint: "单次答案生成允许输出的最大 token 数。", min: 1, step: 1 },
+    { key: "llmFirstTokenTimeoutMs", label: "首 token 超时 ms", input: "number", hint: "模型首 token 等待预算；当前作为配置契约保存，流式链路可逐步接入。", min: 1, step: 1 },
+    { key: "llmTotalTimeoutMs", label: "LLM 总超时 ms", input: "number", hint: "答案生成调用的整体超时预算。", min: 1, step: 1 },
+    { key: "llmMaxRetries", label: "LLM 最大重试次数", input: "number", hint: "LLM provider 调用失败后的最大重试次数；0 表示不重试。", min: 0, step: 1 },
+    { key: "llmRetryBackoffMs", label: "LLM 重试退避 ms", input: "number", hint: "LLM 重试之间的退避时间。", min: 0, step: 1 },
+    { key: "llmEnableThinking", label: "启用 thinking 参数", input: "checkbox", hint: "写入 OpenAI-compatible extra body 的 chat_template_kwargs.enable_thinking。", group: "llm-switch" },
+    {
+      key: "permissionDefaultVisibility",
+      label: "默认文档可见性",
+      input: "select",
+      hint: "新建或导入资源未显式指定权限时使用的默认可见性。",
+      options: [
+        { label: "部门可见", value: "department" },
+        { label: "企业可见", value: "enterprise" },
+      ],
+    },
+    { key: "permissionCacheTtlSeconds", label: "权限缓存 TTL 秒", input: "number", hint: "权限上下文缓存有效期。", min: 1, step: 1 },
+    { key: "permissionWriteAccessBlockFirst", label: "收紧权限前先阻断写访问", input: "checkbox", hint: "权限收紧时优先阻断旧写入路径。", group: "permission-tightening" },
+    { key: "permissionBlockOldIndexRefs", label: "阻断旧索引引用", input: "checkbox", hint: "权限收紧后阻断旧索引 payload 被继续引用。", group: "permission-tightening" },
+    { key: "permissionFailClosed", label: "权限失败时关闭访问", input: "checkbox", hint: "权限计算异常时按拒绝访问处理。", group: "permission-tightening" },
+    { key: "securityRequireCitation", label: "强制引用校验", input: "checkbox", hint: "答案必须通过引用来源校验，否则进入降级响应。", group: "security-switch" },
+    { key: "securityBlockInternalPromptLeakage", label: "阻断内部提示词泄露", input: "checkbox", hint: "生成后处理阶段阻断内部提示词外泄。", group: "security-switch" },
+    { key: "securityBlockSecretRefLeakage", label: "阻断 Secret 引用泄露", input: "checkbox", hint: "生成后处理阶段阻断 secret:// 引用外泄。", group: "security-switch" },
+    { key: "securityPiiRedactionEnabled", label: "启用 PII 脱敏", input: "checkbox", hint: "对日志、审计摘要等可观测数据执行敏感信息脱敏。", group: "security-switch" },
+    { key: "securityRedactLogs", label: "日志脱敏", input: "checkbox", hint: "写入普通日志前执行脱敏。", group: "security-switch" },
+    { key: "securityRedactAuditSummary", label: "审计摘要脱敏", input: "checkbox", hint: "写入审计摘要前执行脱敏。", group: "security-switch" },
+    { key: "timeoutQueryTotalMs", label: "查询总超时 ms", input: "number", hint: "一次问答请求的总预算。", min: 1, step: 1 },
+    { key: "timeoutAuthPermissionMs", label: "鉴权权限超时 ms", input: "number", hint: "认证和权限上下文计算预算。", min: 1, step: 1 },
+    { key: "timeoutRewriteMs", label: "改写超时 ms", input: "number", hint: "查询改写阶段预算。", min: 1, step: 1 },
+    { key: "timeoutEmbeddingMs", label: "Embedding 超时 ms", input: "number", hint: "查询向量化调用预算。", min: 1, step: 1 },
+    { key: "timeoutVectorSearchMs", label: "向量检索超时 ms", input: "number", hint: "向量库查询预算。", min: 1, step: 1 },
+    { key: "timeoutKeywordSearchMs", label: "关键词检索超时 ms", input: "number", hint: "关键词检索预算。", min: 1, step: 1 },
+    { key: "timeoutRerankMs", label: "Rerank 超时 ms", input: "number", hint: "重排模型调用预算。", min: 1, step: 1 },
+    { key: "timeoutContextMs", label: "上下文构建超时 ms", input: "number", hint: "引用片段组装和裁剪预算。", min: 1, step: 1 },
+    { key: "timeoutPostprocessMs", label: "后处理超时 ms", input: "number", hint: "答案清洗、引用校验等后处理预算。", min: 1, step: 1 },
+    {
+      key: "degradeRewriteTimeout",
+      label: "改写超时降级",
+      input: "select",
+      hint: "查询改写超时时采用的降级动作。",
+      options: [
+        { label: "使用原始问题", value: "use_original_query" },
+        { label: "终止查询", value: "fail_query" },
+      ],
+    },
+    {
+      key: "degradeEmbeddingTimeout",
+      label: "Embedding 超时降级",
+      input: "select",
+      hint: "查询向量化不可用时采用的降级动作。",
+      options: [
+        { label: "仅关键词检索", value: "keyword_only" },
+        { label: "仅元数据检索", value: "metadata_only" },
+        { label: "终止查询", value: "fail_query" },
+      ],
+    },
+    {
+      key: "degradeVectorUnavailable",
+      label: "向量不可用降级",
+      input: "select",
+      hint: "向量库不可用时采用的降级动作。",
+      options: [
+        { label: "关键词和元数据", value: "keyword_and_metadata" },
+        { label: "仅关键词检索", value: "keyword_only" },
+        { label: "终止查询", value: "fail_query" },
+      ],
+    },
+    {
+      key: "degradeKeywordUnavailable",
+      label: "关键词不可用降级",
+      input: "select",
+      hint: "关键词检索不可用时采用的降级动作。",
+      options: [
+        { label: "向量和元数据", value: "vector_and_metadata" },
+        { label: "仅向量检索", value: "vector_only" },
+        { label: "终止查询", value: "fail_query" },
+      ],
+    },
+    {
+      key: "degradeRerankTimeout",
+      label: "Rerank 超时降级",
+      input: "select",
+      hint: "重排不可用时采用的降级动作。",
+      options: [
+        { label: "使用融合分数", value: "fusion_score" },
+        { label: "跳过重排", value: "skip_rerank" },
+        { label: "终止查询", value: "fail_query" },
+      ],
+    },
+    {
+      key: "degradeLlmTimeout",
+      label: "LLM 超时降级",
+      input: "select",
+      hint: "答案生成不可用时采用的降级动作。",
+      options: [
+        { label: "返回检索结果与引用", value: "return_retrieval_with_citations" },
+        { label: "返回无答案原因", value: "return_no_answer_with_reason" },
+        { label: "终止查询", value: "fail_query" },
+      ],
+    },
+    {
+      key: "degradeModelPoolOverloaded",
+      label: "模型池过载降级",
+      input: "select",
+      hint: "模型服务过载时采用的降级动作。",
+      options: [
+        { label: "返回可重试降级响应", value: "return_retryable_degraded_response" },
+        { label: "进入队列等待", value: "queue_request" },
+        { label: "终止查询", value: "fail_query" },
+      ],
+    },
+    {
+      key: "degradeImportBacklog",
+      label: "导入积压降级",
+      input: "select",
+      hint: "导入队列积压时采用的降级动作。",
+      options: [
+        { label: "放慢导入", value: "slow_down_import" },
+        { label: "拒绝新导入", value: "reject_new_import" },
+        { label: "仅入队等待", value: "queue_only" },
+      ],
+    },
+    { key: "observabilityMetricsEnabled", label: "启用 Metrics", input: "checkbox", hint: "启用指标采集。", group: "observability-switch" },
+    { key: "observabilityTraceEnabled", label: "启用 Trace", input: "checkbox", hint: "启用链路追踪。", group: "observability-switch" },
+    { key: "alertActiveConfigLoadFailed", label: "配置加载失败阈值", input: "number", hint: "active config 加载失败告警阈值。", min: 0, step: 1 },
+    { key: "alertPermissionViolationRate", label: "权限违规率阈值", input: "number", hint: "权限违规率告警阈值。", min: 0, step: 0.01 },
+    { key: "alertDraftIndexExposureCount", label: "草稿索引暴露阈值", input: "number", hint: "草稿索引暴露次数告警阈值。", min: 0, step: 1 },
+    { key: "alertImportFailureRate", label: "导入失败率阈值", input: "number", hint: "导入失败率告警阈值。", min: 0, step: 0.01 },
+    { key: "alertWorkerQueueBacklog", label: "Worker 队列积压阈值", input: "number", hint: "后台任务队列积压告警阈值。", min: 0, step: 1 },
+    { key: "alertLlmTimeoutRate", label: "LLM 超时率阈值", input: "number", hint: "LLM 超时率告警阈值。", min: 0, step: 0.01 },
+  ],
+};
+
 const sections = [
   accessSection,
   adminSection,
@@ -829,8 +965,10 @@ const sections = [
   cacheSection,
 ];
 
+const allConfigFieldSections = [...sections, advancedConfigSection];
+
 const setupFieldByKey = new Map<keyof SetupFormModel, FieldDefinition>(
-  sections.flatMap((section) => section.fields.map((field) => [field.key, field] as const)),
+  allConfigFieldSections.flatMap((section) => section.fields.map((field) => [field.key, field] as const)),
 );
 
 const configSectionDefinitions: ConfigSectionFormDefinition[] = [
@@ -957,37 +1095,86 @@ const configSectionDefinitions: ConfigSectionFormDefinition[] = [
     key: "llm",
     label: "LLM 运行参数",
     description: "temperature、输出 token、超时和重试策略。",
-    fields: [],
+    fields: setupFields(
+      "llmTemperature",
+      "llmMaxTokens",
+      "llmFirstTokenTimeoutMs",
+      "llmTotalTimeoutMs",
+      "llmMaxRetries",
+      "llmRetryBackoffMs",
+      "llmEnableThinking",
+    ),
   },
   {
     key: "permission",
     label: "权限策略",
     description: "默认角色、默认可见性和权限收紧阻断策略。",
-    fields: [],
+    fields: setupFields(
+      "permissionDefaultVisibility",
+      "permissionCacheTtlSeconds",
+      "permissionWriteAccessBlockFirst",
+      "permissionBlockOldIndexRefs",
+      "permissionFailClosed",
+    ),
   },
   {
     key: "security",
     label: "安全策略",
     description: "引用强制、Prompt 泄露防护和 PII 脱敏策略。",
-    fields: [],
+    fields: setupFields(
+      "securityRequireCitation",
+      "securityBlockInternalPromptLeakage",
+      "securityBlockSecretRefLeakage",
+      "securityPiiRedactionEnabled",
+      "securityRedactLogs",
+      "securityRedactAuditSummary",
+    ),
   },
   {
     key: "timeout",
     label: "超时预算",
     description: "查询链路各阶段的超时预算。",
-    fields: [],
+    fields: setupFields(
+      "timeoutQueryTotalMs",
+      "timeoutAuthPermissionMs",
+      "timeoutRewriteMs",
+      "timeoutEmbeddingMs",
+      "timeoutVectorSearchMs",
+      "timeoutKeywordSearchMs",
+      "timeoutRerankMs",
+      "timeoutContextMs",
+      "timeoutPostprocessMs",
+    ),
   },
   {
     key: "degrade",
     label: "降级策略",
     description: "模型、检索、导入等链路异常时的降级动作。",
-    fields: [],
+    fields: setupFields(
+      "degradeRewriteTimeout",
+      "degradeEmbeddingTimeout",
+      "degradeVectorUnavailable",
+      "degradeKeywordUnavailable",
+      "degradeRerankTimeout",
+      "degradeLlmTimeout",
+      "degradeModelPoolOverloaded",
+      "degradeImportBacklog",
+    ),
   },
   {
     key: "observability",
     label: "可观测性",
     description: "指标、Trace 和关键告警阈值。",
-    fields: [],
+    fields: setupFields(
+      "observabilityMetricsEnabled",
+      "observabilityTraceEnabled",
+      "alertActiveConfigLoadFailed",
+      "alertPermissionViolationRate",
+      "alertDraftIndexExposureCount",
+      "alertImportFailureRate",
+      "alertWorkerQueueBacklog",
+      "alertLlmTimeoutRate",
+    ),
   },
 ];
 
@@ -1092,13 +1279,27 @@ const selectedConfigItem = computed(() =>
 );
 const activeConfigItems = computed(() => configItems.value.filter((item) => item.status === "active"));
 const configDraftItems = computed(() =>
-  configItems.value.filter((item) => item.status === "draft" || item.status === "validating"),
+  configVersions.value.filter((item) => item.status !== "active" && item.status !== "archived"),
+);
+const activeConfigVersionRecord = computed(
+  () =>
+    configVersions.value.find((version) => version.status === "active") ??
+    configVersions.value.find((version) => version.version === activeConfigVersion.value) ??
+    null,
+);
+const selectedConfigVersionRecord = computed(() =>
+  selectedConfigVersionNumber.value === null
+    ? null
+    : configVersions.value.find((version) => version.version === selectedConfigVersionNumber.value) ?? null,
 );
 const editableConfigDefinitions = computed(() =>
-  configSectionDefinitions.filter((definition) => definition.fields.length > 0),
+  configSectionDefinitions,
 );
 const selectedConfigDefinition = computed(() => configDefinitionForKey(selectedConfigKey.value));
 const selectedConfigFields = computed(() => selectedConfigDefinition.value?.fields ?? []);
+const selectedConfigUsesJsonEditor = computed(
+  () => Boolean(selectedConfigDefinition.value) && selectedConfigFields.value.length === 0,
+);
 const selectedAdminUser = computed(
   () => adminUsers.value.find((user) => user.id === selectedAdminUserId.value) ?? null,
 );
@@ -1546,7 +1747,7 @@ const roleBindingDisabledReason = computed(() => {
 });
 const activeConfigVersion = computed(() => {
   const activeVersion = configVersions.value.find((version) => version.status === "active");
-  return activeVersion?.version ?? selectedConfigItem.value?.version ?? 1;
+  return activeVersion?.version ?? setupState.value?.active_config_version ?? 1;
 });
 const newestConfigVersion = computed(() =>
   configVersions.value.reduce((max, version) => Math.max(max, version.version), activeConfigVersion.value),
@@ -1559,7 +1760,7 @@ const configValidationFresh = computed(
 );
 const canValidateSelectedConfig = computed(
   () =>
-    Boolean(selectedConfigDefinition.value) &&
+    Boolean(configModalMode.value) &&
     canManageConfig.value &&
     !configBusy.loading &&
     !configBusy.validating &&
@@ -1581,15 +1782,6 @@ const canPublishSelectedDraft = computed(
     !configBusy.loading &&
     !configBusy.validating &&
     !configBusy.saving &&
-    !configBusy.publishing &&
-    !configBusy.deleting,
-);
-const canDiscardSelectedDraft = computed(
-  () =>
-    Boolean(selectedDraftVersion.value) &&
-    canManageConfig.value &&
-    configDangerForm.confirmedDelete &&
-    !configBusy.loading &&
     !configBusy.publishing &&
     !configBusy.deleting,
 );
@@ -1840,12 +2032,9 @@ async function refreshConfigAdminState(): Promise<void> {
 
   configBusy.loading = true;
   try {
-    const [itemsResponse, versionsResponse] = await Promise.all([
-      listConfigs(accessToken),
-      listConfigVersions(accessToken),
-    ]);
-    configItems.value = itemsResponse.data;
+    const versionsResponse = await listConfigVersions(accessToken);
     configVersions.value = versionsResponse.data;
+    configItems.value = configItemsFromVersion(activeConfigVersionRecord.value);
     if (canReadAudit.value) {
       try {
         const auditResponse = await listAuditLogs(accessToken, { resource_type: "config" });
@@ -1862,27 +2051,7 @@ async function refreshConfigAdminState(): Promise<void> {
       auditLogs.value = [];
       auditFeedback.value = null;
     }
-    if (!selectedConfigKey.value && configItems.value.length > 0) {
-      selectConfigItem(configItems.value.find((item) => item.status === "active") ?? configItems.value[0]);
-    } else if (
-      selectedConfigKey.value &&
-      !configItems.value.some(
-        (item) =>
-          item.key === selectedConfigKey.value &&
-          (!selectedDraftVersion.value || item.version === selectedDraftVersion.value),
-      )
-    ) {
-      const fallback = configItems.value.find((item) => item.status === "active") ?? configItems.value[0];
-      if (fallback) {
-        selectConfigItem(fallback);
-      } else {
-        selectedConfigKey.value = "";
-        selectedDraftVersion.value = null;
-        syncConfigFormFromActiveConfig();
-      }
-    } else if (selectedConfigKey.value) {
-      syncConfigFormFromActiveConfig();
-    }
+    syncConfigFormFromVersion(activeConfigVersionRecord.value);
     configFeedback.value = {
       tone: "success",
       message: "配置管理数据已刷新。",
@@ -4500,57 +4669,39 @@ function selectConfigItem(itemOrKey: ConfigItemData | string): void {
 }
 
 function openCreateConfigModal(): void {
-  const fallback =
-    editableConfigDefinitions.value.find((definition) =>
-      activeConfigItems.value.some((item) => item.key === definition.key),
-    ) ?? editableConfigDefinitions.value[0];
-  if (!fallback) {
-    configFeedback.value = {
-      tone: "error",
-      message: "当前没有可编辑的配置项。",
-    };
-    return;
-  }
-  selectedConfigKey.value = fallback.key;
+  selectedConfigVersionNumber.value = null;
   selectedDraftVersion.value = null;
-  syncConfigFormFromActiveConfig();
+  syncConfigFormFromVersion(activeConfigVersionRecord.value);
   resetConfigModalState();
   configModalMode.value = "create";
 }
 
-function openEditConfigModal(item: ConfigItemData): void {
-  selectConfigItem(item);
+function openEditConfigVersion(version: ConfigVersionData): void {
+  selectedConfigVersionNumber.value = version.version;
+  selectedDraftVersion.value = version.version;
+  syncConfigFormFromVersion(version);
   resetConfigModalState();
   configModalMode.value = "edit";
 }
 
-function openDeleteConfigModal(item: ConfigItemData): void {
-  selectConfigItem(item);
-  resetConfigModalState();
-  configDangerForm.confirmedDelete = false;
-  configModalMode.value = "delete";
-}
-
 function closeConfigModal(): void {
   configModalMode.value = null;
-  configDangerForm.confirmedDelete = false;
 }
 
 function configModalTitle(): string {
   if (configModalMode.value === "create") {
-    return "新增配置草稿";
+    return "新建配置版本";
   }
   if (configModalMode.value === "edit") {
-    return "编辑配置项";
+    return `编辑配置版本 v${selectedConfigVersionNumber.value ?? "-"}`;
   }
-  return "删除配置草稿";
+  return "配置管理";
 }
 
 function resetConfigModalState(): void {
   configFeedback.value = null;
   configValidationResult.value = null;
   lastConfigValidatedText.value = null;
-  configDangerForm.confirmedDelete = false;
   configEditorText.value = configFormSignature();
 }
 
@@ -4589,12 +4740,6 @@ function setConfigFormValue(key: keyof SetupFormModel, value: unknown): void {
 function resetConfigValidationState(): void {
   configValidationResult.value = null;
   lastConfigValidatedText.value = null;
-  if (configModalMode.value === "edit" || configModalMode.value === "create") {
-    selectedDraftVersion.value =
-      selectedConfigItem.value?.status === "draft" || selectedConfigItem.value?.status === "validating"
-        ? selectedConfigItem.value.version
-        : selectedDraftVersion.value;
-  }
   configEditorText.value = configFormSignature();
 }
 
@@ -4603,7 +4748,7 @@ async function validateSelectedConfig(): Promise<void> {
   if (!configBundle) {
     configFeedback.value = {
       tone: "error",
-      message: configEditorParseError.value ?? "请选择需要校验的配置分组。",
+      message: configEditorParseError.value ?? "请先完成配置表单。",
     };
     return;
   }
@@ -4635,12 +4780,18 @@ async function validateSelectedConfig(): Promise<void> {
 }
 
 async function saveSelectedDraft(): Promise<void> {
-  const valueJson = buildSelectedConfigSectionValue();
-  const definition = selectedConfigDefinition.value;
-  if (!definition || !valueJson) {
+  const configBundle = buildEditedActiveConfigBundle();
+  if (!configBundle) {
     configFeedback.value = {
       tone: "error",
-      message: configEditorParseError.value ?? "请选择需要保存的配置分组。",
+      message: configEditorParseError.value ?? "请填写需要保存的完整配置。",
+    };
+    return;
+  }
+  if (configModalMode.value === "edit" && selectedConfigVersionNumber.value === null) {
+    configFeedback.value = {
+      tone: "error",
+      message: "请选择需要编辑的配置版本。",
     };
     return;
   }
@@ -4651,18 +4802,17 @@ async function saveSelectedDraft(): Promise<void> {
 
   configBusy.saving = true;
   try {
-    const response = await saveConfigDraft(definition.key, valueJson, accessToken);
-    selectedDraftVersion.value =
-      response.data.status === "draft" ? response.data.version : selectedDraftVersion.value;
+    const response =
+      configModalMode.value === "create"
+        ? await createConfigVersion(configBundle, accessToken)
+        : await updateConfigVersion(selectedConfigVersionNumber.value ?? 0, configBundle, accessToken);
+    selectedConfigVersionNumber.value = response.data.version;
+    selectedDraftVersion.value = response.data.version;
     configFeedback.value = {
       tone: "success",
-      message:
-        response.data.status === "draft"
-          ? `已保存配置草稿 v${response.data.version}。`
-          : "配置内容与当前生效版本一致。",
+      message: `已保存配置版本 v${response.data.version}。`,
     };
     await refreshConfigAdminState();
-    selectConfigItem(response.data);
     closeConfigModal();
   } catch (error) {
     configFeedback.value = {
@@ -4688,7 +4838,6 @@ async function publishDraftVersion(version?: number | null): Promise<void> {
     return;
   }
 
-  const currentKey = selectedConfigKey.value;
   configBusy.publishing = true;
   try {
     const response = await publishConfigVersion(targetVersion, accessToken);
@@ -4697,30 +4846,30 @@ async function publishDraftVersion(version?: number | null): Promise<void> {
     lastConfigValidatedText.value = null;
     configFeedback.value = {
       tone: "success",
-      message: `已发布 active_config v${response.data.version}。`,
+      message: `已激活配置版本 v${response.data.version}。`,
     };
     await refreshConfigAdminState();
-    if (currentKey && configItems.value.some((item) => item.key === currentKey)) {
-      selectConfigItem(currentKey);
-    }
     closeConfigModal();
   } catch (error) {
     configFeedback.value = {
       tone: "error",
-      message: normalizeErrorMessage(error, "发布配置版本失败"),
+      message: normalizeErrorMessage(error, "激活配置版本失败"),
     };
   } finally {
     configBusy.publishing = false;
   }
 }
 
-async function discardSelectedDraft(): Promise<void> {
-  const targetVersion = selectedDraftVersion.value;
-  if (!targetVersion || !configDangerForm.confirmedDelete) {
+async function archiveConfigVersionFromUi(version: ConfigVersionData): Promise<void> {
+  if (!isArchivableConfigVersion(version)) {
     configFeedback.value = {
       tone: "error",
-      message: "删除草稿前必须勾选确认项。",
+      message: "只能归档非 active 且未归档的配置版本。",
     };
+    return;
+  }
+  const confirmed = window.confirm(`确认归档配置版本 v${version.version}？归档后将不能直接激活该版本。`);
+  if (!confirmed) {
     return;
   }
   const accessToken = await ensureAccessToken();
@@ -4730,19 +4879,16 @@ async function discardSelectedDraft(): Promise<void> {
 
   configBusy.deleting = true;
   try {
-    await discardConfigDraft(targetVersion, accessToken);
-    selectedDraftVersion.value = null;
-    configDangerForm.confirmedDelete = false;
+    await archiveConfigVersion(version.version, accessToken);
     configFeedback.value = {
       tone: "success",
-      message: `已删除配置草稿 v${targetVersion}。`,
+      message: `已归档配置版本 v${version.version}。`,
     };
     await refreshConfigAdminState();
-    closeConfigModal();
   } catch (error) {
     configFeedback.value = {
       tone: "error",
-      message: normalizeErrorMessage(error, "删除配置草稿失败"),
+      message: normalizeErrorMessage(error, "归档配置版本失败"),
     };
   } finally {
     configBusy.deleting = false;
@@ -5410,7 +5556,34 @@ function syncConfigFormFromActiveConfig(preferredItem: ConfigItemData | null = n
   Object.assign(configForm, defaults);
   const configBundle = buildCurrentConfigBundle(preferredItem);
   hydrateConfigForm(configForm, configBundle);
+  const selectedValue = selectedConfigKey.value ? configBundle[selectedConfigKey.value] : null;
+  configJsonText.value = JSON.stringify(isRecord(selectedValue) ? selectedValue : {}, null, 2);
   configEditorText.value = configFormSignature();
+}
+
+function syncConfigFormFromVersion(version: ConfigVersionData | null): void {
+  const configBundle = version?.config ?? activeConfigVersionRecord.value?.config ?? {};
+  const defaults = createDefaultSetupForm();
+  Object.assign(configForm, defaults);
+  hydrateConfigForm(configForm, configBundle);
+  configJsonText.value = JSON.stringify(configBundle, null, 2);
+  configEditorText.value = configFormSignature();
+}
+
+function configItemsFromVersion(version: ConfigVersionData | null): ConfigItemData[] {
+  if (!version?.config) {
+    return [];
+  }
+  return Object.entries(version.config)
+    .filter(([key, value]) => !["schema_version", "config_version", "scope"].includes(key) && isRecord(value))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => ({
+      key,
+      value_json: cloneJsonRecord(value as Record<string, unknown>),
+      scope_type: "global",
+      status: version.status,
+      version: version.version,
+    }));
 }
 
 function hydrateConfigForm(target: SetupFormModel, config: Record<string, unknown>): void {
@@ -5433,6 +5606,19 @@ function hydrateConfigForm(target: SetupFormModel, config: Record<string, unknow
   const cache = asRecord(config.cache);
   const rateLimit = asRecord(config.rate_limit);
   const audit = asRecord(config.audit);
+  const llm = asRecord(config.llm);
+  const llmRetryPolicy = asRecord(llm?.retry_policy);
+  const llmExtraBody = asRecord(llm?.openai_extra_body);
+  const llmChatTemplateKwargs = asRecord(llmExtraBody?.chat_template_kwargs);
+  const permission = asRecord(config.permission);
+  const tighteningPolicy = asRecord(permission?.tightening_block_policy);
+  const security = asRecord(config.security);
+  const promptLeakagePolicy = asRecord(security?.prompt_leakage_policy);
+  const piiRedactionPolicy = asRecord(security?.pii_redaction_policy);
+  const timeout = asRecord(config.timeout);
+  const degrade = asRecord(config.degrade);
+  const observability = asRecord(config.observability);
+  const alertThresholds = asRecord(observability?.alert_thresholds);
 
   target.secretProviderEndpoint = asString(secretProvider?.endpoint, target.secretProviderEndpoint);
   target.redisUrl = asString(redis?.url, target.redisUrl);
@@ -5492,17 +5678,95 @@ function hydrateConfigForm(target: SetupFormModel, config: Record<string, unknow
   target.queryQpsPerUser = asNumber(rateLimit?.query_qps_per_user, target.queryQpsPerUser);
   target.auditRetentionDays = asNumber(audit?.retention_days, target.auditRetentionDays);
   target.auditQueryTextMode = asAuditQueryTextMode(audit?.query_text_mode, target.auditQueryTextMode);
+  target.llmTemperature = asNumber(llm?.temperature, target.llmTemperature);
+  target.llmMaxTokens = asNumber(llm?.max_tokens, target.llmMaxTokens);
+  target.llmFirstTokenTimeoutMs = asNumber(llm?.first_token_timeout_ms, target.llmFirstTokenTimeoutMs);
+  target.llmTotalTimeoutMs = asNumber(llm?.total_timeout_ms, target.llmTotalTimeoutMs);
+  target.llmMaxRetries = asNumber(llmRetryPolicy?.max_retries, target.llmMaxRetries);
+  target.llmRetryBackoffMs = asNumber(llmRetryPolicy?.backoff_ms, target.llmRetryBackoffMs);
+  target.llmEnableThinking = asBoolean(llmChatTemplateKwargs?.enable_thinking, target.llmEnableThinking);
+  target.permissionDefaultVisibility = asPermissionVisibility(
+    permission?.default_visibility,
+    target.permissionDefaultVisibility,
+  );
+  target.permissionCacheTtlSeconds = asNumber(permission?.cache_ttl_seconds, target.permissionCacheTtlSeconds);
+  target.permissionWriteAccessBlockFirst = asBoolean(
+    tighteningPolicy?.write_access_block_first,
+    target.permissionWriteAccessBlockFirst,
+  );
+  target.permissionBlockOldIndexRefs = asBoolean(
+    tighteningPolicy?.block_old_index_refs,
+    target.permissionBlockOldIndexRefs,
+  );
+  target.permissionFailClosed = asBoolean(tighteningPolicy?.fail_closed, target.permissionFailClosed);
+  target.securityRequireCitation = asBoolean(security?.require_citation, target.securityRequireCitation);
+  target.securityBlockInternalPromptLeakage = asBoolean(
+    promptLeakagePolicy?.block_internal_prompt_leakage,
+    target.securityBlockInternalPromptLeakage,
+  );
+  target.securityBlockSecretRefLeakage = asBoolean(
+    promptLeakagePolicy?.block_secret_ref_leakage,
+    target.securityBlockSecretRefLeakage,
+  );
+  target.securityPiiRedactionEnabled = asBoolean(piiRedactionPolicy?.enabled, target.securityPiiRedactionEnabled);
+  target.securityRedactLogs = asBoolean(piiRedactionPolicy?.redact_logs, target.securityRedactLogs);
+  target.securityRedactAuditSummary = asBoolean(
+    piiRedactionPolicy?.redact_audit_summary,
+    target.securityRedactAuditSummary,
+  );
+  target.timeoutQueryTotalMs = asNumber(timeout?.query_total_ms, target.timeoutQueryTotalMs);
+  target.timeoutAuthPermissionMs = asNumber(timeout?.auth_permission_ms, target.timeoutAuthPermissionMs);
+  target.timeoutRewriteMs = asNumber(timeout?.rewrite_ms, target.timeoutRewriteMs);
+  target.timeoutEmbeddingMs = asNumber(timeout?.embedding_ms, target.timeoutEmbeddingMs);
+  target.timeoutVectorSearchMs = asNumber(timeout?.vector_search_ms, target.timeoutVectorSearchMs);
+  target.timeoutKeywordSearchMs = asNumber(timeout?.keyword_search_ms, target.timeoutKeywordSearchMs);
+  target.timeoutRerankMs = asNumber(timeout?.rerank_ms, target.timeoutRerankMs);
+  target.timeoutContextMs = asNumber(timeout?.context_ms, target.timeoutContextMs);
+  target.timeoutPostprocessMs = asNumber(timeout?.postprocess_ms, target.timeoutPostprocessMs);
+  target.degradeRewriteTimeout = asString(degrade?.rewrite_timeout, target.degradeRewriteTimeout);
+  target.degradeEmbeddingTimeout = asString(degrade?.embedding_timeout, target.degradeEmbeddingTimeout);
+  target.degradeVectorUnavailable = asString(degrade?.vector_unavailable, target.degradeVectorUnavailable);
+  target.degradeKeywordUnavailable = asString(degrade?.keyword_unavailable, target.degradeKeywordUnavailable);
+  target.degradeRerankTimeout = asString(degrade?.rerank_timeout, target.degradeRerankTimeout);
+  target.degradeLlmTimeout = asString(degrade?.llm_timeout, target.degradeLlmTimeout);
+  target.degradeModelPoolOverloaded = asString(
+    degrade?.model_pool_overloaded,
+    target.degradeModelPoolOverloaded,
+  );
+  target.degradeImportBacklog = asString(degrade?.import_backlog, target.degradeImportBacklog);
+  target.observabilityMetricsEnabled = asBoolean(
+    observability?.metrics_enabled,
+    target.observabilityMetricsEnabled,
+  );
+  target.observabilityTraceEnabled = asBoolean(observability?.trace_enabled, target.observabilityTraceEnabled);
+  target.alertActiveConfigLoadFailed = asNumber(
+    alertThresholds?.active_config_load_failed,
+    target.alertActiveConfigLoadFailed,
+  );
+  target.alertPermissionViolationRate = asNumber(
+    alertThresholds?.permission_violation_rate,
+    target.alertPermissionViolationRate,
+  );
+  target.alertDraftIndexExposureCount = asNumber(
+    alertThresholds?.draft_index_exposure_count,
+    target.alertDraftIndexExposureCount,
+  );
+  target.alertImportFailureRate = asNumber(alertThresholds?.import_failure_rate, target.alertImportFailureRate);
+  target.alertWorkerQueueBacklog = asNumber(alertThresholds?.worker_queue_backlog, target.alertWorkerQueueBacklog);
+  target.alertLlmTimeoutRate = asNumber(alertThresholds?.llm_timeout_rate, target.alertLlmTimeoutRate);
 }
 
 function buildCurrentConfigBundle(preferredItem: ConfigItemData | null = null): Record<string, unknown> {
-  const config: Record<string, unknown> = {
-    schema_version: 1,
-    config_version: activeConfigVersion.value,
-    scope: {
-      type: "global",
-      id: "global",
-    },
-  };
+  const config: Record<string, unknown> = activeConfigVersionRecord.value?.config
+    ? cloneJsonRecord(activeConfigVersionRecord.value.config)
+    : {
+        schema_version: 1,
+        config_version: activeConfigVersion.value,
+        scope: {
+          type: "global",
+          id: "global",
+        },
+      };
   for (const item of activeConfigItems.value) {
     config[item.key] = cloneJsonRecord(item.value_json);
   }
@@ -5513,21 +5777,36 @@ function buildCurrentConfigBundle(preferredItem: ConfigItemData | null = null): 
 }
 
 function buildEditedActiveConfigBundle(): Record<string, unknown> | null {
-  const valueJson = buildSelectedConfigSectionValue();
-  const definition = selectedConfigDefinition.value;
-  if (!definition || !valueJson) {
-    return null;
+  const baseConfig = currentEditableConfigBundle();
+  const config = cloneJsonRecord(baseConfig);
+  const formConfig = buildSetupPayload(configForm).config;
+  for (const definition of configSectionDefinitions) {
+    const formValue = asRecord(formConfig[definition.key]);
+    if (!formValue) {
+      continue;
+    }
+    config[definition.key] = mergeConfigSectionValue(
+      definition.key,
+      asRecord(config[definition.key]) ?? {},
+      formValue,
+    );
   }
-  const config = buildCurrentConfigBundle();
-  config.config_version = newestConfigVersion.value + 1;
-  config[definition.key] = valueJson;
+  config.schema_version = asNumber(config.schema_version, 1);
+  config.config_version = selectedConfigVersionNumber.value ?? activeConfigVersion.value;
+  if (!isRecord(config.scope)) {
+    config.scope = { type: "global", id: "global" };
+  }
   return config;
 }
 
 function buildSelectedConfigSectionValue(): Record<string, unknown> | null {
-  const key = selectedConfigDefinition.value?.key;
-  if (!key) {
+  const definition = selectedConfigDefinition.value;
+  const key = definition?.key;
+  if (!definition || !key) {
     return null;
+  }
+  if (definition.fields.length === 0) {
+    return parseConfigJsonText();
   }
   const baseValue = selectedConfigItem.value?.value_json ?? activeConfigItems.value.find((item) => item.key === key)?.value_json;
   const bundle = buildSetupPayload(configForm).config;
@@ -5639,35 +5918,76 @@ function cloneJsonRecord(value: Record<string, unknown>): Record<string, unknown
 }
 
 function validateConfigForm(): string | null {
-  const definition = selectedConfigDefinition.value;
-  if (!definition) {
-    return "请选择需要编辑的配置项。";
+  for (const field of configEditableFields()) {
+    const value = configForm[field.key];
+    if (field.required && isBlankFieldValue(value)) {
+      return `${field.label} 为必填项。`;
+    }
+    if (field.input === "number") {
+      const numberValue = Number(value);
+      if (!Number.isFinite(numberValue)) {
+        return `${field.label} 必须是有效数字。`;
+      }
+      if (field.min !== undefined && numberValue < field.min) {
+        return `${field.label} 不能小于 ${field.min}。`;
+      }
+    }
   }
-  if (definition.fields.length === 0) {
-    return "该配置项暂未提供结构化表单，请通过初始化配置契约扩展后再编辑。";
+  return null;
+}
+
+function updateConfigJsonText(value: string): void {
+  configJsonText.value = value;
+  resetConfigValidationState();
+}
+
+function parseConfigJsonText(): Record<string, unknown> | null {
+  const text = configJsonText.value.trim();
+  if (!text) {
+    return null;
   }
-  const value = buildSelectedConfigSectionValue();
-  if (!value) {
-    return "配置项内容不能为空。";
+  try {
+    const parsed = JSON.parse(text);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
-  const localIssues = validateLocalForm(configForm, null);
-  const fieldKeys = new Set(definition.fields.map((field) => field.key));
-  const blockingIssue = localIssues.find(
-    (issue) => issue.tone === "error" && issue.field && fieldKeys.has(issue.field),
-  );
-  return blockingIssue?.message ?? null;
 }
 
 function configFormSignature(): string {
-  const value = buildSelectedConfigSectionValue();
+  const value = buildEditedActiveConfigBundle();
   return JSON.stringify(
     {
-      key: selectedConfigDefinition.value?.key ?? "",
+      version: selectedConfigVersionNumber.value,
       value,
     },
     null,
     2,
   );
+}
+
+function currentEditableConfigBundle(): Record<string, unknown> {
+  const source =
+    selectedConfigVersionNumber.value === null
+      ? activeConfigVersionRecord.value?.config
+      : selectedConfigVersionRecord.value?.config;
+  return source ? cloneJsonRecord(source) : {};
+}
+
+function configEditableFields(): FieldDefinition[] {
+  return configSectionDefinitions.flatMap((definition) => definition.fields);
+}
+
+function configNormalFields(definition: ConfigSectionFormDefinition): FieldDefinition[] {
+  return definition.fields.filter((field) => field.input !== "checkbox");
+}
+
+function configCheckboxFields(definition: ConfigSectionFormDefinition): FieldDefinition[] {
+  return definition.fields.filter((field) => field.input === "checkbox");
+}
+
+function isBlankFieldValue(value: unknown): boolean {
+  return value === null || value === undefined || (typeof value === "string" && value.trim() === "");
 }
 
 function configValuePreview(value: Record<string, unknown>): string {
@@ -5676,6 +5996,86 @@ function configValuePreview(value: Record<string, unknown>): string {
     .slice(0, 3)
     .map(([key, entryValue]) => `${key}: ${String(entryValue)}`);
   return entries.join(" / ") || `${Object.keys(value).length} 个子项`;
+}
+
+function configVersionSectionCount(version: ConfigVersionData): number {
+  if (!version.config) {
+    return 0;
+  }
+  return Object.entries(version.config).filter(
+    ([key, value]) => !["schema_version", "config_version", "scope"].includes(key) && isRecord(value),
+  ).length;
+}
+
+function configVersionPreview(version: ConfigVersionData): string {
+  if (!version.config) {
+    return "无配置内容";
+  }
+  const keys = Object.keys(version.config).filter(
+    (key) => !["schema_version", "config_version", "scope"].includes(key),
+  );
+  const head = keys.slice(0, 6).join(" / ");
+  return keys.length > 6 ? `${head} / 等 ${keys.length} 项` : head || "无配置项";
+}
+
+function formatConfigContent(config: Record<string, unknown> | null): string {
+  return config ? JSON.stringify(config, null, 2) : "{}";
+}
+
+function configSectionsForVersion(version: ConfigVersionData): ConfigSectionFormDefinition[] {
+  if (!version.config) {
+    return [];
+  }
+  return configSectionDefinitions.filter((definition) => isRecord(version.config?.[definition.key]));
+}
+
+function configSectionPreviewItems(
+  version: ConfigVersionData,
+  key: string,
+): Array<{ key: string; label: string; value: string }> {
+  const section = asRecord(version.config?.[key]);
+  if (!section) {
+    return [];
+  }
+  return Object.entries(section)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([entryKey, value]) => ({
+      key: entryKey,
+      label: entryKey,
+      value: formatConfigPreviewValue(value),
+    }));
+}
+
+function formatConfigPreviewValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `${value.length} 项`;
+  }
+  if (isRecord(value)) {
+    return configValuePreview(value);
+  }
+  if (typeof value === "boolean") {
+    return value ? "是" : "否";
+  }
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+  return String(value);
+}
+
+function isEditableConfigVersion(version: ConfigVersionData): boolean {
+  return version.status !== "archived";
+}
+
+function isActivatableConfigVersion(version: ConfigVersionData): boolean {
+  return version.status !== "active" && version.status !== "archived";
+}
+
+function isArchivableConfigVersion(version: ConfigVersionData): boolean {
+  return version.status !== "active" && version.status !== "archived";
+}
+
+function formatDateTime(value: string | null): string {
+  return formatAuditTime(value);
 }
 
 function configSectionLabel(key: string): string {
@@ -5725,6 +6125,13 @@ function asChunkStrategyMode(value: unknown, fallback: SetupFormModel["chunkStra
 
 function asAuditQueryTextMode(value: unknown, fallback: SetupFormModel["auditQueryTextMode"]): SetupFormModel["auditQueryTextMode"] {
   return value === "none" || value === "hash" || value === "plain" ? value : fallback;
+}
+
+function asPermissionVisibility(
+  value: unknown,
+  fallback: SetupFormModel["permissionDefaultVisibility"],
+): SetupFormModel["permissionDefaultVisibility"] {
+  return value === "department" || value === "enterprise" ? value : fallback;
 }
 
 function formatAuditTime(value: string | null): string {
@@ -7729,7 +8136,7 @@ function isComposeDemoProvider(value: string): boolean {
                 {{ configBusy.loading ? "刷新中" : "刷新配置" }}
               </button>
               <button class="button" type="button" @click="openCreateConfigModal" :disabled="!canManageConfig">
-                新增配置
+                新建版本
               </button>
             </div>
           </header>
@@ -7744,111 +8151,120 @@ function isComposeDemoProvider(value: string): boolean {
                 <strong>v{{ activeConfigVersion }}</strong>
               </article>
               <article class="config-version-card">
-                <span>配置项</span>
-                <strong>{{ activeConfigItems.length }}</strong>
+                <span>版本数量</span>
+                <strong>{{ configVersions.length }}</strong>
               </article>
               <article class="config-version-card">
-                <span>待发布草稿</span>
+                <span>可激活版本</span>
                 <strong>{{ configDraftItems.length }}</strong>
               </article>
             </section>
 
-            <div v-if="configItems.length" class="entity-table entity-table--configs">
+            <div v-if="configVersions.length" class="entity-table entity-table--configs">
               <div class="entity-table__row entity-table__row--header">
-                <span>配置项</span>
                 <span>版本</span>
                 <span>状态</span>
+                <span>创建时间</span>
+                <span>更新时间</span>
                 <span>内容摘要</span>
                 <span>操作</span>
               </div>
               <article
-                v-for="item in configItems"
-                :key="`${item.key}-${item.version}-${item.status}`"
+                v-for="version in configVersions"
+                :key="`config-version-${version.version}`"
                 class="entity-table__row"
               >
                 <div class="entity-main">
-                  <strong>{{ configSectionLabel(item.key) }}</strong>
-                  <span>{{ item.key }} · {{ configSectionDescription(item.key) }}</span>
+                  <strong>v{{ version.version }}</strong>
+                  <span>{{ configVersionSectionCount(version) }} 个配置项</span>
                 </div>
-                <div class="entity-cell">v{{ item.version }}</div>
                 <div class="entity-cell">
-                  <span :class="toneClass(configStatusTone(item.status))">{{ item.status }}</span>
+                  <span :class="toneClass(configStatusTone(version.status))">{{ version.status }}</span>
                 </div>
-                <div class="entity-cell">{{ configValuePreview(item.value_json) }}</div>
+                <div class="entity-cell">{{ formatDateTime(version.created_at) }}</div>
+                <div class="entity-cell">{{ formatDateTime(version.updated_at) }}</div>
+                <div class="entity-cell">
+                  <details class="config-preview">
+                    <summary>{{ configVersionPreview(version) }}，查看详情</summary>
+                    <div class="config-preview__sections">
+                      <article
+                        v-for="section in configSectionsForVersion(version)"
+                        :key="`${version.version}-${section.key}`"
+                        class="config-preview__section"
+                      >
+                        <header>
+                          <strong>{{ section.label }}</strong>
+                          <span>{{ section.key }}</span>
+                        </header>
+                        <p>{{ section.description }}</p>
+                        <dl>
+                          <div
+                            v-for="item in configSectionPreviewItems(version, section.key)"
+                            :key="`${version.version}-${section.key}-${item.key}`"
+                          >
+                            <dt>{{ item.label }}</dt>
+                            <dd>{{ item.value }}</dd>
+                          </div>
+                        </dl>
+                      </article>
+                    </div>
+                  </details>
+                </div>
                 <div class="row-actions">
                   <button
                     class="button button--secondary button--small"
                     type="button"
-                    @click="openEditConfigModal(item)"
-                    :disabled="!canManageConfig || !configDefinitionForKey(item.key)?.fields.length"
+                    @click="openEditConfigVersion(version)"
+                    :disabled="!canManageConfig || !isEditableConfigVersion(version)"
                   >
                     编辑
                   </button>
                   <button
-                    v-if="item.status === 'draft' || item.status === 'validating'"
+                    v-if="isActivatableConfigVersion(version)"
                     class="button button--secondary button--small"
                     type="button"
-                    @click="publishDraftVersion(item.version)"
+                    @click="publishDraftVersion(version.version)"
                     :disabled="!canManageConfig || configBusy.publishing"
                   >
-                    发布
+                    激活
                   </button>
                   <button
+                    v-if="isArchivableConfigVersion(version)"
                     class="button button--danger button--small"
                     type="button"
-                    @click="openDeleteConfigModal(item)"
-                    :disabled="!canManageConfig || item.status === 'active'"
+                    @click="archiveConfigVersionFromUi(version)"
+                    :disabled="!canManageConfig || configBusy.deleting"
                   >
-                    删除
+                    归档
                   </button>
                 </div>
               </article>
             </div>
-            <p v-else class="empty-state empty-state--plain">当前尚未读取到配置项。</p>
+            <p v-else class="empty-state empty-state--plain">当前尚未读取到配置版本。</p>
 
-            <section class="config-secondary-grid">
-              <div class="config-versions" aria-label="配置版本">
-                <h4 class="config-versions__title">配置版本</h4>
-                <div v-if="configVersions.length" class="version-list">
-                  <div v-for="version in configVersions" :key="version.version" class="version-row">
-                    <div>
-                      <strong>v{{ version.version }}</strong>
-                      <span>{{ version.status }} / {{ version.risk_level }}</span>
-                    </div>
-                    <button
-                      v-if="version.status === 'draft' || version.status === 'validating'"
-                      class="button button--secondary button--small"
-                      type="button"
-                      @click="publishDraftVersion(version.version)"
-                      :disabled="!canManageConfig || configBusy.publishing"
-                    >
-                      发布
-                    </button>
-                  </div>
-                </div>
-                <p v-else class="empty-state">当前尚未读取到配置版本。</p>
-              </div>
-
+            <section class="config-secondary-grid config-secondary-grid--single">
               <div class="config-versions" aria-label="配置审计">
-                <h4 class="config-versions__title">配置审计</h4>
-                <p v-if="auditFeedback" :class="toneClass(auditFeedback.tone)">
-                  {{ auditFeedback.message }}
-                </p>
-                <div v-if="auditLogs.length" class="audit-list">
-                  <article v-for="log in auditLogs" :key="log.id" class="audit-row">
-                    <header>
-                      <strong>{{ log.event_name }}</strong>
-                      <span :class="toneClass(log.result === 'success' ? 'success' : 'error')">
-                        {{ log.result }}
-                      </span>
-                    </header>
-                    <p>{{ formatAuditTime(log.created_at) }}</p>
-                    <p>{{ auditSummaryPreview(log) }}</p>
-                    <p v-if="log.error_code" class="audit-row__error">{{ log.error_code }}</p>
-                  </article>
-                </div>
-                <p v-else-if="canReadAudit" class="empty-state">当前尚未读取到配置审计记录。</p>
-                <p v-else class="empty-state">当前账号缺少审计读取权限。</p>
+                <details class="config-audit-details">
+                  <summary>配置变更日志</summary>
+                  <p v-if="auditFeedback" :class="toneClass(auditFeedback.tone)">
+                    {{ auditFeedback.message }}
+                  </p>
+                  <div v-if="auditLogs.length" class="audit-list">
+                    <article v-for="log in auditLogs" :key="log.id" class="audit-row">
+                      <header>
+                        <strong>{{ log.event_name }}</strong>
+                        <span :class="toneClass(log.result === 'success' ? 'success' : 'error')">
+                          {{ log.result }}
+                        </span>
+                      </header>
+                      <p>{{ formatAuditTime(log.created_at) }}</p>
+                      <p>{{ auditSummaryPreview(log) }}</p>
+                      <p v-if="log.error_code" class="audit-row__error">{{ log.error_code }}</p>
+                    </article>
+                  </div>
+                  <p v-else-if="canReadAudit" class="empty-state">当前尚未读取到配置变更日志。</p>
+                  <p v-else class="empty-state">当前账号缺少审计读取权限。</p>
+                </details>
               </div>
             </section>
           </div>
@@ -7872,79 +8288,106 @@ function isComposeDemoProvider(value: string): boolean {
               <div v-if="configFeedback" :class="['feedback feedback--wide', `feedback--${configFeedback.tone}`]">
                 {{ configFeedback.message }}
               </div>
-              <label class="field field--full modal-field">
-                <span class="field__label">配置项</span>
-                <p class="field__hint">新增会从当前 active_config 复制基线并生成新的草稿版本。</p>
-                <select
-                  class="control"
-                  :value="selectedConfigKey"
-                  :disabled="configModalMode === 'edit'"
-                  @change="onConfigKeyChange(($event.target as HTMLSelectElement).value)"
-                >
-                  <option v-for="definition in editableConfigDefinitions" :key="definition.key" :value="definition.key">
-                    {{ definition.label }} / {{ definition.key }}
-                  </option>
-                </select>
-              </label>
-              <dl v-if="selectedConfigDefinition" class="summary summary--compact modal-summary">
+              <dl class="summary summary--compact modal-summary">
                 <div class="summary__row">
-                  <dt>当前 active 版本</dt>
-                  <dd>v{{ activeConfigVersion }}</dd>
+                  <dt>{{ configModalMode === "create" ? "基线版本" : "编辑版本" }}</dt>
+                  <dd>
+                    {{
+                      configModalMode === "create"
+                        ? `当前 active_config v${activeConfigVersion}`
+                        : `v${selectedConfigVersionRecord?.version ?? "-"} / ${selectedConfigVersionRecord?.status ?? "-"}`
+                    }}
+                  </dd>
                 </div>
                 <div class="summary__row">
-                  <dt>配置说明</dt>
-                  <dd>{{ selectedConfigDefinition.description }}</dd>
+                  <dt>创建时间</dt>
+                  <dd>
+                    {{
+                      configModalMode === "create"
+                        ? formatDateTime(activeConfigVersionRecord?.created_at ?? null)
+                        : formatDateTime(selectedConfigVersionRecord?.created_at ?? null)
+                    }}
+                  </dd>
+                </div>
+                <div class="summary__row">
+                  <dt>更新时间</dt>
+                  <dd>
+                    {{
+                      configModalMode === "create"
+                        ? formatDateTime(activeConfigVersionRecord?.updated_at ?? null)
+                        : formatDateTime(selectedConfigVersionRecord?.updated_at ?? null)
+                    }}
+                  </dd>
                 </div>
               </dl>
-              <div class="form-grid form-grid--compact form-grid--modal">
-                <label
-                  v-for="field in selectedConfigFields"
-                  :key="String(field.key)"
-                  class="field"
-                  :class="{ 'field--full': field.span === 'full', 'field--checkbox': field.input === 'checkbox' }"
+              <div class="config-form-sections">
+                <section
+                  v-for="section in configSectionDefinitions"
+                  :key="`config-form-${section.key}`"
+                  class="config-form-section"
                 >
-                  <template v-if="field.input === 'checkbox'">
-                    <input
-                      class="checkbox"
-                      type="checkbox"
-                      :checked="Boolean(configForm[field.key])"
-                      @change="updateConfigFieldFromCheckbox(field, ($event.target as HTMLInputElement).checked)"
-                    />
-                    <span>{{ field.label }}</span>
-                    <p class="field__hint" :class="{ 'field__hint--empty': !field.hint }" :aria-hidden="!field.hint">
-                      {{ field.hint }}
-                    </p>
-                  </template>
-                  <template v-else>
-                    <span class="field__label">
-                      {{ field.label }}
-                      <span v-if="field.required" class="required-mark">必填</span>
-                    </span>
-                    <p class="field__hint" :class="{ 'field__hint--empty': !field.hint }" :aria-hidden="!field.hint">
-                      {{ field.hint }}
-                    </p>
-                    <select
-                      v-if="field.input === 'select'"
-                      class="control"
-                      :value="String(configForm[field.key])"
-                      @change="updateConfigFieldFromSelect(field, ($event.target as HTMLSelectElement).value)"
+                  <header>
+                    <div>
+                      <h4>{{ section.label }}</h4>
+                      <p>{{ section.description }}</p>
+                    </div>
+                    <span>{{ section.key }}</span>
+                  </header>
+                  <div class="form-grid form-grid--compact form-grid--modal">
+                    <label
+                      v-for="field in configNormalFields(section)"
+                      :key="`config-field-${String(field.key)}`"
+                      class="field"
+                      :class="{ 'field--full': field.span === 'full' }"
                     >
-                      <option v-for="option in field.options" :key="option.value" :value="option.value">
-                        {{ option.label }}
-                      </option>
-                    </select>
-                    <input
-                      v-else
-                      class="control"
-                      :type="field.input"
-                      :min="field.min"
-                      :step="field.step"
-                      :placeholder="field.placeholder"
-                      :value="String(configForm[field.key] ?? '')"
-                      @input="updateConfigFieldFromInput(field, ($event.target as HTMLInputElement).value)"
-                    />
-                  </template>
-                </label>
+                      <span class="field__label">
+                        {{ field.label }}
+                        <span v-if="field.required" class="required-mark">必填</span>
+                      </span>
+                      <p class="field__hint" :class="{ 'field__hint--empty': !field.hint }" :aria-hidden="!field.hint">
+                        {{ field.hint }}
+                      </p>
+                      <select
+                        v-if="field.input === 'select'"
+                        class="control"
+                        :value="String(configForm[field.key])"
+                        @change="updateConfigFieldFromSelect(field, ($event.target as HTMLSelectElement).value)"
+                      >
+                        <option v-for="option in field.options ?? []" :key="option.value" :value="option.value">
+                          {{ option.label }}
+                        </option>
+                      </select>
+                      <input
+                        v-else
+                        class="control"
+                        :type="field.input"
+                        :min="field.min"
+                        :step="field.step"
+                        :placeholder="field.placeholder"
+                        :value="String(configForm[field.key] ?? '')"
+                        @input="updateConfigFieldFromInput(field, ($event.target as HTMLInputElement).value)"
+                      />
+                    </label>
+                  </div>
+                  <div v-if="configCheckboxFields(section).length" class="checkbox-grid">
+                    <label
+                      v-for="field in configCheckboxFields(section)"
+                      :key="`config-field-${String(field.key)}`"
+                      class="field field--checkbox"
+                    >
+                      <input
+                        class="checkbox"
+                        type="checkbox"
+                        :checked="Boolean(configForm[field.key])"
+                        @change="updateConfigFieldFromCheckbox(field, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>{{ field.label }}</span>
+                      <p class="field__hint" :class="{ 'field__hint--empty': !field.hint }" :aria-hidden="!field.hint">
+                        {{ field.hint }}
+                      </p>
+                    </label>
+                  </div>
+                </section>
               </div>
               <p v-if="configEditorParseError" class="field-issue field-issue--error">
                 {{ configEditorParseError }}
@@ -7959,7 +8402,7 @@ function isComposeDemoProvider(value: string): boolean {
                   {{ configBusy.validating ? "校验中..." : "校验配置" }}
                 </button>
                 <button class="button" type="submit" :disabled="!canSaveSelectedConfigDraft">
-                  {{ configBusy.saving ? "保存中..." : "保存草稿" }}
+                  {{ configBusy.saving ? "保存中..." : "保存配置" }}
                 </button>
               </div>
               <div v-if="configValidationResult" class="result-block result-block--compact">
@@ -7993,41 +8436,11 @@ function isComposeDemoProvider(value: string): boolean {
                 取消
               </button>
               <button class="button" type="submit" :disabled="!canSaveSelectedConfigDraft">
-                {{ configBusy.saving ? "保存中..." : "保存草稿" }}
+                {{ configBusy.saving ? "保存中..." : "保存配置" }}
               </button>
             </footer>
           </form>
 
-          <div v-else-if="configModalMode === 'delete' && selectedConfigItem">
-            <div class="modal__body">
-              <div class="danger-panel">
-                <h4>确认删除配置草稿</h4>
-                <p>
-                  将删除 {{ configSectionLabel(selectedConfigItem.key) }} 的草稿版本 v{{ selectedConfigItem.version }}。active 配置不会被删除。
-                </p>
-                <label class="confirm confirm--inline">
-                  <input v-model="configDangerForm.confirmedDelete" type="checkbox" />
-                  <span>确认删除该配置草稿</span>
-                </label>
-              </div>
-              <div v-if="configFeedback" :class="['feedback feedback--wide', `feedback--${configFeedback.tone}`]">
-                {{ configFeedback.message }}
-              </div>
-            </div>
-            <footer class="modal__footer">
-              <button class="button button--secondary" type="button" @click="closeConfigModal">
-                取消
-              </button>
-              <button
-                class="button button--danger"
-                type="button"
-                @click="discardSelectedDraft"
-                :disabled="!canDiscardSelectedDraft"
-              >
-                {{ configBusy.deleting ? "删除中..." : "删除草稿" }}
-              </button>
-            </footer>
-          </div>
         </section>
       </div>
 
@@ -9870,6 +10283,10 @@ function isComposeDemoProvider(value: string): boolean {
   gap: 16px;
 }
 
+.config-secondary-grid--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .config-versions {
   min-width: 0;
   border: 1px solid #d8dee6;
@@ -9932,6 +10349,103 @@ function isComposeDemoProvider(value: string): boolean {
   min-width: 0;
   display: grid;
   gap: 4px;
+}
+
+.config-preview {
+  min-width: 0;
+}
+
+.config-preview summary {
+  cursor: pointer;
+  color: #1d2935;
+  overflow-wrap: anywhere;
+}
+
+.config-preview__sections {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.config-preview__section {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #f7f9fb;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.config-preview__section header {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.config-preview__section header span,
+.config-preview__section > p {
+  color: #667182;
+}
+
+.config-preview__section dl {
+  display: grid;
+  gap: 6px;
+}
+
+.config-preview__section dl > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(110px, 0.55fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.config-preview__section dt {
+  color: #667182;
+}
+
+.config-preview__section dd {
+  margin: 0;
+  color: #1d2935;
+  overflow-wrap: anywhere;
+}
+
+.config-form-sections {
+  display: grid;
+  gap: 16px;
+}
+
+.config-form-section {
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 14px;
+  display: grid;
+  gap: 14px;
+}
+
+.config-form-section > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.config-form-section > header h4 {
+  margin: 0;
+}
+
+.config-form-section > header p,
+.config-form-section > header span {
+  color: #667182;
+}
+
+.config-audit-details summary {
+  cursor: pointer;
+  color: #1d2935;
+  font-weight: 700;
 }
 
 .audit-row {
@@ -10442,7 +10956,7 @@ function isComposeDemoProvider(value: string): boolean {
 }
 
 .entity-table--configs .entity-table__row {
-  grid-template-columns: minmax(220px, 1.3fr) minmax(90px, 0.45fr) minmax(110px, 0.5fr) minmax(220px, 1.2fr) minmax(210px, 1fr);
+  grid-template-columns: minmax(130px, 0.65fr) minmax(100px, 0.45fr) minmax(150px, 0.7fr) minmax(150px, 0.7fr) minmax(220px, 1.2fr) minmax(220px, 1fr);
 }
 
 .entity-table--knowledge .entity-table__row {
@@ -11004,6 +11518,15 @@ function isComposeDemoProvider(value: string): boolean {
   color: #18202a;
   padding: 10px 12px;
   font: inherit;
+}
+
+.config-json-editor {
+  min-height: 320px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre;
 }
 
 .control:focus {

@@ -36,6 +36,13 @@ export interface SetupFormModel {
   rerankModel: string;
   llmModel: string;
   llmFallbackModel: string;
+  llmTemperature: number;
+  llmMaxTokens: number;
+  llmFirstTokenTimeoutMs: number;
+  llmTotalTimeoutMs: number;
+  llmMaxRetries: number;
+  llmRetryBackoffMs: number;
+  llmEnableThinking: boolean;
   passwordMinLength: number;
   accessTokenTtlMinutes: number;
   refreshTokenTtlMinutes: number;
@@ -65,6 +72,42 @@ export interface SetupFormModel {
   queryQpsPerUser: number;
   auditRetentionDays: number;
   auditQueryTextMode: "none" | "hash" | "plain";
+  permissionDefaultVisibility: "department" | "enterprise";
+  permissionCacheTtlSeconds: number;
+  permissionWriteAccessBlockFirst: boolean;
+  permissionBlockOldIndexRefs: boolean;
+  permissionFailClosed: boolean;
+  securityRequireCitation: boolean;
+  securityBlockInternalPromptLeakage: boolean;
+  securityBlockSecretRefLeakage: boolean;
+  securityPiiRedactionEnabled: boolean;
+  securityRedactLogs: boolean;
+  securityRedactAuditSummary: boolean;
+  timeoutQueryTotalMs: number;
+  timeoutAuthPermissionMs: number;
+  timeoutRewriteMs: number;
+  timeoutEmbeddingMs: number;
+  timeoutVectorSearchMs: number;
+  timeoutKeywordSearchMs: number;
+  timeoutRerankMs: number;
+  timeoutContextMs: number;
+  timeoutPostprocessMs: number;
+  degradeRewriteTimeout: string;
+  degradeEmbeddingTimeout: string;
+  degradeVectorUnavailable: string;
+  degradeKeywordUnavailable: string;
+  degradeRerankTimeout: string;
+  degradeLlmTimeout: string;
+  degradeModelPoolOverloaded: string;
+  degradeImportBacklog: string;
+  observabilityMetricsEnabled: boolean;
+  observabilityTraceEnabled: boolean;
+  alertActiveConfigLoadFailed: number;
+  alertPermissionViolationRate: number;
+  alertDraftIndexExposureCount: number;
+  alertImportFailureRate: number;
+  alertWorkerQueueBacklog: number;
+  alertLlmTimeoutRate: number;
 }
 
 export type SetupRequestPayload = {
@@ -122,6 +165,13 @@ export function createDefaultSetupForm(): SetupFormModel {
     rerankModel: "bge-reranker-base",
     llmModel: "qwen3-4b",
     llmFallbackModel: "qwen3-4b",
+    llmTemperature: 0.1,
+    llmMaxTokens: 800,
+    llmFirstTokenTimeoutMs: 3000,
+    llmTotalTimeoutMs: 20000,
+    llmMaxRetries: 0,
+    llmRetryBackoffMs: 0,
+    llmEnableThinking: false,
     passwordMinLength: 12,
     accessTokenTtlMinutes: 30,
     refreshTokenTtlMinutes: 10080,
@@ -151,6 +201,42 @@ export function createDefaultSetupForm(): SetupFormModel {
     queryQpsPerUser: 2,
     auditRetentionDays: 180,
     auditQueryTextMode: "hash",
+    permissionDefaultVisibility: "department",
+    permissionCacheTtlSeconds: 300,
+    permissionWriteAccessBlockFirst: true,
+    permissionBlockOldIndexRefs: true,
+    permissionFailClosed: true,
+    securityRequireCitation: true,
+    securityBlockInternalPromptLeakage: true,
+    securityBlockSecretRefLeakage: true,
+    securityPiiRedactionEnabled: true,
+    securityRedactLogs: true,
+    securityRedactAuditSummary: true,
+    timeoutQueryTotalMs: 8000,
+    timeoutAuthPermissionMs: 100,
+    timeoutRewriteMs: 300,
+    timeoutEmbeddingMs: 3000,
+    timeoutVectorSearchMs: 500,
+    timeoutKeywordSearchMs: 500,
+    timeoutRerankMs: 3000,
+    timeoutContextMs: 200,
+    timeoutPostprocessMs: 300,
+    degradeRewriteTimeout: "use_original_query",
+    degradeEmbeddingTimeout: "keyword_only",
+    degradeVectorUnavailable: "keyword_and_metadata",
+    degradeKeywordUnavailable: "vector_and_metadata",
+    degradeRerankTimeout: "fusion_score",
+    degradeLlmTimeout: "return_retrieval_with_citations",
+    degradeModelPoolOverloaded: "return_retryable_degraded_response",
+    degradeImportBacklog: "slow_down_import",
+    observabilityMetricsEnabled: true,
+    observabilityTraceEnabled: true,
+    alertActiveConfigLoadFailed: 1,
+    alertPermissionViolationRate: 0,
+    alertDraftIndexExposureCount: 0,
+    alertImportFailureRate: 0.1,
+    alertWorkerQueueBacklog: 100,
+    alertLlmTimeoutRate: 0.2,
   };
 }
 
@@ -310,17 +396,17 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
         llm_fallback_model: form.llmFallbackModel,
       },
       llm: {
-        temperature: 0.1,
-        max_tokens: 800,
-        first_token_timeout_ms: 3000,
-        total_timeout_ms: 20000,
+        temperature: form.llmTemperature,
+        max_tokens: form.llmMaxTokens,
+        first_token_timeout_ms: form.llmFirstTokenTimeoutMs,
+        total_timeout_ms: form.llmTotalTimeoutMs,
         retry_policy: {
-          max_retries: 0,
-          backoff_ms: 0,
+          max_retries: form.llmMaxRetries,
+          backoff_ms: form.llmRetryBackoffMs,
         },
         openai_extra_body: {
           chat_template_kwargs: {
-            enable_thinking: false,
+            enable_thinking: form.llmEnableThinking,
           },
         },
       },
@@ -383,24 +469,24 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
       },
       permission: {
         default_user_role: "employee",
-        default_visibility: "department",
-        cache_ttl_seconds: 300,
+        default_visibility: form.permissionDefaultVisibility,
+        cache_ttl_seconds: form.permissionCacheTtlSeconds,
         tightening_block_policy: {
-          write_access_block_first: true,
-          block_old_index_refs: true,
-          fail_closed: true,
+          write_access_block_first: form.permissionWriteAccessBlockFirst,
+          block_old_index_refs: form.permissionBlockOldIndexRefs,
+          fail_closed: form.permissionFailClosed,
         },
       },
       security: {
-        require_citation: true,
+        require_citation: form.securityRequireCitation,
         prompt_leakage_policy: {
-          block_internal_prompt_leakage: true,
-          block_secret_ref_leakage: true,
+          block_internal_prompt_leakage: form.securityBlockInternalPromptLeakage,
+          block_secret_ref_leakage: form.securityBlockSecretRefLeakage,
         },
         pii_redaction_policy: {
-          enabled: true,
-          redact_logs: true,
-          redact_audit_summary: true,
+          enabled: form.securityPiiRedactionEnabled,
+          redact_logs: form.securityRedactLogs,
+          redact_audit_summary: form.securityRedactAuditSummary,
         },
       },
       cache: {
@@ -434,25 +520,25 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
         },
       },
       timeout: {
-        query_total_ms: 8000,
-        auth_permission_ms: 100,
-        rewrite_ms: 300,
-        embedding_ms: 3000,
-        vector_search_ms: 500,
-        keyword_search_ms: 500,
-        rerank_ms: 3000,
-        context_ms: 200,
-        postprocess_ms: 300,
+        query_total_ms: form.timeoutQueryTotalMs,
+        auth_permission_ms: form.timeoutAuthPermissionMs,
+        rewrite_ms: form.timeoutRewriteMs,
+        embedding_ms: form.timeoutEmbeddingMs,
+        vector_search_ms: form.timeoutVectorSearchMs,
+        keyword_search_ms: form.timeoutKeywordSearchMs,
+        rerank_ms: form.timeoutRerankMs,
+        context_ms: form.timeoutContextMs,
+        postprocess_ms: form.timeoutPostprocessMs,
       },
       degrade: {
-        rewrite_timeout: "use_original_query",
-        embedding_timeout: "keyword_only",
-        vector_unavailable: "keyword_and_metadata",
-        keyword_unavailable: "vector_and_metadata",
-        rerank_timeout: "fusion_score",
-        llm_timeout: "return_retrieval_with_citations",
-        model_pool_overloaded: "return_retryable_degraded_response",
-        import_backlog: "slow_down_import",
+        rewrite_timeout: form.degradeRewriteTimeout,
+        embedding_timeout: form.degradeEmbeddingTimeout,
+        vector_unavailable: form.degradeVectorUnavailable,
+        keyword_unavailable: form.degradeKeywordUnavailable,
+        rerank_timeout: form.degradeRerankTimeout,
+        llm_timeout: form.degradeLlmTimeout,
+        model_pool_overloaded: form.degradeModelPoolOverloaded,
+        import_backlog: form.degradeImportBacklog,
       },
       audit: {
         sink: "postgres",
@@ -463,15 +549,15 @@ export function buildSetupPayload(form: SetupFormModel): SetupRequestPayload {
         pii_redaction_enabled: true,
       },
       observability: {
-        metrics_enabled: true,
-        trace_enabled: true,
+        metrics_enabled: form.observabilityMetricsEnabled,
+        trace_enabled: form.observabilityTraceEnabled,
         alert_thresholds: {
-          active_config_load_failed: 1,
-          permission_violation_rate: 0,
-          draft_index_exposure_count: 0,
-          import_failure_rate: 0.1,
-          worker_queue_backlog: 100,
-          llm_timeout_rate: 0.2,
+          active_config_load_failed: form.alertActiveConfigLoadFailed,
+          permission_violation_rate: form.alertPermissionViolationRate,
+          draft_index_exposure_count: form.alertDraftIndexExposureCount,
+          import_failure_rate: form.alertImportFailureRate,
+          worker_queue_backlog: form.alertWorkerQueueBacklog,
+          llm_timeout_rate: form.alertLlmTimeoutRate,
         },
       },
     },

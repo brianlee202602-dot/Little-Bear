@@ -80,12 +80,16 @@ class ConfigItem:
 
 @dataclass(frozen=True)
 class ConfigVersion:
-    """配置版本元数据，P0 不在列表响应里直接返回完整配置正文。"""
+    """配置版本元数据和可选配置正文。"""
 
     version: int
     status: str
     risk_level: str
     created_by: str | None = None
+    config: dict[str, Any] | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    activated_at: datetime | None = None
 
 
 @dataclass(frozen=True)

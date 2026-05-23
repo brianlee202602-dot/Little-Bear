@@ -1055,13 +1055,13 @@
           "required": ["write_access_block_first", "block_old_index_refs", "fail_closed"],
           "properties": {
             "write_access_block_first": {
-              "const": true
+              "type": "boolean"
             },
             "block_old_index_refs": {
-              "const": true
+              "type": "boolean"
             },
             "fail_closed": {
-              "const": true
+              "type": "boolean"
             }
           }
         }
@@ -1073,7 +1073,7 @@
       "required": ["require_citation", "prompt_leakage_policy", "pii_redaction_policy"],
       "properties": {
         "require_citation": {
-          "const": true
+          "type": "boolean"
         },
         "prompt_leakage_policy": {
           "type": "object",
@@ -1279,28 +1279,36 @@
       ],
       "properties": {
         "rewrite_timeout": {
-          "const": "use_original_query"
+          "type": "string",
+          "enum": ["use_original_query", "fail_query"]
         },
         "embedding_timeout": {
-          "const": "keyword_only"
+          "type": "string",
+          "enum": ["keyword_only", "metadata_only", "fail_query"]
         },
         "vector_unavailable": {
-          "const": "keyword_and_metadata"
+          "type": "string",
+          "enum": ["keyword_and_metadata", "keyword_only", "fail_query"]
         },
         "keyword_unavailable": {
-          "const": "vector_and_metadata"
+          "type": "string",
+          "enum": ["vector_and_metadata", "vector_only", "fail_query"]
         },
         "rerank_timeout": {
-          "const": "fusion_score"
+          "type": "string",
+          "enum": ["fusion_score", "skip_rerank", "fail_query"]
         },
         "llm_timeout": {
-          "const": "return_retrieval_with_citations"
+          "type": "string",
+          "enum": ["return_retrieval_with_citations", "return_no_answer_with_reason", "fail_query"]
         },
         "model_pool_overloaded": {
-          "const": "return_retryable_degraded_response"
+          "type": "string",
+          "enum": ["return_retryable_degraded_response", "queue_request", "fail_query"]
         },
         "import_backlog": {
-          "const": "slow_down_import"
+          "type": "string",
+          "enum": ["slow_down_import", "reject_new_import", "queue_only"]
         }
       }
     },

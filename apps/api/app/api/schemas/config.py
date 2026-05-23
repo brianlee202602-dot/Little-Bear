@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,7 +14,7 @@ class ConfigItemData(BaseModel):
     key: str
     value_json: dict[str, Any]
     scope_type: str
-    status: Literal["draft", "validating", "active", "archived", "failed"]
+    status: Literal["draft", "validating", "active", "inactive", "archived", "failed"]
     version: int
 
 
@@ -50,9 +51,25 @@ class ConfigVersionData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: int
-    status: Literal["draft", "validating", "active", "archived", "failed"]
+    status: Literal["draft", "validating", "active", "inactive", "archived", "failed"]
     risk_level: Literal["low", "medium", "high", "critical"]
     created_by: str | None = None
+    config: dict[str, Any] | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    activated_at: datetime | None = None
+
+
+class ConfigVersionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConfigVersionPutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConfigVersionPatchRequest(BaseModel):

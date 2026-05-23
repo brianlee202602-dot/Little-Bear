@@ -100,7 +100,7 @@ export interface PasswordChangeRequest {
   new_password: string;
 }
 
-export type ConfigStatus = "draft" | "validating" | "active" | "archived" | "failed";
+export type ConfigStatus = "draft" | "validating" | "active" | "inactive" | "archived" | "failed";
 export type ConfigRiskLevel = "low" | "medium" | "high" | "critical";
 
 export interface ConfigItemData {
@@ -133,6 +133,10 @@ export interface ConfigVersionData {
   status: ConfigStatus;
   risk_level: ConfigRiskLevel;
   created_by: string | null;
+  config: Record<string, unknown> | null;
+  created_at: string | null;
+  updated_at: string | null;
+  activated_at: string | null;
 }
 
 export interface ConfigVersionResponse {
@@ -851,6 +855,37 @@ export async function listConfigVersions(
   );
 }
 
+export async function createConfigVersion(
+  config: Record<string, unknown>,
+  accessToken: string,
+): Promise<ConfigVersionResponse> {
+  return requestJson<ConfigVersionResponse>(
+    "/internal/v1/admin/config-versions",
+    {
+      method: "POST",
+      body: JSON.stringify({ config }),
+      headers: { "x-config-confirm": "save-draft" },
+    },
+    accessToken,
+  );
+}
+
+export async function updateConfigVersion(
+  version: number,
+  config: Record<string, unknown>,
+  accessToken: string,
+): Promise<ConfigVersionResponse> {
+  return requestJson<ConfigVersionResponse>(
+    `/internal/v1/admin/config-versions/${version}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ config }),
+      headers: { "x-config-confirm": "save-draft" },
+    },
+    accessToken,
+  );
+}
+
 export async function publishConfigVersion(
   version: number,
   accessToken: string,
@@ -866,12 +901,12 @@ export async function publishConfigVersion(
   );
 }
 
-export async function discardConfigDraft(version: number, accessToken: string): Promise<void> {
+export async function archiveConfigVersion(version: number, accessToken: string): Promise<void> {
   await requestVoid(
     `/internal/v1/admin/config-versions/${version}`,
     {
       method: "DELETE",
-      headers: { "x-config-confirm": "discard-draft" },
+      headers: { "x-config-confirm": "archive" },
     },
     accessToken,
   );

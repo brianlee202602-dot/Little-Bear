@@ -528,6 +528,7 @@ P0 rewrite 和 expansion 默认关闭；可以由规则或外部 LLM provider �
 
 - P0 文档可见性只支持 `department` 和 `enterprise`。
 - 权限判断不依赖 LLM。
+- `tightening_block_policy` 三个开关允许系统管理员在配置版本中调整；生产环境推荐保持 `true`，关闭任一项都应作为高风险配置变更审计。
 
 ### 6.14 security
 
@@ -545,6 +546,10 @@ P0 rewrite 和 expansion 默认关闭；可以由规则或外部 LLM provider �
   }
 }
 ```
+
+约束：
+
+- `require_citation`、Prompt 泄露防护和 PII 脱敏开关允许系统管理员在配置版本中调整；生产环境推荐保持开启。
 
 ### 6.15 cache
 
@@ -619,6 +624,17 @@ P0 默认关闭最终答案缓存，降低串权风险。
 }
 ```
 
+可选动作：
+
+- `rewrite_timeout`：`use_original_query`、`fail_query`。
+- `embedding_timeout`：`keyword_only`、`metadata_only`、`fail_query`。
+- `vector_unavailable`：`keyword_and_metadata`、`keyword_only`、`fail_query`。
+- `keyword_unavailable`：`vector_and_metadata`、`vector_only`、`fail_query`。
+- `rerank_timeout`：`fusion_score`、`skip_rerank`、`fail_query`。
+- `llm_timeout`：`return_retrieval_with_citations`、`return_no_answer_with_reason`、`fail_query`。
+- `model_pool_overloaded`：`return_retryable_degraded_response`、`queue_request`、`fail_query`。
+- `import_backlog`：`slow_down_import`、`reject_new_import`、`queue_only`。
+
 ### 6.19 audit
 
 ```json
@@ -653,6 +669,8 @@ P0 默认关闭最终答案缓存，降低串权风险。
   }
 }
 ```
+
+可观测性开关和告警阈值允许系统管理员通过配置版本调整。
 
 ## 7. ServiceBootstrap ready 规则
 
@@ -771,7 +789,7 @@ P0 必测：
 - Secret ref 不可读时校验失败。
 - `record_full_prompt=true` 时校验失败。
 - `cache.cross_user_final_answer_allowed=true` 时校验失败。
-- `permission.tightening_block_policy.fail_closed=false` 时校验失败。
+- 关闭 `permission.tightening_block_policy.fail_closed` 时配置仍可通过 schema，但必须被识别为高风险变更并进入审计。
 - embedding 维度和 VectorStore collection 不一致时校验失败。
 - 外部模型 provider 不可用时 ServiceBootstrap not ready。
 - 使用外部模型配置可以完成初始化、导入、索引、查询和降级测试。

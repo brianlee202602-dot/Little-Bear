@@ -1,6 +1,6 @@
 ENV_FILE ?= .env
 COMPOSE ?= docker compose
-PYTHON ?= python3
+PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 API_HOST ?= 0.0.0.0
 API_PORT ?= 8000
 LOG_LEVEL ?= INFO

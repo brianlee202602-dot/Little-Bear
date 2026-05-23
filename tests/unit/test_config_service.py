@@ -8,6 +8,7 @@ import pytest
 from app.modules.config.cache import ConfigCache
 from app.modules.config.errors import ConfigServiceError
 from app.modules.config.probe import ActiveConfigProbe
+from app.modules.config.schemas import ConfigValidationResult
 from app.modules.config.service import ConfigService
 from app.shared.json_utils import stable_json_hash
 
@@ -133,12 +134,57 @@ class _FakeSession:
                         "config_hash": self.config_hash,
                         "schema_version": 1,
                         "activated_at": None,
+                        "version": self.active_config_version or 1,
                         "system_config_version": self.active_config_version or 1,
                         "system_config_status": "active",
                         "value_json": self.config,
                         "value_hash": self.value_hash,
                     }
                 )
+            )
+
+        if (
+            "FROM config_versions cv" in sql
+            and "JOIN system_configs" in sql
+            and "cv.version = :version" in sql
+        ):
+            return _Result(
+                row=_Row(
+                    {
+                        "config_version_id": "cfg_2",
+                        "version": params.get("version", 2),
+                        "scope_type": "global",
+                        "scope_id": "global",
+                        "status": self.config_version_status,
+                        "config_hash": self.config_hash,
+                        "schema_version": 1,
+                        "validation_result_json": {"valid": True},
+                        "risk_level": "medium",
+                        "created_by": None,
+                        "created_at": None,
+                        "updated_at": None,
+                        "activated_at": None,
+                        "value_json": self.config,
+                    }
+                )
+            )
+
+        if "FROM config_versions cv" in sql and "LEFT JOIN system_configs" in sql:
+            return _Result(
+                rows=[
+                    _Row(
+                        {
+                            "version": self.active_config_version or 1,
+                            "status": "active",
+                            "risk_level": "medium",
+                            "created_by": None,
+                            "created_at": None,
+                            "updated_at": None,
+                            "activated_at": None,
+                            "value_json": self.config,
+                        }
+                    )
+                ]
             )
 
         if "FROM config_versions" in sql and "WHERE version = :version" in sql:
@@ -156,6 +202,7 @@ class _FakeSession:
                         "risk_level": "medium",
                         "created_by": None,
                         "created_at": None,
+                        "updated_at": None,
                         "activated_at": None,
                     }
                 )
@@ -173,12 +220,24 @@ class _FakeSession:
         if "cv.config_hash = :config_hash" in sql:
             return _Result(row=None)
 
-        if "UPDATE config_versions" in sql or "UPDATE system_configs" in sql:
+        if "UPDATE config_versions" in sql:
+            if "status = :status" in sql and "status" in params:
+                self.config_version_status = str(params["status"])
+            elif "SET status = 'draft'" in sql:
+                self.config_version_status = "draft"
+            elif "SET status = 'inactive'" in sql:
+                self.config_version_status = "inactive"
+            elif "SET status = 'archived'" in sql:
+                self.config_version_status = "archived"
+            return _Result()
+
+        if "UPDATE system_configs" in sql:
             return _Result()
 
         if (
             "INSERT INTO config_versions" in sql
             or "INSERT INTO system_configs" in sql
+            or "INSERT INTO system_state" in sql
             or "INSERT INTO audit_logs" in sql
         ):
             return _Result()
@@ -371,6 +430,100 @@ def test_config_service_saves_draft_from_active_config() -> None:
     assert any("INSERT INTO system_configs" in sql for sql, _params in session.statements)
 
 
+def test_config_service_creates_full_config_version() -> None:
+    session = _FakeSession()
+    config = _example_config()
+    config["auth"] = {**config["auth"], "access_token_ttl_minutes": 45}
+
+    version = ConfigService(cache=ConfigCache()).create_config_version(
+        session,
+        config=config,
+        actor_user_id=None,
+    )
+
+    assert version.version == 2
+    assert version.status == "draft"
+    assert any("INSERT INTO config_versions" in sql for sql, _params in session.statements)
+    assert any("INSERT INTO system_configs" in sql for sql, _params in session.statements)
+    assert any(
+        params.get("event_name") == "config.version_created"
+        for _sql, params in session.statements
+    )
+
+
+def test_config_service_updates_full_config_version_in_place() -> None:
+    session = _FakeSession()
+    config = _example_config()
+    config["auth"] = {**config["auth"], "access_token_ttl_minutes": 45}
+
+    version = ConfigService(cache=ConfigCache()).update_config_version(
+        session,
+        version=2,
+        config=config,
+        actor_user_id=None,
+    )
+
+    assert version.version == 2
+    assert version.status == "draft"
+    assert any(
+        "UPDATE config_versions" in sql and "updated_at = now()" in sql
+        for sql, _params in session.statements
+    )
+    assert any(
+        "UPDATE system_configs" in sql and "value_json = CAST(:value_json AS jsonb)" in sql
+        for sql, _params in session.statements
+    )
+    assert any(
+        params.get("event_name") == "config.version_updated"
+        for _sql, params in session.statements
+    )
+
+
+def test_config_service_updates_inactive_version_without_creating_new_version() -> None:
+    session = _FakeSession()
+    session.config_version_status = "inactive"
+    config = _example_config()
+    config["auth"] = {**config["auth"], "access_token_ttl_minutes": 45}
+
+    version = ConfigService(cache=ConfigCache()).update_config_version(
+        session,
+        version=2,
+        config=config,
+        actor_user_id=None,
+    )
+
+    assert version.version == 2
+    assert version.status == "inactive"
+    assert any(
+        params.get("status") == "inactive"
+        for sql, params in session.statements
+        if "UPDATE config_versions" in sql
+    )
+
+
+def test_config_service_publish_deactivates_previous_active_version(monkeypatch) -> None:
+    session = _FakeSession()
+    assert isinstance(session.config, dict)
+    session.config["config_version"] = 2
+    session.config_hash = stable_json_hash(session.config)
+    session.value_hash = session.config_hash
+
+    monkeypatch.setattr(
+        "app.modules.config.service.ConfigService._validate_config_and_dependencies",
+        lambda _self, _session, **_kwargs: (ConfigValidationResult(valid=True), None),
+    )
+
+    version = ConfigService(cache=ConfigCache()).publish_config_version(
+        session,
+        version=2,
+        actor_user_id=None,
+    )
+
+    assert version.version == 2
+    assert version.status == "active"
+    assert any("SET status = 'inactive'" in sql for sql, _params in session.statements)
+
+
 def test_config_service_rejects_non_editable_metadata_key() -> None:
     with pytest.raises(ConfigServiceError) as exc_info:
         ConfigService(cache=ConfigCache()).get_config_item(_FakeSession(), "config_version")
@@ -391,10 +544,7 @@ def test_config_service_discards_draft_version() -> None:
     assert version.status == "archived"
     assert any("UPDATE config_versions" in sql for sql, _params in session.statements)
     assert any("UPDATE system_configs" in sql for sql, _params in session.statements)
-    assert any(
-        "config.draft_discarded" in params.get("event_name", "")
-        for _sql, params in session.statements
-    )
+    assert any(params.get("event_name") == "config.archived" for _sql, params in session.statements)
 
 
 def test_config_service_rejects_discarding_active_version() -> None:

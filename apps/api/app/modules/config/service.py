@@ -36,6 +36,7 @@ HIGH_RISK_CONFIG_KEYS = {
     "audit",
     "model",
     "model_gateway",
+    "permission",
     "retrieval",
     "secret_provider",
     "security",
@@ -48,8 +49,11 @@ MEDIUM_RISK_CONFIG_KEYS = {
     "import",
     "keyword_search",
     "llm",
+    "degrade",
+    "observability",
     "rate_limit",
     "redis",
+    "timeout",
 }
 
 
@@ -284,8 +288,19 @@ class ConfigService:
             rows = session.execute(
                 text(
                     """
-                    SELECT version, status, risk_level, created_by::text AS created_by
-                    FROM config_versions
+                    SELECT
+                        cv.version,
+                        cv.status,
+                        cv.risk_level,
+                        cv.created_by::text AS created_by,
+                        cv.created_at,
+                        cv.updated_at,
+                        cv.activated_at,
+                        sc.value_json
+                    FROM config_versions cv
+                    LEFT JOIN system_configs sc
+                      ON sc.config_version_id = cv.id
+                     AND sc.key = 'active_config'
                     ORDER BY version DESC
                     LIMIT :limit
                     """
@@ -302,8 +317,147 @@ class ConfigService:
         return [_config_version_from_mapping(dict(row._mapping)) for row in rows]
 
     def get_config_version(self, session: Session, version: int) -> ConfigVersion:
-        row = self._load_config_version_row(session, version)
+        row = self._load_config_version_payload_row(session, version)
         return _config_version_from_mapping(row)
+
+    def create_config_version(
+        self,
+        session: Session,
+        *,
+        config: dict[str, Any],
+        actor_user_id: str | None,
+    ) -> ConfigVersion:
+        snapshot = self.load_active_config(session, validate_schema=False)
+        version = self._next_config_version(session)
+        normalized = _normalized_config_for_version(config, version=version)
+        self.validate_active_config(normalized)
+        config_hash = stable_json_hash(normalized)
+        existing = self._load_config_by_hash(session, config_hash)
+        if existing is not None:
+            return self.get_config_version(session, int(existing["version"]))
+
+        risk_level = _risk_level_for_config_change(snapshot.config, normalized)
+        config_version_id = uuid.uuid4()
+        self._insert_config_version(
+            session,
+            config_version_id=config_version_id,
+            version=version,
+            status="draft",
+            config_hash=config_hash,
+            schema_version=int(normalized["schema_version"]),
+            risk_level=risk_level,
+            created_by=actor_user_id,
+            validation_result={"valid": True, "stage": "schema"},
+        )
+        self._insert_system_config(
+            session,
+            config_version_id=config_version_id,
+            version=version,
+            status="draft",
+            config=normalized,
+            config_hash=config_hash,
+        )
+        self._insert_audit_log(
+            session,
+            event_name="config.version_created",
+            action="create_version",
+            result="success",
+            actor_id=actor_user_id,
+            resource_id=str(version),
+            risk_level=risk_level,
+            config_version=version,
+            summary={
+                "config_hash": config_hash,
+                "risk_level": risk_level,
+                "changed_keys": _changed_config_keys(snapshot.config, normalized),
+            },
+        )
+        return self.get_config_version(session, version)
+
+    def update_config_version(
+        self,
+        session: Session,
+        *,
+        version: int,
+        config: dict[str, Any],
+        actor_user_id: str | None,
+    ) -> ConfigVersion:
+        row = self._load_config_version_payload_row(session, version, for_update=True)
+        status = str(row["status"])
+        if status not in {"draft", "validating", "failed", "inactive", "active"}:
+            raise ConfigServiceError(
+                "CONFIG_VERSION_NOT_EDITABLE",
+                "only non-archived config versions can be edited",
+                details={"version": version, "status": status},
+            )
+
+        active_snapshot = self.load_active_config(session, validate_schema=False)
+        normalized = _normalized_config_for_version(config, version=version)
+        if status == "active":
+            validation, bootstrap_result = self._validate_config_and_dependencies(
+                session,
+                config=normalized,
+            )
+            if not validation.valid:
+                raise ConfigServiceError(
+                    "CONFIG_DEPENDENCY_FAILED",
+                    "active config dependency validation failed",
+                    retryable=True,
+                    details={
+                        "valid": validation.valid,
+                        "errors": validation.errors,
+                        "warnings": validation.warnings,
+                    },
+                )
+            validation_result: dict[str, object] = {
+                "valid": validation.valid,
+                "errors": validation.errors,
+                "warnings": validation.warnings,
+            }
+        else:
+            self.validate_active_config(normalized)
+            bootstrap_result = None
+            validation_result = {"valid": True, "stage": "schema"}
+        config_hash = stable_json_hash(normalized)
+        existing = self._load_config_by_hash(session, config_hash)
+        if existing is not None and int(existing["version"]) != version:
+            raise ConfigServiceError(
+                "CONFIG_VERSION_DUPLICATED",
+                "another config version already has the same content",
+                details={"version": version, "existing_version": int(existing["version"])},
+            )
+
+        risk_level = _risk_level_for_config_change(active_snapshot.config, normalized)
+        next_status = _status_after_config_update(status)
+        self._update_config_version_payload(
+            session,
+            version=version,
+            status=next_status,
+            config=normalized,
+            config_hash=config_hash,
+            schema_version=int(normalized["schema_version"]),
+            risk_level=risk_level,
+            validation_result=validation_result,
+        )
+        if status == "active":
+            self._persist_bootstrap_state(session, bootstrap_result=bootstrap_result)
+            self.invalidate_cache()
+        self._insert_audit_log(
+            session,
+            event_name="config.version_updated",
+            action="update_version",
+            result="success",
+            actor_id=actor_user_id,
+            resource_id=str(version),
+            risk_level=risk_level,
+            config_version=version,
+            summary={
+                "config_hash": config_hash,
+                "risk_level": risk_level,
+                "changed_keys": _changed_config_keys(active_snapshot.config, normalized),
+            },
+        )
+        return self.get_config_version(session, version)
 
     def validate_config_payload(
         self,
@@ -347,11 +501,11 @@ class ConfigService:
         row = self._load_config_version_row(session, version, for_update=True)
         status = str(row["status"])
         if status == "active":
-            return _config_version_from_mapping(row)
-        if status not in {"draft", "validating"}:
+            return self.get_config_version(session, version)
+        if status not in {"draft", "validating", "inactive", "failed"}:
             raise ConfigServiceError(
                 "CONFIG_VERSION_NOT_PUBLISHABLE",
-                "only draft or validating config versions can be published",
+                "only draft, validating, failed or inactive config versions can be activated",
                 details={"version": version, "status": status},
             )
 
@@ -410,7 +564,7 @@ class ConfigService:
             )
 
         previous_active_version = self._load_active_config_version(session)
-        self._archive_active_config(session)
+        self._deactivate_active_config(session)
         self._mark_version_status(
             session,
             version,
@@ -437,14 +591,9 @@ class ConfigService:
                 "risk_level": row["risk_level"],
             },
         )
-        return ConfigVersion(
-            version=version,
-            status="active",
-            risk_level=str(row["risk_level"]),
-            created_by=str(row["created_by"]) if row.get("created_by") else None,
-        )
+        return self.get_config_version(session, version)
 
-    def discard_config_draft(
+    def archive_config_version(
         self,
         session: Session,
         *,
@@ -453,10 +602,10 @@ class ConfigService:
     ) -> ConfigVersion:
         row = self._load_config_version_row(session, version, for_update=True)
         status = str(row["status"])
-        if status != "draft":
+        if status not in {"draft", "validating", "failed", "inactive"}:
             raise ConfigServiceError(
                 "CONFIG_VERSION_NOT_DISCARDABLE",
-                "only draft config versions can be discarded",
+                "only inactive or non-active draft-like config versions can be archived",
                 details={"version": version, "status": status},
             )
 
@@ -464,8 +613,8 @@ class ConfigService:
         self._mark_system_config_status(session, version, "archived")
         self._insert_audit_log(
             session,
-            event_name="config.draft_discarded",
-            action="discard_draft",
+            event_name="config.archived",
+            action="archive",
             result="success",
             actor_id=actor_user_id,
             resource_id=str(version),
@@ -476,11 +625,19 @@ class ConfigService:
                 "risk_level": row["risk_level"],
             },
         )
-        return ConfigVersion(
+        return self.get_config_version(session, version)
+
+    def discard_config_draft(
+        self,
+        session: Session,
+        *,
+        version: int,
+        actor_user_id: str | None,
+    ) -> ConfigVersion:
+        return self.archive_config_version(
+            session,
             version=version,
-            status="archived",
-            risk_level=str(row["risk_level"]),
-            created_by=str(row["created_by"]) if row.get("created_by") else None,
+            actor_user_id=actor_user_id,
         )
 
     def _load_active_config_version(self, session: Session) -> int | None:
@@ -593,6 +750,7 @@ class ConfigService:
                         risk_level,
                         created_by::text AS created_by,
                         created_at,
+                        updated_at,
                         activated_at
                     FROM config_versions
                     WHERE version = :version
@@ -655,6 +813,58 @@ class ConfigService:
                 "CONFIG_VERSION_PAYLOAD_MISSING",
                 "config version payload is missing",
                 retryable=True,
+                details={"version": version},
+            )
+        return dict(row._mapping)
+
+    def _load_config_version_payload_row(
+        self,
+        session: Session,
+        version: int,
+        *,
+        for_update: bool = False,
+    ) -> dict[str, Any]:
+        lock_clause = "FOR UPDATE" if for_update else ""
+        try:
+            row = session.execute(
+                text(
+                    f"""
+                    SELECT
+                        cv.id::text AS config_version_id,
+                        cv.version,
+                        cv.scope_type,
+                        cv.scope_id,
+                        cv.status,
+                        cv.config_hash,
+                        cv.schema_version,
+                        cv.validation_result_json,
+                        cv.risk_level,
+                        cv.created_by::text AS created_by,
+                        cv.created_at,
+                        cv.updated_at,
+                        cv.activated_at,
+                        sc.value_json
+                    FROM config_versions cv
+                    JOIN system_configs sc ON sc.config_version_id = cv.id
+                    WHERE cv.version = :version
+                      AND sc.key = 'active_config'
+                    LIMIT 1
+                    {lock_clause}
+                    """
+                ),
+                {"version": version},
+            ).one_or_none()
+        except SQLAlchemyError as exc:
+            raise ConfigServiceError(
+                "CONFIG_VERSION_UNAVAILABLE",
+                "config version cannot be read",
+                retryable=True,
+                details={"error_type": exc.__class__.__name__, "version": version},
+            ) from exc
+        if row is None:
+            raise ConfigServiceError(
+                "CONFIG_VERSION_NOT_FOUND",
+                "config version does not exist",
                 details={"version": version},
             )
         return dict(row._mapping)
@@ -849,6 +1059,60 @@ class ConfigService:
             },
         )
 
+    def _update_config_version_payload(
+        self,
+        session: Session,
+        *,
+        version: int,
+        status: str,
+        config: dict[str, Any],
+        config_hash: str,
+        schema_version: int,
+        risk_level: str,
+        validation_result: dict[str, object],
+    ) -> None:
+        session.execute(
+            text(
+                """
+                UPDATE config_versions
+                SET status = :status,
+                    config_hash = :config_hash,
+                    schema_version = :schema_version,
+                    validation_result_json = CAST(:validation_result_json AS jsonb),
+                    risk_level = :risk_level,
+                    updated_at = now()
+                WHERE version = :version
+                """
+            ),
+            {
+                "version": version,
+                "status": status,
+                "config_hash": config_hash,
+                "schema_version": schema_version,
+                "validation_result_json": json_dumps(validation_result),
+                "risk_level": risk_level,
+            },
+        )
+        session.execute(
+            text(
+                """
+                UPDATE system_configs
+                SET value_json = CAST(:value_json AS jsonb),
+                    value_hash = :value_hash,
+                    status = :status,
+                    updated_at = now()
+                WHERE version = :version
+                  AND key = 'active_config'
+                """
+            ),
+            {
+                "version": version,
+                "status": status,
+                "value_json": json.dumps(config, ensure_ascii=False, sort_keys=True),
+                "value_hash": config_hash,
+            },
+        )
+
     def _mark_version_status(
         self,
         session: Session,
@@ -867,7 +1131,8 @@ class ConfigService:
                         CAST(:validation_result_json AS jsonb),
                         validation_result_json
                     ),
-                    activated_at = CASE WHEN :activated THEN now() ELSE activated_at END
+                    activated_at = CASE WHEN :activated THEN now() ELSE activated_at END,
+                    updated_at = now()
                 WHERE version = :version
                 """
             ),
@@ -893,18 +1158,24 @@ class ConfigService:
             {"version": version, "status": status},
         )
 
-    def _archive_active_config(self, session: Session) -> None:
+    def _deactivate_active_config(self, session: Session) -> None:
         session.execute(
             text(
                 """
                 UPDATE system_configs
-                SET status = 'archived', updated_at = now()
+                SET status = 'inactive', updated_at = now()
                 WHERE key = 'active_config' AND status = 'active'
                 """
             )
         )
         session.execute(
-            text("UPDATE config_versions SET status = 'archived' WHERE status = 'active'")
+            text(
+                """
+                UPDATE config_versions
+                SET status = 'inactive', updated_at = now()
+                WHERE status = 'active'
+                """
+            )
         )
 
     def _set_active_config_version(
@@ -1108,6 +1379,37 @@ def _is_editable_config_section(key: str, value: Any) -> bool:
     return key not in CONFIG_METADATA_KEYS and isinstance(value, dict)
 
 
+def _normalized_config_for_version(config: dict[str, Any], *, version: int) -> dict[str, Any]:
+    normalized = copy.deepcopy(config)
+    normalized["schema_version"] = int(normalized.get("schema_version") or 1)
+    normalized["config_version"] = version
+    scope = normalized.get("scope")
+    if not isinstance(scope, dict):
+        normalized["scope"] = {"type": "global", "id": "global"}
+    return normalized
+
+
+def _changed_config_keys(base: dict[str, Any], candidate: dict[str, Any]) -> list[str]:
+    keys = sorted((set(base) | set(candidate)) - CONFIG_METADATA_KEYS)
+    return [key for key in keys if base.get(key) != candidate.get(key)]
+
+
+def _risk_level_for_config_change(base: dict[str, Any], candidate: dict[str, Any]) -> str:
+    risk_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    current = "low"
+    for key in _changed_config_keys(base, candidate):
+        risk = _risk_level_for_key(key)
+        if risk_order[risk] > risk_order[current]:
+            current = risk
+    return current
+
+
+def _status_after_config_update(status: str) -> str:
+    if status in {"active", "inactive"}:
+        return status
+    return "draft"
+
+
 def _risk_level_for_key(key: str) -> str:
     if key in HIGH_RISK_CONFIG_KEYS:
         return "high"
@@ -1131,9 +1433,19 @@ def _schema_errors(config: dict[str, Any]) -> list[dict[str, object]]:
 
 
 def _config_version_from_mapping(row: dict[str, Any]) -> ConfigVersion:
+    raw_config = row.get("value_json")
+    config = (
+        _parse_config_value(raw_config, version=int(row["version"]))
+        if raw_config is not None
+        else None
+    )
     return ConfigVersion(
         version=int(row["version"]),
         status=str(row["status"]),
         risk_level=str(row["risk_level"]),
         created_by=str(row["created_by"]) if row.get("created_by") else None,
+        config=config,
+        created_at=_datetime_or_none(row.get("created_at")),
+        updated_at=_datetime_or_none(row.get("updated_at")),
+        activated_at=_datetime_or_none(row.get("activated_at")),
     )

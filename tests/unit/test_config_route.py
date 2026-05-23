@@ -63,6 +63,35 @@ def _auth_context() -> AuthContext:
     )
 
 
+def _config_manager_without_system_admin_role() -> AuthContext:
+    user = AuthUser(
+        id="22222222-2222-2222-2222-222222222222",
+        enterprise_id="ent_1",
+        username="config_manager",
+        display_name="配置管理员",
+        status="active",
+        roles=(
+            AuthRole(
+                id="role_2",
+                code="config_manager",
+                name="Config Manager",
+                scope_type="enterprise",
+                is_builtin=False,
+                status="active",
+                scopes=("config:manage",),
+            ),
+        ),
+        scopes=("config:read", "config:manage"),
+    )
+    return AuthContext(
+        user=user,
+        token_jti="access_2",
+        token_type="access",
+        scopes=user.scopes,
+        claims={"sub": user.id, "iat": int(datetime.now(UTC).timestamp())},
+    )
+
+
 def test_config_list_route_requires_config_read_scope(monkeypatch) -> None:
     seen: dict[str, str] = {}
 
@@ -97,6 +126,37 @@ def test_config_list_route_requires_config_read_scope(monkeypatch) -> None:
     payload = response.json()
     assert payload["request_id"] == "req_cfg"
     assert payload["data"][0]["key"] == "auth"
+
+
+def test_config_write_route_requires_system_admin_role(monkeypatch) -> None:
+    called = False
+
+    def validate_config_payload(_self, _session, **_kwargs):
+        nonlocal called
+        called = True
+        return ConfigValidationResult(valid=True)
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.config.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _config_manager_without_system_admin_role(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.config.ConfigService.validate_config_payload",
+        validate_config_payload,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.post(
+        "/internal/v1/admin/config-validations",
+        headers={"authorization": "Bearer access.jwt"},
+        json={"config": {"schema_version": 1}},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error_code"] == "AUTH_SYSTEM_ADMIN_REQUIRED"
+    assert called is False
 
 
 def test_high_risk_config_put_requires_confirmation(monkeypatch) -> None:
@@ -139,6 +199,107 @@ def test_config_validation_route_returns_validation_result(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["data"]["valid"] is True
+
+
+def test_config_version_create_route_requires_confirmation(monkeypatch) -> None:
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.config.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.post(
+        "/internal/v1/admin/config-versions",
+        headers={"authorization": "Bearer access.jwt"},
+        json={"config": {"schema_version": 1}},
+    )
+
+    assert response.status_code == 428
+    assert response.json()["error_code"] == "CONFIG_CONFIRMATION_REQUIRED"
+
+
+def test_config_version_create_route_saves_full_config(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def create_version(_self, _session, *, config, actor_user_id):
+        seen["config"] = config
+        seen["actor_user_id"] = actor_user_id
+        return ConfigVersion(
+            version=2,
+            status="draft",
+            risk_level="medium",
+            created_by=actor_user_id,
+            config=config,
+            created_at=datetime(2026, 5, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 5, 22, tzinfo=UTC),
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.config.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.config.ConfigService.create_config_version", create_version)
+
+    client = TestClient(_create_test_app())
+    response = client.post(
+        "/internal/v1/admin/config-versions",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-config-confirm": "save-draft",
+        },
+        json={"config": {"schema_version": 1, "auth": {"jwt_issuer": "little-bear-rag"}}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["version"] == 2
+    assert response.json()["data"]["config"]["auth"]["jwt_issuer"] == "little-bear-rag"
+    assert seen["actor_user_id"] == "11111111-1111-1111-1111-111111111111"
+
+
+def test_config_version_update_route_updates_existing_version(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def update_version(_self, _session, *, version, config, actor_user_id):
+        seen["version"] = version
+        seen["config"] = config
+        seen["actor_user_id"] = actor_user_id
+        return ConfigVersion(
+            version=version,
+            status="draft",
+            risk_level="medium",
+            created_by=actor_user_id,
+            config=config,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.config.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.config.ConfigService.update_config_version", update_version)
+
+    client = TestClient(_create_test_app())
+    response = client.put(
+        "/internal/v1/admin/config-versions/2",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-config-confirm": "save-draft",
+        },
+        json={"config": {"schema_version": 1, "auth": {"jwt_issuer": "little-bear-rag"}}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["version"] == 2
+    assert seen == {
+        "version": 2,
+        "config": {"schema_version": 1, "auth": {"jwt_issuer": "little-bear-rag"}},
+        "actor_user_id": "11111111-1111-1111-1111-111111111111",
+    }
 
 
 def test_config_publish_route_requires_confirmation(monkeypatch) -> None:
@@ -198,6 +359,45 @@ def test_config_publish_route_invalidates_auth_runtime(monkeypatch) -> None:
     assert invalidated["value"] is True
 
 
+def test_config_patch_route_archives_version(monkeypatch) -> None:
+    seen: dict[str, int | str | None] = {}
+
+    def archive(_self, _session, *, version, actor_user_id):
+        seen["version"] = version
+        seen["actor_user_id"] = actor_user_id
+        return ConfigVersion(
+            version=version,
+            status="archived",
+            risk_level="medium",
+            created_by=actor_user_id,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.config.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.config.ConfigService.archive_config_version", archive)
+
+    client = TestClient(_create_test_app())
+    response = client.patch(
+        "/internal/v1/admin/config-versions/2",
+        headers={
+            "authorization": "Bearer access.jwt",
+            "x-config-confirm": "archive",
+        },
+        json={"status": "archived"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "archived"
+    assert seen == {
+        "version": 2,
+        "actor_user_id": "11111111-1111-1111-1111-111111111111",
+    }
+
+
 def test_config_delete_draft_route_requires_confirmation(monkeypatch) -> None:
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
@@ -216,10 +416,10 @@ def test_config_delete_draft_route_requires_confirmation(monkeypatch) -> None:
     assert response.json()["error_code"] == "CONFIG_CONFIRMATION_REQUIRED"
 
 
-def test_config_delete_draft_route_discards_draft(monkeypatch) -> None:
+def test_config_delete_draft_route_archives_version(monkeypatch) -> None:
     seen: dict[str, int | str | None] = {}
 
-    def discard(_self, _session, *, version, actor_user_id):
+    def archive(_self, _session, *, version, actor_user_id):
         seen["version"] = version
         seen["actor_user_id"] = actor_user_id
         return None
@@ -230,14 +430,14 @@ def test_config_delete_draft_route_discards_draft(monkeypatch) -> None:
         "app.api.routes.config.AuthService.authenticate_access_token",
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.config.ConfigService.discard_config_draft", discard)
+    monkeypatch.setattr("app.api.routes.config.ConfigService.archive_config_version", archive)
 
     client = TestClient(_create_test_app())
     response = client.delete(
         "/internal/v1/admin/config-versions/2",
         headers={
             "authorization": "Bearer access.jwt",
-            "x-config-confirm": "discard-draft",
+            "x-config-confirm": "archive",
         },
     )
 

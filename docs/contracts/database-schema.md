@@ -63,7 +63,7 @@
 | `token_type` | `access`、`refresh`、`service`、`setup` |
 | `token_status` | `active`、`used`、`revoked`、`expired` |
 | `secret_status` | `active`、`rotating`、`revoked`、`deleted` |
-| `config_status` | `draft`、`validating`、`active`、`archived`、`failed` |
+| `config_status` | `draft`、`validating`、`active`、`inactive`、`archived`、`failed` |
 | `enterprise_status` | `active`、`disabled`、`deleted` |
 | `department_status` | `active`、`disabled`、`deleted` |
 | `user_status` | `active`、`disabled`、`locked`、`deleted` |
@@ -165,19 +165,21 @@ P0 必需 key：
 | `version` | `integer` | 否 | UNIQUE | 递增版本号，初始化为 1 |
 | `scope_type` | `text` | 否 | idx | P0 固定 `global` |
 | `scope_id` | `text` | 否 | idx | P0 固定 `global` |
-| `status` | `text` | 否 | idx, CHECK `config_status` | draft/validating/active/archived/failed |
+| `status` | `text` | 否 | idx, CHECK `config_status` | draft/validating/active/inactive/archived/failed |
 | `config_hash` | `text` | 否 | UNIQUE | active config bundle hash |
 | `schema_version` | `integer` | 否 |  | P0 固定 1 |
 | `validation_result_json` | `jsonb` | 是 |  | 校验结果摘要 |
 | `risk_level` | `text` | 否 | CHECK `risk_level` | 配置风险等级 |
 | `created_by` | `uuid` | 是 | FK `users.id` | 创建者 |
 | `created_at` | `timestamptz` | 否 | idx | 创建时间 |
+| `updated_at` | `timestamptz` | 否 | idx | 更新时间 |
 | `activated_at` | `timestamptz` | 是 | idx | 发布时间 |
 
 索引：
 
 - `uq_config_versions_one_active`：partial unique，`status='active'` 时最多一条。
 - `idx_config_versions_status_created(status, created_at desc)`
+- `idx_config_versions_updated_at(updated_at)`
 
 ### 5.4 `system_configs`
 
@@ -1080,6 +1082,16 @@ AND (
 
 - `query_conversations`
 - `query_messages`
+
+### 14.9 `0009_config_version_updated_at`
+
+- 为 `config_versions` 增加 `updated_at` 字段。
+- 增加 `idx_config_versions_updated_at`，用于管理后台按更新时间展示和追踪配置版本。
+
+### 14.10 `0010_config_inactive_status`
+
+- 为 `config_versions` 和 `system_configs` 的配置状态增加 `inactive`。
+- 激活新版本时，旧 active 版本转为 `inactive`，保留可再次激活能力；只有管理员显式归档时才转为 `archived`。
 
 ## 15. 软删除与阻断策略
 

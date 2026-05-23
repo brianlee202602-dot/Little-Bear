@@ -19,9 +19,11 @@ from app.api.schemas.config import (
     ConfigValidationData,
     ConfigValidationRequest,
     ConfigValidationResponse,
+    ConfigVersionCreateRequest,
     ConfigVersionData,
     ConfigVersionListResponse,
     ConfigVersionPatchRequest,
+    ConfigVersionPutRequest,
     ConfigVersionResponse,
     PaginationData,
 )
@@ -97,7 +99,7 @@ async def put_config(
     service = ConfigService()
     try:
         with session_scope() as session:
-            auth_context = _authenticate(session, token, required_scope="config:manage")
+            auth_context = _authenticate_system_admin_config_manager(session, token)
             if key in HIGH_RISK_CONFIG_KEYS and x_config_confirm != "save-draft":
                 return _confirmation_error_response(
                     stage="config_save_draft",
@@ -140,6 +142,36 @@ async def list_config_versions(
     )
 
 
+@router.post("/config-versions", response_model=ConfigVersionResponse)
+async def create_config_version(
+    payload: ConfigVersionCreateRequest,
+    authorization: str | None = Header(default=None),
+    x_config_confirm: str | None = Header(default=None),
+) -> ConfigVersionResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = ConfigService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate_system_admin_config_manager(session, token)
+            if x_config_confirm != "save-draft":
+                return _confirmation_error_response(
+                    stage="config_version_create",
+                    message="creating config version requires x-config-confirm: save-draft",
+                )
+            version = service.create_config_version(
+                session,
+                config=payload.config,
+                actor_user_id=auth_context.user.id,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="config_version_create")
+    except ConfigServiceError as exc:
+        return _config_error_response(exc, stage="config_version_create")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="config_version_create")
+    return ConfigVersionResponse(request_id=_request_id(), data=_version_data(version))
+
+
 @router.get("/config-versions/{version}", response_model=ConfigVersionResponse)
 async def get_config_version(
     version: int,
@@ -160,6 +192,38 @@ async def get_config_version(
     return ConfigVersionResponse(request_id=_request_id(), data=_version_data(item))
 
 
+@router.put("/config-versions/{version}", response_model=ConfigVersionResponse)
+async def put_config_version(
+    version: int,
+    payload: ConfigVersionPutRequest,
+    authorization: str | None = Header(default=None),
+    x_config_confirm: str | None = Header(default=None),
+) -> ConfigVersionResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = ConfigService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate_system_admin_config_manager(session, token)
+            if x_config_confirm != "save-draft":
+                return _confirmation_error_response(
+                    stage="config_version_update",
+                    message="updating config version requires x-config-confirm: save-draft",
+                )
+            item = service.update_config_version(
+                session,
+                version=version,
+                config=payload.config,
+                actor_user_id=auth_context.user.id,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="config_version_update")
+    except ConfigServiceError as exc:
+        return _config_error_response(exc, stage="config_version_update")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="config_version_update")
+    return ConfigVersionResponse(request_id=_request_id(), data=_version_data(item))
+
+
 @router.patch("/config-versions/{version}", response_model=ConfigVersionResponse)
 async def patch_config_version(
     version: int,
@@ -168,37 +232,41 @@ async def patch_config_version(
     x_config_confirm: str | None = Header(default=None),
 ) -> ConfigVersionResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
-    if payload.status != "active":
-        return _config_error_response(
-            ConfigServiceError(
-                "CONFIG_VERSION_ARCHIVE_UNSUPPORTED",
-                "P0 does not expose config archive API",
-            ),
-            stage="config_publish",
-        )
-
+    stage = "config_publish" if payload.status == "active" else "config_archive"
     service = ConfigService()
     try:
         with session_scope() as session:
-            auth_context = _authenticate(session, token, required_scope="config:manage")
-            if x_config_confirm != "publish":
-                return _confirmation_error_response(
-                    stage="config_publish",
-                    message="publishing config requires x-config-confirm: publish",
+            auth_context = _authenticate_system_admin_config_manager(session, token)
+            if payload.status == "active":
+                if x_config_confirm != "publish":
+                    return _confirmation_error_response(
+                        stage="config_publish",
+                        message="publishing config requires x-config-confirm: publish",
+                    )
+                item = service.publish_config_version(
+                    session,
+                    version=version,
+                    actor_user_id=auth_context.user.id,
                 )
-            published = service.publish_config_version(
-                session,
-                version=version,
-                actor_user_id=auth_context.user.id,
-            )
-        GLOBAL_AUTH_RUNTIME_CONFIG_PROVIDER.invalidate()
+                GLOBAL_AUTH_RUNTIME_CONFIG_PROVIDER.invalidate()
+            else:
+                if x_config_confirm != "archive":
+                    return _confirmation_error_response(
+                        stage="config_archive",
+                        message="archiving config requires x-config-confirm: archive",
+                    )
+                item = service.archive_config_version(
+                    session,
+                    version=version,
+                    actor_user_id=auth_context.user.id,
+                )
     except AuthServiceError as exc:
-        return _auth_error_response(exc, stage="config_publish")
+        return _auth_error_response(exc, stage=stage)
     except ConfigServiceError as exc:
-        return _config_error_response(exc, stage="config_publish")
+        return _config_error_response(exc, stage=stage)
     except SQLAlchemyError as exc:
-        return _database_error_response(exc, stage="config_publish")
-    return ConfigVersionResponse(request_id=_request_id(), data=_version_data(published))
+        return _database_error_response(exc, stage=stage)
+    return ConfigVersionResponse(request_id=_request_id(), data=_version_data(item))
 
 
 @router.delete(
@@ -215,23 +283,23 @@ async def delete_config_version(
     service = ConfigService()
     try:
         with session_scope() as session:
-            auth_context = _authenticate(session, token, required_scope="config:manage")
-            if x_config_confirm != "discard-draft":
+            auth_context = _authenticate_system_admin_config_manager(session, token)
+            if x_config_confirm != "archive":
                 return _confirmation_error_response(
-                    stage="config_discard_draft",
-                    message="discarding config draft requires x-config-confirm: discard-draft",
+                    stage="config_archive",
+                    message="archiving config version requires x-config-confirm: archive",
                 )
-            service.discard_config_draft(
+            service.archive_config_version(
                 session,
                 version=version,
                 actor_user_id=auth_context.user.id,
             )
     except AuthServiceError as exc:
-        return _auth_error_response(exc, stage="config_discard_draft")
+        return _auth_error_response(exc, stage="config_archive")
     except ConfigServiceError as exc:
-        return _config_error_response(exc, stage="config_discard_draft")
+        return _config_error_response(exc, stage="config_archive")
     except SQLAlchemyError as exc:
-        return _database_error_response(exc, stage="config_discard_draft")
+        return _database_error_response(exc, stage="config_archive")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -244,7 +312,7 @@ async def create_config_validation(
     service = ConfigService()
     try:
         with session_scope() as session:
-            _authenticate(session, token, required_scope="config:manage")
+            _authenticate_system_admin_config_manager(session, token)
             result = service.validate_config_payload(session, config=payload.config)
     except AuthServiceError as exc:
         return _auth_error_response(exc, stage="config_validation")
@@ -261,6 +329,22 @@ def _authenticate(session: object, token: str | None, *, required_scope: str) ->
         access_token=token or "",
         required_scope=required_scope,
     )
+
+
+def _authenticate_system_admin_config_manager(session: object, token: str | None) -> AuthContext:
+    auth_context = _authenticate(session, token, required_scope="config:manage")
+    has_system_admin_role = any(
+        role.code == "system_admin" and role.status == "active"
+        for role in auth_context.user.roles
+    )
+    if not has_system_admin_role:
+        raise AuthServiceError(
+            "AUTH_SYSTEM_ADMIN_REQUIRED",
+            "config management requires active system_admin role",
+            status_code=403,
+            details={"required_role": "system_admin", "required_scope": "config:manage"},
+        )
+    return auth_context
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -293,6 +377,10 @@ def _version_data(version: ConfigVersion) -> ConfigVersionData:
         status=version.status,
         risk_level=version.risk_level,
         created_by=version.created_by,
+        config=version.config,
+        created_at=version.created_at,
+        updated_at=version.updated_at,
+        activated_at=version.activated_at,
     )
 
 
