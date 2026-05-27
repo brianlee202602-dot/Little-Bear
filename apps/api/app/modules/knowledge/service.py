@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from app.modules.knowledge.errors import KnowledgeServiceError
 from app.modules.knowledge.schemas import (
     AccessibleChunk,
+    AccessibleChunkList,
     AccessibleCitationSource,
     AccessibleDocument,
     AccessibleDocumentList,
+    AccessibleDocumentListItem,
     AccessibleDocumentPreview,
     AccessibleDocumentVersion,
+    AccessibleDocumentVersionList,
     AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
     AccessiblePreviewCitation,
@@ -84,14 +88,7 @@ class KnowledgeService:
                     SELECT
                         id::text AS kb_id,
                         name,
-                        status,
-                        owner_department_id::text AS owner_department_id,
-                        kb_visibility,
-                        default_document_visibility,
-                        default_document_owner_department_id::text
-                            AS default_document_owner_department_id,
-                        config_scope_id,
-                        policy_version
+                        status
                     FROM knowledge_bases kb
                     WHERE {where_sql}
                     ORDER BY updated_at DESC, name
@@ -167,20 +164,16 @@ class KnowledgeService:
                     f"""
                     SELECT DISTINCT
                         d.id::text AS document_id,
-                        d.kb_id::text AS kb_id,
-                        d.folder_id::text AS folder_id,
                         d.title,
                         d.lifecycle_status,
                         d.index_status,
-                        d.owner_department_id::text AS owner_department_id,
-                        d.visibility,
-                        d.current_version_id::text AS current_version_id
+                        d.updated_at
                     FROM documents d
                     JOIN chunks c ON c.document_id = d.id
                     JOIN chunk_index_refs cir ON cir.chunk_id = c.id
                     WHERE {permission_filter.metadata_where_sql}
                       {filter_sql}
-                    ORDER BY d.title, document_id
+                    ORDER BY d.updated_at DESC, d.title, document_id
                     LIMIT :limit OFFSET :offset
                     """
                 ),
@@ -206,7 +199,7 @@ class KnowledgeService:
                 exc,
             ) from exc
         return AccessibleDocumentList(
-            items=[_document_from_mapping(row._mapping) for row in rows],
+            items=[_document_list_item_from_mapping(row._mapping) for row in rows],
             total=int(total_row._mapping["total"]),
         )
 
@@ -298,8 +291,10 @@ class KnowledgeService:
         user_id: str,
         enterprise_id: str,
         document_id: str,
+        page: int,
+        page_size: int,
         request_id: str | None = None,
-    ) -> tuple[AccessibleDocumentVersion, ...]:
+    ) -> AccessibleDocumentVersionList:
         self.get_document(
             session,
             user_id=user_id,
@@ -307,6 +302,8 @@ class KnowledgeService:
             document_id=document_id,
             request_id=request_id,
         )
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 100)
         try:
             rows = session.execute(
                 text(
@@ -320,17 +317,37 @@ class KnowledgeService:
                     WHERE enterprise_id = CAST(:enterprise_id AS uuid)
                       AND document_id = CAST(:document_id AS uuid)
                     ORDER BY version_no DESC, created_at DESC
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                {
+                    "enterprise_id": enterprise_id,
+                    "document_id": document_id,
+                    "limit": page_size,
+                    "offset": (page - 1) * page_size,
+                },
+            ).all()
+            total_row = session.execute(
+                text(
+                    """
+                    SELECT count(*) AS total
+                    FROM document_versions
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND document_id = CAST(:document_id AS uuid)
                     """
                 ),
                 {"enterprise_id": enterprise_id, "document_id": document_id},
-            ).all()
+            ).one()
         except SQLAlchemyError as exc:
             raise _database_error(
                 "KNOWLEDGE_DOCUMENT_VERSIONS_UNAVAILABLE",
                 "document versions cannot be read",
                 exc,
             ) from exc
-        return tuple(_document_version_from_mapping(row._mapping) for row in rows)
+        return AccessibleDocumentVersionList(
+            items=[_document_version_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
 
     def list_document_chunks(
         self,
@@ -339,8 +356,12 @@ class KnowledgeService:
         user_id: str,
         enterprise_id: str,
         document_id: str,
+        page: int,
+        page_size: int,
+        keyword: str | None = None,
+        status: str | None = None,
         request_id: str | None = None,
-    ) -> tuple[AccessibleChunk, ...]:
+    ) -> AccessibleChunkList:
         context = self._permission_context(
             session,
             user_id=user_id,
@@ -360,15 +381,30 @@ class KnowledgeService:
             kb_ids=(document_kb_id,),
         )
         if not active_index_ids:
-            return ()
+            return AccessibleChunkList(items=[], total=0)
         permission_filter = self.permission_service.build_filter(
             context,
             kb_ids=(document_kb_id,),
             active_index_version_ids=active_index_ids,
             required_scope="document:read",
         )
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
         params = dict(permission_filter.params)
-        params["document_id"] = document_id
+        params.update(
+            {
+                "document_id": document_id,
+                "limit": page_size,
+                "offset": (page - 1) * page_size,
+            }
+        )
+        filters: list[str] = ["d.id = CAST(:document_id AS uuid)"]
+        if keyword:
+            filters.append("c.text_preview ILIKE :keyword")
+            params["keyword"] = f"%{keyword.strip()}%"
+        if status and status != "active":
+            filters.append("FALSE")
+        filter_sql = "".join(f"\n                      AND {condition}" for condition in filters)
         try:
             rows = session.execute(
                 text(
@@ -386,19 +422,36 @@ class KnowledgeService:
                     JOIN chunks c ON c.document_id = d.id
                     JOIN chunk_index_refs cir ON cir.chunk_id = c.id
                     WHERE {permission_filter.metadata_where_sql}
-                      AND d.id = CAST(:document_id AS uuid)
+                      {filter_sql}
                     ORDER BY c.ordinal, chunk_id
+                    LIMIT :limit OFFSET :offset
                     """
                 ),
                 params,
             ).all()
+            total_row = session.execute(
+                text(
+                    f"""
+                    SELECT count(DISTINCT c.id) AS total
+                    FROM documents d
+                    JOIN chunks c ON c.document_id = d.id
+                    JOIN chunk_index_refs cir ON cir.chunk_id = c.id
+                    WHERE {permission_filter.metadata_where_sql}
+                      {filter_sql}
+                    """
+                ),
+                params,
+            ).one()
         except SQLAlchemyError as exc:
             raise _database_error(
                 "KNOWLEDGE_CHUNKS_UNAVAILABLE",
                 "document chunks cannot be read",
                 exc,
             ) from exc
-        return tuple(_chunk_from_mapping(row._mapping) for row in rows)
+        return AccessibleChunkList(
+            items=[_chunk_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
 
     def get_document_preview(
         self,
@@ -421,12 +474,14 @@ class KnowledgeService:
             user_id=user_id,
             enterprise_id=enterprise_id,
             document_id=document_id,
+            page=1,
+            page_size=100,
             request_id=request_id,
         )
         preview_parts: list[str] = []
         remaining = 8000
         citations: list[AccessiblePreviewCitation] = []
-        for chunk in chunks:
+        for chunk in chunks.items:
             if remaining > 0:
                 text_preview = chunk.text_preview.strip()
                 if text_preview:
@@ -707,12 +762,6 @@ def _knowledge_base_from_mapping(row: Any) -> AccessibleKnowledgeBase:
         id=str(row["kb_id"]),
         name=str(row["name"]),
         status=str(row["status"]),
-        owner_department_id=str(row["owner_department_id"]),
-        kb_visibility=str(row["kb_visibility"]),
-        default_document_visibility=str(row["default_document_visibility"]),
-        default_document_owner_department_id=str(row["default_document_owner_department_id"]),
-        config_scope_id=_optional_str(row.get("config_scope_id")),
-        policy_version=int(row["policy_version"]),
     )
 
 
@@ -727,6 +776,16 @@ def _document_from_mapping(row: Any) -> AccessibleDocument:
         owner_department_id=str(row["owner_department_id"]),
         visibility=str(row["visibility"]),
         current_version_id=_optional_str(row.get("current_version_id")),
+    )
+
+
+def _document_list_item_from_mapping(row: Any) -> AccessibleDocumentListItem:
+    return AccessibleDocumentListItem(
+        id=str(row["document_id"]),
+        title=str(row["title"]),
+        lifecycle_status=str(row["lifecycle_status"]),
+        index_status=str(row["index_status"]),
+        updated_at=row.get("updated_at") if isinstance(row.get("updated_at"), datetime) else None,
     )
 
 
@@ -748,6 +807,7 @@ def _chunk_from_mapping(row: Any) -> AccessibleChunk:
         page_start=_optional_int(row.get("page_start")),
         page_end=_optional_int(row.get("page_end")),
         status=str(row["status"]),
+        ordinal=int(row["ordinal"]),
     )
 
 

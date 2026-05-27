@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.schemas.config import PaginationData
+
 
 class QueryHistoryMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -43,7 +45,7 @@ class CitationData(BaseModel):
 class QueryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    request_id: str
+    debug_id: str
     conversation_id: str | None = None
     message_id: str | None = None
     answer: str
@@ -51,7 +53,6 @@ class QueryResponse(BaseModel):
     confidence: Literal["low", "medium", "high"]
     degraded: bool
     degrade_reason: str | None = None
-    trace_id: str
 
 
 class QueryConversationCreateRequest(BaseModel):
@@ -73,8 +74,7 @@ class QueryMessageData(BaseModel):
     confidence: Literal["low", "medium", "high"] | None = None
     degraded: bool = False
     degrade_reason: str | None = None
-    request_id: str | None = None
-    trace_id: str | None = None
+    debug_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -96,7 +96,7 @@ class QueryConversationListResponse(BaseModel):
 
     request_id: str
     data: list[QueryConversationData]
-    pagination: dict[str, int]
+    pagination: PaginationData
 
 
 class QueryConversationResponse(BaseModel):
@@ -105,3 +105,4 @@ class QueryConversationResponse(BaseModel):
     request_id: str
     data: QueryConversationData
     messages: list[QueryMessageData] = Field(default_factory=list)
+    messages_pagination: PaginationData

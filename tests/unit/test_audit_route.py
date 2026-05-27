@@ -165,6 +165,11 @@ def test_audit_log_list_route_requires_audit_read_scope(monkeypatch) -> None:
     payload = response.json()
     assert payload["request_id"] == "req_audit"
     assert payload["data"][0]["event_name"] == "config.published"
+    assert payload["data"][0]["config_version"] == 2
+    assert "request_id" not in payload["data"][0]
+    assert "trace_id" not in payload["data"][0]
+    assert "summary_json" not in payload["data"][0]
+    assert "index_version_hash" not in payload["data"][0]
     assert payload["pagination"]["total"] == 1
 
 
@@ -217,7 +222,10 @@ def test_query_log_list_route_requires_audit_read_scope(monkeypatch) -> None:
     assert seen["enterprise_id"] == "ent_1"
     assert seen["filters"]["trace_id"] == "trace_query"
     assert seen["filters"]["degraded"] is False
-    assert response.json()["data"][0]["candidate_count"] == 5
+    payload = response.json()["data"][0]
+    assert payload["candidate_count"] == 5
+    assert "trace_id" not in payload
+    assert "query_hash" not in payload
 
 
 def test_query_log_get_route_returns_single_log(monkeypatch) -> None:
@@ -275,4 +283,40 @@ def test_model_call_log_list_route_requires_audit_read_scope(monkeypatch) -> Non
     assert seen["required_scope"] == "audit:read"
     assert seen["filters"]["trace_id"] == "trace_query"
     assert seen["filters"]["model"] == "qwen"
-    assert response.json()["data"][0]["model_name"] == "qwen2.5"
+    payload = response.json()["data"][0]
+    assert payload["model_name"] == "qwen2.5"
+    assert "trace_id" not in payload
+    assert "model_route_hash" not in payload
+    assert "token_usage_json" not in payload
+    assert "prompt_hash" not in payload
+
+
+def test_model_call_log_get_route_returns_single_log(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def get_model_call_log(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return _model_call_log()
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.audit.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.audit.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.audit.AuditService.get_model_call_log",
+        get_model_call_log,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/model-call-logs/model_call_1",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["model_call_log_id"] == "model_call_1"
+    payload = response.json()["data"]
+    assert payload["trace_id"] == "trace_query"
+    assert payload["token_usage_json"] == {"prompt_tokens": 10, "completion_tokens": 20}

@@ -12,18 +12,42 @@ from starlette import status
 from starlette.responses import JSONResponse, Response
 
 from app.api.schemas.auth import (
+    AdminCurrentUserCapabilitiesData,
+    AdminCurrentUserCapabilitiesResponse,
     CurrentUserData,
     CurrentUserResponse,
+    DepartmentData,
     LoginRequest,
     PasswordChangeRequest,
+    RoleData,
     TokenResponse,
 )
 from app.db.session import session_scope
 from app.modules.auth.errors import AuthServiceError
+from app.modules.auth.schemas import AuthContext
 from app.modules.auth.service import AuthService
 from app.shared.context import get_request_context
 
 router = APIRouter(prefix="/internal/v1", tags=["auth"])
+
+ADMIN_PORTAL_SCOPES = (
+    "config:read",
+    "config:manage",
+    "audit:read",
+    "user:read",
+    "user:manage",
+    "org:read",
+    "org:manage",
+    "role:read",
+    "role:manage",
+    "knowledge_base:manage",
+    "document:manage",
+    "document:index",
+    "document:import",
+    "folder:manage",
+    "permission:manage",
+    "import_job:read",
+)
 
 
 @router.post("/sessions", response_model=TokenResponse)
@@ -120,7 +144,45 @@ async def get_current_user(
 
     return CurrentUserResponse(
         request_id=_request_id(),
-        data=CurrentUserData.model_validate(auth_context.user.to_response()),
+        data=CurrentUserData(
+            id=auth_context.user.id,
+            username=auth_context.user.username,
+            name=auth_context.user.display_name,
+            status=auth_context.user.status,
+        ),
+    )
+
+
+@router.get(
+    "/admin/users/me/capabilities",
+    response_model=AdminCurrentUserCapabilitiesResponse,
+)
+async def get_admin_current_user_capabilities(
+    authorization: str | None = Header(default=None),
+) -> AdminCurrentUserCapabilitiesResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AuthService()
+    try:
+        with session_scope() as session:
+            auth_context = service.authenticate_access_token(
+                session,
+                access_token=token or "",
+                required_scope="auth:session",
+            )
+            if not _has_any_scope(auth_context.scopes, ADMIN_PORTAL_SCOPES):
+                raise AuthServiceError(
+                    "AUTH_ADMIN_PORTAL_FORBIDDEN",
+                    "current user cannot access admin portal",
+                    status_code=403,
+                )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="auth_admin_current_user")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="auth_admin_current_user")
+
+    return AdminCurrentUserCapabilitiesResponse(
+        request_id=_request_id(),
+        data=_admin_current_user_capabilities_data(auth_context),
     )
 
 
@@ -166,6 +228,50 @@ def _client_host(request: Request) -> str | None:
 def _request_id() -> str:
     request_context = get_request_context()
     return request_context.request_id if request_context else "req_unknown"
+
+
+def _admin_current_user_capabilities_data(
+    auth_context: AuthContext,
+) -> AdminCurrentUserCapabilitiesData:
+    user = auth_context.user
+    return AdminCurrentUserCapabilitiesData(
+        id=user.id,
+        username=user.username,
+        name=user.display_name,
+        status=user.status,
+        departments=[
+            DepartmentData(
+                id=department.id,
+                name=department.name,
+                status=department.status,
+                is_primary=department.is_primary,
+            )
+            for department in user.departments
+        ],
+        roles=[
+            RoleData(
+                id=role.id,
+                code=role.code,
+                name=role.name,
+                scope_type=role.scope_type,
+                is_builtin=role.is_builtin,
+                status=role.status,
+            )
+            for role in user.roles
+        ],
+        scopes=list(auth_context.scopes),
+    )
+
+
+def _has_any_scope(granted_scopes: tuple[str, ...], required_scopes: tuple[str, ...]) -> bool:
+    return any(_scope_allowed(granted_scopes, required_scope) for required_scope in required_scopes)
+
+
+def _scope_allowed(granted_scopes: tuple[str, ...], required_scope: str) -> bool:
+    if "*" in granted_scopes or required_scope in granted_scopes:
+        return True
+    prefix = required_scope.split(":", 1)[0]
+    return f"{prefix}:*" in granted_scopes
 
 
 def _auth_error_response(exc: AuthServiceError, *, stage: str) -> JSONResponse:

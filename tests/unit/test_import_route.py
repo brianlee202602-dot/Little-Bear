@@ -301,7 +301,10 @@ def test_admin_import_job_list_route(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert captured["job_type"] == "index_rebuild"
-    assert response.json()["pagination"]["total"] == 1
+    payload = response.json()
+    assert payload["pagination"]["total"] == 1
+    assert payload["data"][0]["document_count"] == 1
+    assert "document_ids" not in payload["data"][0]
 
 
 def test_admin_index_job_retry_route_requires_document_index(monkeypatch) -> None:
@@ -348,7 +351,10 @@ def test_admin_index_job_retry_route_requires_document_index(monkeypatch) -> Non
     assert response.status_code == 202
     assert captured["required_scope"] == "document:index"
     assert captured["job_ids"] == ["99999999-9999-9999-9999-999999999999"]
-    assert response.json()["data"][0]["job_type"] == "index_rebuild"
+    payload = response.json()
+    assert payload["data"][0]["job_type"] == "index_rebuild"
+    assert payload["data"][0]["document_count"] == 1
+    assert "document_ids" not in payload["data"][0]
 
 
 def test_import_route_returns_service_error(monkeypatch) -> None:

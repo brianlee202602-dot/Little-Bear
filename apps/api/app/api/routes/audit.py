@@ -12,11 +12,15 @@ from starlette.responses import JSONResponse
 
 from app.api.schemas.audit import (
     AuditLogData,
+    AuditLogListItemData,
     AuditLogListResponse,
     AuditLogResponse,
     ModelCallLogData,
+    ModelCallLogListItemData,
     ModelCallLogListResponse,
+    ModelCallLogResponse,
     QueryLogData,
+    QueryLogListItemData,
     QueryLogListResponse,
     QueryLogResponse,
 )
@@ -73,7 +77,7 @@ async def list_audit_logs(
 
     return AuditLogListResponse(
         request_id=_request_id(),
-        data=[_audit_log_data(log) for log in log_list.items],
+        data=[_audit_log_list_item_data(log) for log in log_list.items],
         pagination=PaginationData(page=page, page_size=page_size, total=log_list.total),
     )
 
@@ -151,7 +155,7 @@ async def list_query_logs(
 
     return QueryLogListResponse(
         request_id=_request_id(),
-        data=[_query_log_data(log) for log in log_list.items],
+        data=[_query_log_list_item_data(log) for log in log_list.items],
         pagination=PaginationData(page=page, page_size=page_size, total=log_list.total),
     )
 
@@ -233,9 +237,38 @@ async def list_model_call_logs(
 
     return ModelCallLogListResponse(
         request_id=_request_id(),
-        data=[_model_call_log_data(log) for log in log_list.items],
+        data=[_model_call_log_list_item_data(log) for log in log_list.items],
         pagination=PaginationData(page=page, page_size=page_size, total=log_list.total),
     )
+
+
+@router.get("/model-call-logs/{model_call_log_id}", response_model=ModelCallLogResponse)
+async def get_model_call_log(
+    model_call_log_id: str,
+    authorization: str | None = Header(default=None),
+) -> ModelCallLogResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AuditService()
+    try:
+        with session_scope() as session:
+            auth_context = AuthService().authenticate_access_token(
+                session,
+                access_token=token or "",
+                required_scope="audit:read",
+            )
+            log = service.get_model_call_log(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                model_call_log_id=model_call_log_id,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="model_call_log_get")
+    except AuditServiceError as exc:
+        return _audit_error_response(exc, stage="model_call_log_get")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="model_call_log_get")
+
+    return ModelCallLogResponse(request_id=_request_id(), data=_model_call_log_data(log))
 
 
 def _audit_log_data(log: AuditLog) -> AuditLogData:
@@ -260,13 +293,31 @@ def _audit_log_data(log: AuditLog) -> AuditLogData:
     )
 
 
+def _audit_log_list_item_data(log: AuditLog) -> AuditLogListItemData:
+    return AuditLogListItemData(
+        id=log.id,
+        event_name=log.event_name,
+        actor_type=log.actor_type,
+        action=log.action,
+        resource_type=log.resource_type,
+        result=log.result,
+        risk_level=log.risk_level,
+        config_version=log.config_version,
+        permission_version=log.permission_version,
+        error_code=log.error_code,
+        created_at=log.created_at,
+    )
+
+
 def _query_log_data(log: QueryLog) -> QueryLogData:
     return QueryLogData(
         id=log.id,
         request_id=log.request_id,
         trace_id=log.trace_id,
         user_id=log.user_id,
+        user_display_name=log.user_display_name,
         kb_ids=list(log.kb_ids),
+        knowledge_base_names=list(log.knowledge_base_names),
         query_hash=log.query_hash,
         status=log.status,
         degraded=log.degraded,
@@ -276,6 +327,22 @@ def _query_log_data(log: QueryLog) -> QueryLogData:
         permission_filter_hash=log.permission_filter_hash,
         index_version_hash=log.index_version_hash,
         model_route_hash=log.model_route_hash,
+        latency_ms=log.latency_ms,
+        candidate_count=log.candidate_count,
+        citation_count=log.citation_count,
+        error_code=log.error_code,
+        created_at=log.created_at,
+    )
+
+
+def _query_log_list_item_data(log: QueryLog) -> QueryLogListItemData:
+    return QueryLogListItemData(
+        id=log.id,
+        user_display_name=log.user_display_name,
+        knowledge_base_names=list(log.knowledge_base_names),
+        status=log.status,
+        degraded=log.degraded,
+        degrade_reason=log.degrade_reason,
         latency_ms=log.latency_ms,
         candidate_count=log.candidate_count,
         citation_count=log.citation_count,
@@ -302,6 +369,21 @@ def _model_call_log_data(log: ModelCallLog) -> ModelCallLogData:
         prompt_hash=log.prompt_hash,
         input_hash=log.input_hash,
         output_hash=log.output_hash,
+        error_code=log.error_code,
+        created_at=log.created_at,
+    )
+
+
+def _model_call_log_list_item_data(log: ModelCallLog) -> ModelCallLogListItemData:
+    return ModelCallLogListItemData(
+        id=log.id,
+        caller=log.caller,
+        model_type=log.model_type,
+        model_name=log.model_name,
+        model_version=log.model_version,
+        status=log.status,
+        latency_ms=log.latency_ms,
+        degraded=log.degraded,
         error_code=log.error_code,
         created_at=log.created_at,
     )
@@ -336,7 +418,7 @@ def _auth_error_response(exc: AuthServiceError, *, stage: str) -> JSONResponse:
 
 
 def _audit_error_response(exc: AuditServiceError, *, stage: str) -> JSONResponse:
-    not_found = {"AUDIT_LOG_NOT_FOUND", "QUERY_LOG_NOT_FOUND"}
+    not_found = {"AUDIT_LOG_NOT_FOUND", "QUERY_LOG_NOT_FOUND", "MODEL_CALL_LOG_NOT_FOUND"}
     return JSONResponse(
         status_code=404 if exc.error_code in not_found else 503,
         content={

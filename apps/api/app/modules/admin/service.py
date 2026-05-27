@@ -14,27 +14,42 @@ from typing import Any
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminAcceptedResult,
+    AdminAssignableRoleOption,
+    AdminAssignableRoleOptionList,
     AdminChunk,
+    AdminChunkList,
     AdminDepartment,
     AdminDepartmentList,
+    AdminDepartmentListItem,
+    AdminDepartmentOption,
+    AdminDepartmentOptionList,
     AdminDocument,
     AdminDocumentList,
     AdminDocumentPreview,
     AdminDocumentPreviewChunk,
     AdminDocumentVersion,
+    AdminDocumentVersionList,
     AdminFolder,
     AdminFolderList,
+    AdminFolderOption,
+    AdminFolderOptionList,
     AdminIndexVersion,
     AdminKnowledgeBase,
     AdminKnowledgeBaseAccessRule,
     AdminKnowledgeBaseAccessRuleInput,
     AdminKnowledgeBaseList,
+    AdminKnowledgeBaseListItem,
+    AdminKnowledgeBaseOption,
+    AdminKnowledgeBaseOptionList,
     AdminKnowledgeBasePermissionPolicy,
     AdminPermissionPolicy,
     AdminRole,
     AdminRoleBinding,
+    AdminRoleList,
+    AdminRoleListItem,
     AdminUser,
     AdminUserList,
+    AdminUserListItem,
 )
 from app.modules.auth.password_service import PasswordPolicy, PasswordService
 from app.modules.config.service import ConfigService
@@ -124,17 +139,22 @@ class AdminService:
     ) -> AdminUserList:
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
-        conditions = ["enterprise_id = CAST(:enterprise_id AS uuid)", "deleted_at IS NULL"]
+        conditions = [
+            "users.enterprise_id = CAST(:enterprise_id AS uuid)",
+            "users.deleted_at IS NULL",
+        ]
         params: dict[str, Any] = {
             "enterprise_id": enterprise_id,
             "limit": page_size,
             "offset": (page - 1) * page_size,
         }
         if keyword:
-            conditions.append("(username ILIKE :keyword OR display_name ILIKE :keyword)")
+            conditions.append(
+                "(users.username ILIKE :keyword OR users.display_name ILIKE :keyword)"
+            )
             params["keyword"] = f"%{keyword.strip()}%"
         if status:
-            conditions.append("status = :status")
+            conditions.append("users.status = :status")
             params["status"] = status
         if actor_context and not _actor_can_access_all_users(actor_context):
             conditions.append(
@@ -160,10 +180,47 @@ class AdminService:
             rows = session.execute(
                 text(
                     f"""
-                    SELECT id::text AS user_id
+                    SELECT
+                        users.id::text AS user_id,
+                        users.username,
+                        users.display_name,
+                        users.status,
+                        COALESCE(
+                            array_agg(DISTINCT departments.name)
+                                FILTER (WHERE departments.id IS NOT NULL),
+                            ARRAY[]::text[]
+                        ) AS department_names,
+                        COALESCE(
+                            array_agg(DISTINCT roles.name)
+                                FILTER (WHERE roles.id IS NOT NULL),
+                            ARRAY[]::text[]
+                        ) AS role_names
                     FROM users
+                    LEFT JOIN user_department_memberships udm
+                      ON udm.user_id = users.id
+                     AND udm.enterprise_id = users.enterprise_id
+                     AND udm.status = 'active'
+                    LEFT JOIN departments
+                      ON departments.id = udm.department_id
+                     AND departments.enterprise_id = users.enterprise_id
+                     AND departments.deleted_at IS NULL
+                     AND departments.status != 'deleted'
+                    LEFT JOIN role_bindings rb
+                      ON rb.user_id = users.id
+                     AND rb.enterprise_id = users.enterprise_id
+                     AND rb.status = 'active'
+                    LEFT JOIN roles
+                      ON roles.id = rb.role_id
+                     AND roles.enterprise_id = users.enterprise_id
+                     AND roles.status = 'active'
                     WHERE {where_sql}
-                    ORDER BY created_at DESC
+                    GROUP BY
+                        users.id,
+                        users.username,
+                        users.display_name,
+                        users.status,
+                        users.created_at
+                    ORDER BY users.created_at DESC
                     LIMIT :limit OFFSET :offset
                     """
                 ),
@@ -177,10 +234,7 @@ class AdminService:
             raise _database_error("ADMIN_USERS_UNAVAILABLE", "users cannot be read", exc) from exc
 
         return AdminUserList(
-            items=[
-                self.get_user(session, row._mapping["user_id"], enterprise_id=enterprise_id)
-                for row in rows
-            ],
+            items=[_user_list_item_from_mapping(row._mapping) for row in rows],
             total=int(total_row._mapping["total"]),
         )
 
@@ -194,14 +248,14 @@ class AdminService:
         keyword: str | None = None,
         status: str | None = None,
     ) -> AdminDepartmentList:
-        """读取当前企业部门列表，用于用户归属部门选择器。"""
+        """读取当前企业部门列表摘要。"""
 
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
         conditions = [
-            "enterprise_id = CAST(:enterprise_id AS uuid)",
-            "deleted_at IS NULL",
-            "status != 'deleted'",
+            "departments.enterprise_id = CAST(:enterprise_id AS uuid)",
+            "departments.deleted_at IS NULL",
+            "departments.status != 'deleted'",
         ]
         params: dict[str, Any] = {
             "enterprise_id": enterprise_id,
@@ -209,10 +263,10 @@ class AdminService:
             "offset": (page - 1) * page_size,
         }
         if keyword:
-            conditions.append("(code ILIKE :keyword OR name ILIKE :keyword)")
+            conditions.append("departments.name ILIKE :keyword")
             params["keyword"] = f"%{keyword.strip()}%"
         if status:
-            conditions.append("status = :status")
+            conditions.append("departments.status = :status")
             params["status"] = status
         where_sql = " AND ".join(conditions)
 
@@ -220,10 +274,10 @@ class AdminService:
             rows = session.execute(
                 text(
                     f"""
-                    SELECT id::text AS department_id, code, name, status, is_default
+                    SELECT id::text AS department_id, name, status, is_default
                     FROM departments
                     WHERE {where_sql}
-                    ORDER BY is_default DESC, code
+                    ORDER BY is_default DESC, name, id
                     LIMIT :limit OFFSET :offset
                     """
                 ),
@@ -240,7 +294,67 @@ class AdminService:
                 exc,
             ) from exc
         return AdminDepartmentList(
-            items=[_department_from_mapping(row._mapping) for row in rows],
+            items=[_department_list_item_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
+
+    def list_department_options(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        page: int,
+        page_size: int,
+        keyword: str | None = None,
+        status: str | None = None,
+    ) -> AdminDepartmentOptionList:
+        """读取部门下拉选项，避免 selector 复用完整部门详情 DTO。"""
+
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        conditions = [
+            "departments.enterprise_id = CAST(:enterprise_id AS uuid)",
+            "departments.deleted_at IS NULL",
+            "departments.status != 'deleted'",
+        ]
+        params: dict[str, Any] = {
+            "enterprise_id": enterprise_id,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        if keyword:
+            conditions.append("departments.name ILIKE :keyword")
+            params["keyword"] = f"%{keyword.strip()}%"
+        if status:
+            conditions.append("departments.status = :status")
+            params["status"] = status
+        where_sql = " AND ".join(conditions)
+
+        try:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT id::text AS department_id, name, status, is_default
+                    FROM departments
+                    WHERE {where_sql}
+                    ORDER BY is_default DESC, name, id
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).all()
+            total_row = session.execute(
+                text(f"SELECT count(*) AS total FROM departments WHERE {where_sql}"),
+                params,
+            ).one()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_DEPARTMENT_OPTIONS_UNAVAILABLE",
+                "department options cannot be read",
+                exc,
+            ) from exc
+        return AdminDepartmentOptionList(
+            items=[_department_option_from_mapping(row._mapping) for row in rows],
             total=int(total_row._mapping["total"]),
         )
 
@@ -292,14 +406,14 @@ class AdminService:
         status: str | None = None,
         actor_context: AdminActorContext | None = None,
     ) -> AdminKnowledgeBaseList:
-        """读取知识库列表，供知识库级角色绑定选择作用域。"""
+        """读取知识库列表摘要。"""
 
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
         conditions = [
-            "enterprise_id = CAST(:enterprise_id AS uuid)",
-            "deleted_at IS NULL",
-            "status != 'deleted'",
+            "knowledge_bases.enterprise_id = CAST(:enterprise_id AS uuid)",
+            "knowledge_bases.deleted_at IS NULL",
+            "knowledge_bases.status != 'deleted'",
         ]
         params: dict[str, Any] = {
             "enterprise_id": enterprise_id,
@@ -307,20 +421,23 @@ class AdminService:
             "offset": (page - 1) * page_size,
         }
         if keyword:
-            conditions.append("name ILIKE :keyword")
+            conditions.append("knowledge_bases.name ILIKE :keyword")
             params["keyword"] = f"%{keyword.strip()}%"
         if status:
-            conditions.append("status = :status")
+            conditions.append("knowledge_bases.status = :status")
             params["status"] = status
         if actor_context and not _actor_can_manage_all_knowledge_bases(actor_context):
             resource_conditions: list[str] = []
             if actor_context.department_ids:
                 resource_conditions.append(
-                    "owner_department_id = ANY(CAST(:actor_department_ids AS uuid[]))"
+                    "knowledge_bases.owner_department_id = "
+                    "ANY(CAST(:actor_department_ids AS uuid[]))"
                 )
                 params["actor_department_ids"] = list(actor_context.department_ids)
             if actor_context.knowledge_base_ids:
-                resource_conditions.append("id = ANY(CAST(:actor_kb_ids AS uuid[]))")
+                resource_conditions.append(
+                    "knowledge_bases.id = ANY(CAST(:actor_kb_ids AS uuid[]))"
+                )
                 params["actor_kb_ids"] = list(actor_context.knowledge_base_ids)
             acl_condition = _actor_kb_manage_acl_sql(
                 actor_context,
@@ -340,20 +457,30 @@ class AdminService:
                 text(
                     f"""
                     SELECT
-                        id::text AS kb_id,
-                        name,
-                        status,
-                        owner_department_id::text AS owner_department_id,
-                        kb_visibility,
-                        default_document_visibility,
-                        default_document_owner_department_id::text
+                        knowledge_bases.id::text AS kb_id,
+                        knowledge_bases.name,
+                        knowledge_bases.status,
+                        knowledge_bases.owner_department_id::text AS owner_department_id,
+                        knowledge_bases.kb_visibility,
+                        knowledge_bases.default_document_visibility,
+                        knowledge_bases.default_document_owner_department_id::text
                             AS default_document_owner_department_id,
-                        {_knowledge_base_access_rules_sql("knowledge_bases.id")},
-                        config_scope_id,
-                        policy_version
+                        owner_department.name AS owner_department_name,
+                        default_document_owner_department.name
+                            AS default_document_owner_department_name
                     FROM knowledge_bases
+                    LEFT JOIN departments owner_department
+                      ON owner_department.id = knowledge_bases.owner_department_id
+                     AND owner_department.enterprise_id = knowledge_bases.enterprise_id
+                     AND owner_department.deleted_at IS NULL
+                    LEFT JOIN departments default_document_owner_department
+                      ON default_document_owner_department.id =
+                         knowledge_bases.default_document_owner_department_id
+                     AND default_document_owner_department.enterprise_id =
+                         knowledge_bases.enterprise_id
+                     AND default_document_owner_department.deleted_at IS NULL
                     WHERE {where_sql}
-                    ORDER BY updated_at DESC, name
+                    ORDER BY knowledge_bases.updated_at DESC, knowledge_bases.name
                     LIMIT :limit OFFSET :offset
                     """
                 ),
@@ -370,7 +497,95 @@ class AdminService:
                 exc,
             ) from exc
         return AdminKnowledgeBaseList(
-            items=[_knowledge_base_from_mapping(row._mapping) for row in rows],
+            items=[_knowledge_base_list_item_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
+
+    def list_knowledge_base_options(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        page: int,
+        page_size: int,
+        keyword: str | None = None,
+        status: str | None = None,
+        actor_context: AdminActorContext | None = None,
+    ) -> AdminKnowledgeBaseOptionList:
+        """读取知识库下拉选项，避免 selector 复用完整知识库详情 DTO。"""
+
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        conditions = [
+            "knowledge_bases.enterprise_id = CAST(:enterprise_id AS uuid)",
+            "knowledge_bases.deleted_at IS NULL",
+            "knowledge_bases.status != 'deleted'",
+        ]
+        params: dict[str, Any] = {
+            "enterprise_id": enterprise_id,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        if keyword:
+            conditions.append("knowledge_bases.name ILIKE :keyword")
+            params["keyword"] = f"%{keyword.strip()}%"
+        if status:
+            conditions.append("knowledge_bases.status = :status")
+            params["status"] = status
+        if actor_context and not _actor_can_manage_all_knowledge_bases(actor_context):
+            resource_conditions: list[str] = []
+            if actor_context.department_ids:
+                resource_conditions.append(
+                    "knowledge_bases.owner_department_id = "
+                    "ANY(CAST(:actor_department_ids AS uuid[]))"
+                )
+                params["actor_department_ids"] = list(actor_context.department_ids)
+            if actor_context.knowledge_base_ids:
+                resource_conditions.append(
+                    "knowledge_bases.id = ANY(CAST(:actor_kb_ids AS uuid[]))"
+                )
+                params["actor_kb_ids"] = list(actor_context.knowledge_base_ids)
+            acl_condition = _actor_kb_manage_acl_sql(
+                actor_context,
+                params,
+                kb_id_expr="knowledge_bases.id",
+            )
+            if acl_condition:
+                resource_conditions.append(acl_condition)
+            if resource_conditions:
+                conditions.append(f"({' OR '.join(resource_conditions)})")
+            else:
+                conditions.append("FALSE")
+        where_sql = " AND ".join(conditions)
+
+        try:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT
+                        knowledge_bases.id::text AS kb_id,
+                        knowledge_bases.name,
+                        knowledge_bases.status
+                    FROM knowledge_bases
+                    WHERE {where_sql}
+                    ORDER BY knowledge_bases.updated_at DESC, knowledge_bases.name
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).all()
+            total_row = session.execute(
+                text(f"SELECT count(*) AS total FROM knowledge_bases WHERE {where_sql}"),
+                params,
+            ).one()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_KNOWLEDGE_BASE_OPTIONS_UNAVAILABLE",
+                "knowledge base options cannot be read",
+                exc,
+            ) from exc
+        return AdminKnowledgeBaseOptionList(
+            items=[_knowledge_base_option_from_mapping(row._mapping) for row in rows],
             total=int(total_row._mapping["total"]),
         )
 
@@ -575,6 +790,8 @@ class AdminService:
             kb_visibility=kb_visibility,
             default_document_visibility=default_document_visibility,
             default_document_owner_department_id=default_document_owner.id,
+            owner_department=owner_department,
+            default_document_owner_department=default_document_owner,
             config_scope_id=config_scope_id,
             policy_version=policy_version,
             access_rules=tuple(
@@ -1037,6 +1254,79 @@ class AdminService:
             total=int(total_row._mapping["total"]),
         )
 
+    def list_folder_options(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        kb_id: str,
+        page: int,
+        page_size: int,
+        keyword: str | None = None,
+        status: str | None = None,
+        actor_context: AdminActorContext | None = None,
+    ) -> AdminFolderOptionList:
+        """读取文件夹选择器选项，避免下拉框复用完整文件夹 DTO。"""
+
+        self._ensure_actor_can_manage_folders(actor_context)
+        knowledge_base = self.get_knowledge_base(
+            session,
+            kb_id,
+            enterprise_id=enterprise_id,
+            actor_context=actor_context,
+        )
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        conditions = [
+            "enterprise_id = CAST(:enterprise_id AS uuid)",
+            "kb_id = CAST(:kb_id AS uuid)",
+            "deleted_at IS NULL",
+            "status != 'deleted'",
+        ]
+        params: dict[str, Any] = {
+            "enterprise_id": enterprise_id,
+            "kb_id": knowledge_base.id,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        if keyword:
+            conditions.append("name ILIKE :keyword")
+            params["keyword"] = f"%{keyword.strip()}%"
+        if status:
+            conditions.append("status = :status")
+            params["status"] = status
+        where_sql = " AND ".join(conditions)
+        try:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT
+                        id::text AS folder_id,
+                        name,
+                        status
+                    FROM folders
+                    WHERE {where_sql}
+                    ORDER BY path, name
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).all()
+            total_row = session.execute(
+                text(f"SELECT count(*) AS total FROM folders WHERE {where_sql}"),
+                params,
+            ).one()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_FOLDER_OPTIONS_UNAVAILABLE",
+                "folder options cannot be read",
+                exc,
+            ) from exc
+        return AdminFolderOptionList(
+            items=[_folder_option_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
+
     def get_folder(
         self,
         session: Session,
@@ -1434,12 +1724,14 @@ class AdminService:
                         d.owner_department_id::text AS owner_department_id,
                         d.visibility,
                         d.current_version_id::text AS current_version_id,
+                        dv.version_no AS current_version_no,
                         d.tags,
                         d.permission_snapshot_id::text AS permission_snapshot_id,
                         d.content_hash,
                         COALESCE(ps.policy_version, 1) AS policy_version
                     FROM documents d
                     LEFT JOIN permission_snapshots ps ON ps.id = d.permission_snapshot_id
+                    LEFT JOIN document_versions dv ON dv.id = d.current_version_id
                     WHERE {where_sql}
                     ORDER BY d.updated_at DESC, d.title
                     LIMIT :limit OFFSET :offset
@@ -1492,8 +1784,10 @@ class AdminService:
         *,
         enterprise_id: str,
         doc_id: str,
+        page: int,
+        page_size: int,
         actor_context: AdminActorContext | None = None,
-    ) -> tuple[AdminDocumentVersion, ...]:
+    ) -> AdminDocumentVersionList:
         """读取文档内容版本列表。"""
 
         self._ensure_actor_can_manage_documents(actor_context)
@@ -1503,6 +1797,8 @@ class AdminService:
             enterprise_id=enterprise_id,
             actor_context=actor_context,
         )
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 100)
         try:
             rows = session.execute(
                 text(
@@ -1516,17 +1812,37 @@ class AdminService:
                     WHERE enterprise_id = CAST(:enterprise_id AS uuid)
                       AND document_id = CAST(:doc_id AS uuid)
                     ORDER BY version_no DESC, created_at DESC
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                {
+                    "enterprise_id": enterprise_id,
+                    "doc_id": doc_id,
+                    "limit": page_size,
+                    "offset": (page - 1) * page_size,
+                },
+            ).all()
+            total_row = session.execute(
+                text(
+                    """
+                    SELECT count(*) AS total
+                    FROM document_versions
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND document_id = CAST(:doc_id AS uuid)
                     """
                 ),
                 {"enterprise_id": enterprise_id, "doc_id": doc_id},
-            ).all()
+            ).one()
         except SQLAlchemyError as exc:
             raise _database_error(
                 "ADMIN_DOCUMENT_VERSIONS_UNAVAILABLE",
                 "document versions cannot be read",
                 exc,
             ) from exc
-        return tuple(_document_version_from_mapping(row._mapping) for row in rows)
+        return AdminDocumentVersionList(
+            items=[_document_version_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
 
     def list_document_chunks(
         self,
@@ -1534,8 +1850,12 @@ class AdminService:
         *,
         enterprise_id: str,
         doc_id: str,
+        page: int,
+        page_size: int,
+        keyword: str | None = None,
+        status: str | None = None,
         actor_context: AdminActorContext | None = None,
-    ) -> tuple[AdminChunk, ...]:
+    ) -> AdminChunkList:
         """读取文档 chunk 预览列表。"""
 
         self._ensure_actor_can_manage_documents(actor_context)
@@ -1545,10 +1865,31 @@ class AdminService:
             enterprise_id=enterprise_id,
             actor_context=actor_context,
         )
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        params: dict[str, Any] = {
+            "enterprise_id": enterprise_id,
+            "doc_id": doc_id,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        filters = [
+            "enterprise_id = CAST(:enterprise_id AS uuid)",
+            "document_id = CAST(:doc_id AS uuid)",
+            "deleted_at IS NULL",
+            "status != 'deleted'",
+        ]
+        if keyword:
+            filters.append("text_preview ILIKE :keyword")
+            params["keyword"] = f"%{keyword.strip()}%"
+        if status:
+            filters.append("status = :status")
+            params["status"] = status
+        where_sql = " AND ".join(filters)
         try:
             rows = session.execute(
                 text(
-                    """
+                    f"""
                     SELECT
                         id::text AS chunk_id,
                         document_id::text AS document_id,
@@ -1559,22 +1900,33 @@ class AdminService:
                         status,
                         ordinal
                     FROM chunks
-                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND document_id = CAST(:doc_id AS uuid)
-                      AND deleted_at IS NULL
-                      AND status != 'deleted'
+                    WHERE {where_sql}
                     ORDER BY document_version_id, ordinal, id
+                    LIMIT :limit OFFSET :offset
                     """
                 ),
-                {"enterprise_id": enterprise_id, "doc_id": doc_id},
+                params,
             ).all()
+            total_row = session.execute(
+                text(
+                    f"""
+                    SELECT count(*) AS total
+                    FROM chunks
+                    WHERE {where_sql}
+                    """
+                ),
+                params,
+            ).one()
         except SQLAlchemyError as exc:
             raise _database_error(
                 "ADMIN_DOCUMENT_CHUNKS_UNAVAILABLE",
                 "document chunks cannot be read",
                 exc,
             ) from exc
-        return tuple(_admin_chunk_from_mapping(row._mapping) for row in rows)
+        return AdminChunkList(
+            items=[_admin_chunk_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
 
     def get_document_preview(
         self,
@@ -1582,6 +1934,8 @@ class AdminService:
         *,
         enterprise_id: str,
         doc_id: str,
+        page: int = 1,
+        page_size: int = 20,
         actor_context: AdminActorContext | None = None,
     ) -> AdminDocumentPreview:
         """读取管理后台文档全文预览，按 chunk 返回可定位文本。"""
@@ -1593,6 +1947,14 @@ class AdminService:
             enterprise_id=enterprise_id,
             actor_context=actor_context,
         )
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        params = {
+            "enterprise_id": enterprise_id,
+            "doc_id": doc_id,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
         try:
             rows = session.execute(
                 text(
@@ -1615,10 +1977,24 @@ class AdminService:
                       AND deleted_at IS NULL
                       AND status != 'deleted'
                     ORDER BY document_version_id, ordinal, id
+                    LIMIT :limit OFFSET :offset
                     """
                 ),
-                {"enterprise_id": enterprise_id, "doc_id": doc_id},
+                params,
             ).all()
+            total_row = session.execute(
+                text(
+                    """
+                    SELECT count(*) AS total
+                    FROM chunks
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND document_id = CAST(:doc_id AS uuid)
+                      AND deleted_at IS NULL
+                      AND status != 'deleted'
+                    """
+                ),
+                params,
+            ).one()
         except SQLAlchemyError as exc:
             raise _database_error(
                 "ADMIN_DOCUMENT_PREVIEW_UNAVAILABLE",
@@ -1629,6 +2005,7 @@ class AdminService:
             doc_id=document.id,
             title=document.title,
             chunks=tuple(self._admin_preview_chunk_from_mapping(row._mapping) for row in rows),
+            total=int(total_row._mapping["total"]),
         )
 
     def list_document_index_versions(
@@ -2963,6 +3340,7 @@ class AdminService:
             enterprise_id=enterprise_id,
             department_ids=department_ids,
         )
+        self._ensure_actor_can_create_user_departments(actor_context, departments)
         roles = self._resolve_roles(session, enterprise_id=enterprise_id, role_ids=role_ids)
         if role_ids:
             self._ensure_actor_can_grant_roles(actor_context, roles)
@@ -3742,23 +4120,121 @@ class AdminService:
             summary={"user_id": user_id, "reason": "admin_unlock"},
         )
 
-    def list_roles(self, session: Session, *, enterprise_id: str) -> list[AdminRole]:
+    def list_roles(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        page: int,
+        page_size: int,
+        keyword: str | None = None,
+        status: str | None = None,
+        scope_type: str | None = None,
+    ) -> AdminRoleList:
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        conditions = ["enterprise_id = CAST(:enterprise_id AS uuid)"]
+        params: dict[str, Any] = {
+            "enterprise_id": enterprise_id,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        if status:
+            conditions.append("status = :status")
+            params["status"] = status
+        else:
+            conditions.append("status != 'archived'")
+        if scope_type:
+            conditions.append("scope_type = :scope_type")
+            params["scope_type"] = scope_type
+        if keyword:
+            conditions.append("(code ILIKE :keyword OR name ILIKE :keyword)")
+            params["keyword"] = f"%{keyword.strip()}%"
+        where_sql = " AND ".join(conditions)
+
         try:
             rows = session.execute(
                 text(
-                    """
-                    SELECT id::text AS role_id, code, name, scope_type, scopes, is_builtin, status
+                    f"""
+                    SELECT id::text AS role_id, code, name, scope_type, is_builtin, status
                     FROM roles
-                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND status != 'archived'
+                    WHERE {where_sql}
                     ORDER BY is_builtin DESC, code
+                    LIMIT :limit OFFSET :offset
                     """
                 ),
-                {"enterprise_id": enterprise_id},
+                params,
             ).all()
+            total_row = session.execute(
+                text(f"SELECT count(*) AS total FROM roles WHERE {where_sql}"),
+                params,
+            ).one()
         except SQLAlchemyError as exc:
             raise _database_error("ADMIN_ROLES_UNAVAILABLE", "roles cannot be read", exc) from exc
-        return [_role_from_mapping(row._mapping) for row in rows]
+        return AdminRoleList(
+            items=[_role_list_item_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
+
+    def list_assignable_role_options(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        page: int,
+        page_size: int,
+        keyword: str | None = None,
+        status: str | None = "active",
+        scope_type: str | None = None,
+    ) -> AdminAssignableRoleOptionList:
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        conditions = ["enterprise_id = CAST(:enterprise_id AS uuid)"]
+        params: dict[str, Any] = {
+            "enterprise_id": enterprise_id,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        if status:
+            conditions.append("status = :status")
+            params["status"] = status
+        else:
+            conditions.append("status != 'archived'")
+        if scope_type:
+            conditions.append("scope_type = :scope_type")
+            params["scope_type"] = scope_type
+        if keyword:
+            conditions.append("(code ILIKE :keyword OR name ILIKE :keyword)")
+            params["keyword"] = f"%{keyword.strip()}%"
+        where_sql = " AND ".join(conditions)
+
+        try:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT id::text AS role_id, code, name, scope_type, scopes, is_builtin, status
+                    FROM roles
+                    WHERE {where_sql}
+                    ORDER BY is_builtin DESC, code
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).all()
+            total_row = session.execute(
+                text(f"SELECT count(*) AS total FROM roles WHERE {where_sql}"),
+                params,
+            ).one()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "ADMIN_ASSIGNABLE_ROLES_UNAVAILABLE",
+                "assignable roles cannot be read",
+                exc,
+            ) from exc
+        return AdminAssignableRoleOptionList(
+            items=[_assignable_role_option_from_mapping(row._mapping) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
 
     def get_role(self, session: Session, role_id: str, *, enterprise_id: str) -> AdminRole:
         role = self._load_role(session, role_id, enterprise_id=enterprise_id)
@@ -4081,22 +4557,44 @@ class AdminService:
                 text(
                     f"""
                     SELECT
-                        id::text AS kb_id,
-                        name,
-                        status,
-                        owner_department_id::text AS owner_department_id,
-                        kb_visibility,
-                        default_document_visibility,
-                        default_document_owner_department_id::text
+                        knowledge_bases.id::text AS kb_id,
+                        knowledge_bases.name,
+                        knowledge_bases.status,
+                        knowledge_bases.owner_department_id::text AS owner_department_id,
+                        owner_department.code AS owner_department_code,
+                        owner_department.name AS owner_department_name,
+                        owner_department.status AS owner_department_status,
+                        owner_department.is_default AS owner_department_is_default,
+                        knowledge_bases.kb_visibility,
+                        knowledge_bases.default_document_visibility,
+                        knowledge_bases.default_document_owner_department_id::text
                             AS default_document_owner_department_id,
+                        default_document_owner_department.code
+                            AS default_document_owner_department_code,
+                        default_document_owner_department.name
+                            AS default_document_owner_department_name,
+                        default_document_owner_department.status
+                            AS default_document_owner_department_status,
+                        default_document_owner_department.is_default
+                            AS default_document_owner_department_is_default,
                         {_knowledge_base_access_rules_sql("knowledge_bases.id")},
-                        config_scope_id,
-                        policy_version
+                        knowledge_bases.config_scope_id,
+                        knowledge_bases.policy_version
                     FROM knowledge_bases
-                    WHERE id = CAST(:kb_id AS uuid)
-                      AND enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND deleted_at IS NULL
-                      AND status != 'deleted'
+                    LEFT JOIN departments owner_department
+                      ON owner_department.id = knowledge_bases.owner_department_id
+                     AND owner_department.enterprise_id = knowledge_bases.enterprise_id
+                     AND owner_department.deleted_at IS NULL
+                    LEFT JOIN departments default_document_owner_department
+                      ON default_document_owner_department.id =
+                         knowledge_bases.default_document_owner_department_id
+                     AND default_document_owner_department.enterprise_id =
+                         knowledge_bases.enterprise_id
+                     AND default_document_owner_department.deleted_at IS NULL
+                    WHERE knowledge_bases.id = CAST(:kb_id AS uuid)
+                      AND knowledge_bases.enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND knowledge_bases.deleted_at IS NULL
+                      AND knowledge_bases.status != 'deleted'
                     LIMIT 1
                     """
                 ),
@@ -4179,12 +4677,14 @@ class AdminService:
                         d.owner_department_id::text AS owner_department_id,
                         d.visibility,
                         d.current_version_id::text AS current_version_id,
+                        dv.version_no AS current_version_no,
                         d.tags,
                         d.permission_snapshot_id::text AS permission_snapshot_id,
                         d.content_hash,
                         COALESCE(ps.policy_version, 1) AS policy_version
                     FROM documents d
                     LEFT JOIN permission_snapshots ps ON ps.id = d.permission_snapshot_id
+                    LEFT JOIN document_versions dv ON dv.id = d.current_version_id
                     WHERE d.id = CAST(:doc_id AS uuid)
                       AND d.enterprise_id = CAST(:enterprise_id AS uuid)
                       AND d.deleted_at IS NULL
@@ -4679,6 +5179,34 @@ class AdminService:
             enterprise_id=enterprise_id,
             user_id=user_id,
         )
+
+    def _ensure_actor_can_create_user_departments(
+        self,
+        actor_context: AdminActorContext | None,
+        departments: list[AdminDepartment],
+    ) -> None:
+        if actor_context is None:
+            return
+        if not _has_scope(actor_context.scopes, "user:manage"):
+            raise AdminServiceError(
+                "ADMIN_SCOPE_REQUIRED",
+                "user creation requires user:manage",
+                status_code=403,
+                details={"required_scope": "user:manage"},
+            )
+        if _actor_can_access_all_users(actor_context):
+            return
+        actor_department_ids = set(actor_context.department_ids)
+        outside_department_ids = [
+            department.id for department in departments if department.id not in actor_department_ids
+        ]
+        if outside_department_ids:
+            raise AdminServiceError(
+                "ADMIN_RESOURCE_FORBIDDEN",
+                "user can only be created in actor departments",
+                status_code=403,
+                details={"department_ids": outside_department_ids},
+            )
 
     def _ensure_actor_can_manage_departments(
         self,
@@ -5939,6 +6467,40 @@ def _role_from_mapping(row: Any) -> AdminRole:
     )
 
 
+def _role_list_item_from_mapping(row: Any) -> AdminRoleListItem:
+    return AdminRoleListItem(
+        id=row["role_id"],
+        code=row["code"],
+        name=row["name"],
+        scope_type=row["scope_type"],
+        is_builtin=bool(row["is_builtin"]),
+        status=row["status"],
+    )
+
+
+def _assignable_role_option_from_mapping(row: Any) -> AdminAssignableRoleOption:
+    role = _role_from_mapping(row)
+    return AdminAssignableRoleOption(
+        id=role.id,
+        code=role.code,
+        name=role.name,
+        scope_type=role.scope_type,
+        status=role.status,
+        risk_level="high" if _is_high_risk_role(role) else "low",
+    )
+
+
+def _user_list_item_from_mapping(row: Any) -> AdminUserListItem:
+    return AdminUserListItem(
+        id=row["user_id"],
+        username=row["username"],
+        name=row["display_name"],
+        status=row["status"],
+        department_names=tuple(str(item) for item in row["department_names"] or []),
+        role_names=tuple(str(item) for item in row["role_names"] or []),
+    )
+
+
 def _department_from_mapping(row: Any) -> AdminDepartment:
     return AdminDepartment(
         id=row["department_id"],
@@ -5947,6 +6509,24 @@ def _department_from_mapping(row: Any) -> AdminDepartment:
         status=row["status"],
         is_default=bool(row["is_default"]),
         org_version=int(row["org_version"]) if "org_version" in row else 0,
+    )
+
+
+def _department_list_item_from_mapping(row: Any) -> AdminDepartmentListItem:
+    return AdminDepartmentListItem(
+        id=row["department_id"],
+        name=row["name"],
+        status=row["status"],
+        is_default=bool(row["is_default"]),
+    )
+
+
+def _department_option_from_mapping(row: Any) -> AdminDepartmentOption:
+    return AdminDepartmentOption(
+        id=row["department_id"],
+        name=row["name"],
+        status=row["status"],
+        is_default=bool(row["is_default"]),
     )
 
 
@@ -5981,9 +6561,59 @@ def _knowledge_base_from_mapping(row: Any) -> AdminKnowledgeBase:
         kb_visibility=row["kb_visibility"],
         default_document_visibility=row["default_document_visibility"],
         default_document_owner_department_id=row["default_document_owner_department_id"],
+        owner_department=_knowledge_base_department_from_mapping(
+            row,
+            prefix="owner_department",
+            department_id_key="owner_department_id",
+        ),
+        default_document_owner_department=_knowledge_base_department_from_mapping(
+            row,
+            prefix="default_document_owner_department",
+            department_id_key="default_document_owner_department_id",
+        ),
         config_scope_id=row["config_scope_id"],
         policy_version=int(row["policy_version"]) if "policy_version" in row else 1,
         access_rules=_kb_access_rules_from_value(row.get("access_rules")),
+    )
+
+
+def _knowledge_base_list_item_from_mapping(row: Any) -> AdminKnowledgeBaseListItem:
+    return AdminKnowledgeBaseListItem(
+        id=row["kb_id"],
+        name=row["name"],
+        status=row["status"],
+        owner_department_id=row["owner_department_id"],
+        kb_visibility=row["kb_visibility"],
+        default_document_visibility=row["default_document_visibility"],
+        default_document_owner_department_id=row["default_document_owner_department_id"],
+        owner_department_name=row["owner_department_name"],
+        default_document_owner_department_name=row["default_document_owner_department_name"],
+    )
+
+
+def _knowledge_base_option_from_mapping(row: Any) -> AdminKnowledgeBaseOption:
+    return AdminKnowledgeBaseOption(
+        id=row["kb_id"],
+        name=row["name"],
+        status=row["status"],
+    )
+
+
+def _knowledge_base_department_from_mapping(
+    row: Any,
+    *,
+    prefix: str,
+    department_id_key: str,
+) -> AdminDepartment | None:
+    code_key = f"{prefix}_code"
+    if code_key not in row or row[code_key] is None:
+        return None
+    return AdminDepartment(
+        id=row[department_id_key],
+        code=row[code_key],
+        name=row[f"{prefix}_name"],
+        status=row[f"{prefix}_status"],
+        is_default=bool(row[f"{prefix}_is_default"]),
     )
 
 
@@ -6022,6 +6652,14 @@ def _folder_from_mapping(row: Any) -> AdminFolder:
     )
 
 
+def _folder_option_from_mapping(row: Any) -> AdminFolderOption:
+    return AdminFolderOption(
+        id=row["folder_id"],
+        name=row["name"],
+        status=row["status"],
+    )
+
+
 def _document_from_mapping(row: Any) -> AdminDocument:
     return AdminDocument(
         id=row["doc_id"],
@@ -6033,6 +6671,11 @@ def _document_from_mapping(row: Any) -> AdminDocument:
         owner_department_id=row["owner_department_id"],
         visibility=row["visibility"],
         current_version_id=row["current_version_id"],
+        current_version_no=(
+            int(row["current_version_no"])
+            if "current_version_no" in row and row["current_version_no"] is not None
+            else None
+        ),
         tags=tuple(str(item) for item in row["tags"] or []),
         permission_snapshot_id=row["permission_snapshot_id"],
         content_hash=row["content_hash"],
@@ -6093,6 +6736,7 @@ def _admin_chunk_from_mapping(row: Any) -> AdminChunk:
         page_start=_optional_int(row["page_start"]),
         page_end=_optional_int(row["page_end"]),
         status=row["status"],
+        ordinal=int(row["ordinal"]),
     )
 
 
@@ -6504,7 +7148,6 @@ def _actor_can_access_all_users(actor_context: AdminActorContext) -> bool:
     return (
         "*" in actor_context.scopes
         or "user:*" in actor_context.scopes
-        or "user:manage" in actor_context.scopes
     )
 
 

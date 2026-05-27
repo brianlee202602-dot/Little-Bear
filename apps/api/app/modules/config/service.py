@@ -21,6 +21,7 @@ from app.modules.config.schemas import (
     ConfigItem,
     ConfigValidationResult,
     ConfigVersion,
+    ConfigVersionList,
 )
 from app.modules.config.validator import ConfigSchemaValidator
 from app.shared.context import get_request_context
@@ -283,8 +284,17 @@ class ConfigService:
             version=version,
         )
 
-    def list_config_versions(self, session: Session, *, limit: int = 100) -> list[ConfigVersion]:
+    def list_config_versions(
+        self,
+        session: Session,
+        *,
+        page: int,
+        page_size: int,
+    ) -> ConfigVersionList:
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
         try:
+            total_row = session.execute(text("SELECT COUNT(*) AS total FROM config_versions")).one()
             rows = session.execute(
                 text(
                     """
@@ -295,17 +305,14 @@ class ConfigService:
                         cv.created_by::text AS created_by,
                         cv.created_at,
                         cv.updated_at,
-                        cv.activated_at,
-                        sc.value_json
+                        cv.activated_at
                     FROM config_versions cv
-                    LEFT JOIN system_configs sc
-                      ON sc.config_version_id = cv.id
-                     AND sc.key = 'active_config'
                     ORDER BY version DESC
                     LIMIT :limit
+                    OFFSET :offset
                     """
                 ),
-                {"limit": limit},
+                {"limit": page_size, "offset": (page - 1) * page_size},
             ).all()
         except SQLAlchemyError as exc:
             raise ConfigServiceError(
@@ -314,7 +321,10 @@ class ConfigService:
                 retryable=True,
                 details={"error_type": exc.__class__.__name__},
             ) from exc
-        return [_config_version_from_mapping(dict(row._mapping)) for row in rows]
+        return ConfigVersionList(
+            items=[_config_version_from_mapping(dict(row._mapping)) for row in rows],
+            total=int(total_row._mapping["total"]),
+        )
 
     def get_config_version(self, session: Session, version: int) -> ConfigVersion:
         row = self._load_config_version_payload_row(session, version)

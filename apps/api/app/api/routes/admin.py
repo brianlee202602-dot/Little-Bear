@@ -14,9 +14,14 @@ from app.api.schemas.admin import (
     AdminDocumentPreviewData,
     AdminDocumentPreviewResponse,
     AdminPasswordResetRequest,
+    AssignableRoleOptionData,
+    AssignableRoleOptionListResponse,
     DepartmentCreateRequest,
     DepartmentData,
+    DepartmentListItemData,
     DepartmentListResponse,
+    DepartmentOptionData,
+    DepartmentOptionListResponse,
     DepartmentPatchRequest,
     DepartmentResponse,
     DocumentData,
@@ -26,6 +31,8 @@ from app.api.schemas.admin import (
     FolderCreateRequest,
     FolderData,
     FolderListResponse,
+    FolderOptionData,
+    FolderOptionListResponse,
     FolderPatchRequest,
     FolderResponse,
     IndexCollectionHealthData,
@@ -43,19 +50,24 @@ from app.api.schemas.admin import (
     KnowledgeBaseAccessRuleData,
     KnowledgeBaseCreateRequest,
     KnowledgeBaseData,
+    KnowledgeBaseListItemData,
     KnowledgeBaseListResponse,
+    KnowledgeBaseOptionData,
+    KnowledgeBaseOptionListResponse,
     KnowledgeBasePatchRequest,
     KnowledgeBaseResponse,
     RoleBindingCreateRequest,
     RoleBindingData,
     RoleBindingListResponse,
     RoleData,
+    RoleListItemData,
     RoleListResponse,
     RoleResponse,
     UserCreateRequest,
     UserData,
     UserDepartmentsPutRequest,
     UserDepartmentsResponse,
+    UserListItemData,
     UserListResponse,
     UserPatchRequest,
     UserResponse,
@@ -71,20 +83,28 @@ from app.db.session import session_scope
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminAcceptedResult,
+    AdminAssignableRoleOption,
     AdminChunk,
     AdminDepartment,
+    AdminDepartmentListItem,
+    AdminDepartmentOption,
     AdminDocument,
     AdminDocumentPreview,
     AdminDocumentPreviewChunk,
     AdminDocumentVersion,
     AdminFolder,
+    AdminFolderOption,
     AdminIndexVersion,
     AdminKnowledgeBase,
     AdminKnowledgeBaseAccessRule,
     AdminKnowledgeBaseAccessRuleInput,
+    AdminKnowledgeBaseListItem,
+    AdminKnowledgeBaseOption,
     AdminRole,
     AdminRoleBinding,
+    AdminRoleListItem,
     AdminUser,
+    AdminUserListItem,
 )
 from app.modules.admin.service import AdminActorContext, AdminService, RoleBindingInput
 from app.modules.auth.errors import AuthServiceError
@@ -138,7 +158,7 @@ async def list_users(
         return _database_error_response(exc, stage="admin_user_list")
     return UserListResponse(
         request_id=_request_id(),
-        data=[_user_data(user) for user in result.items],
+        data=[_user_list_item_data(user) for user in result.items],
         pagination=PaginationData(page=page, page_size=page_size, total=result.total),
     )
 
@@ -204,7 +224,41 @@ async def list_departments(
         return _database_error_response(exc, stage="admin_department_list")
     return DepartmentListResponse(
         request_id=_request_id(),
-        data=[_department_data(department) for department in result.items],
+        data=[_department_list_item_data(department) for department in result.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=result.total),
+    )
+
+
+@router.get("/department-options", response_model=DepartmentOptionListResponse)
+async def list_department_options(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=200),
+    keyword: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    authorization: str | None = Header(default=None),
+) -> DepartmentOptionListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="org:read")
+            result = service.list_department_options(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                status=status_filter,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_department_options")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_department_options")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_department_options")
+    return DepartmentOptionListResponse(
+        request_id=_request_id(),
+        data=[_department_option_data(department) for department in result.items],
         pagination=PaginationData(page=page, page_size=page_size, total=result.total),
     )
 
@@ -559,7 +613,44 @@ async def list_knowledge_bases(
         return _database_error_response(exc, stage="admin_knowledge_base_list")
     return KnowledgeBaseListResponse(
         request_id=_request_id(),
-        data=[_knowledge_base_data(knowledge_base) for knowledge_base in result.items],
+        data=[
+            _knowledge_base_list_item_data(knowledge_base) for knowledge_base in result.items
+        ],
+        pagination=PaginationData(page=page, page_size=page_size, total=result.total),
+    )
+
+
+@router.get("/knowledge-base-options", response_model=KnowledgeBaseOptionListResponse)
+async def list_knowledge_base_options(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=200),
+    keyword: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    authorization: str | None = Header(default=None),
+) -> KnowledgeBaseOptionListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="knowledge_base:manage")
+            result = service.list_knowledge_base_options(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                status=status_filter,
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_knowledge_base_options")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_knowledge_base_options")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_knowledge_base_options")
+    return KnowledgeBaseOptionListResponse(
+        request_id=_request_id(),
+        data=[_knowledge_base_option_data(knowledge_base) for knowledge_base in result.items],
         pagination=PaginationData(page=page, page_size=page_size, total=result.total),
     )
 
@@ -751,6 +842,46 @@ async def list_folders(
     )
 
 
+@router.get(
+    "/knowledge-bases/{kb_id}/folder-options",
+    response_model=FolderOptionListResponse,
+)
+async def list_folder_options(
+    kb_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=200),
+    keyword: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    authorization: str | None = Header(default=None),
+) -> FolderOptionListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="folder:manage")
+            result = service.list_folder_options(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                kb_id=kb_id,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                status=status_filter,
+                actor_context=_actor_context(auth_context),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_folder_options")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_folder_options")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_folder_options")
+    return FolderOptionListResponse(
+        request_id=_request_id(),
+        data=[_folder_option_data(folder) for folder in result.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=result.total),
+    )
+
+
 @router.post(
     "/knowledge-bases/{kb_id}/folders",
     status_code=status.HTTP_201_CREATED,
@@ -938,6 +1069,8 @@ async def get_document(
 @router.get("/documents/{doc_id}/versions", response_model=DocumentVersionListResponse)
 async def list_document_versions(
     doc_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
     authorization: str | None = Header(default=None),
 ) -> DocumentVersionListResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
@@ -949,6 +1082,8 @@ async def list_document_versions(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
                 doc_id=doc_id,
+                page=page,
+                page_size=page_size,
                 actor_context=_actor_context(auth_context),
             )
     except AuthServiceError as exc:
@@ -959,13 +1094,18 @@ async def list_document_versions(
         return _database_error_response(exc, stage="admin_document_version_list")
     return DocumentVersionListResponse(
         request_id=_request_id(),
-        data=[_document_version_data(version) for version in versions],
+        data=[_document_version_data(version) for version in versions.items],
+        pagination={"page": page, "page_size": page_size, "total": versions.total},
     )
 
 
 @router.get("/documents/{doc_id}/chunks", response_model=ChunkListResponse)
 async def list_document_chunks(
     doc_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    keyword: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
     authorization: str | None = Header(default=None),
 ) -> ChunkListResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
@@ -977,6 +1117,10 @@ async def list_document_chunks(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
                 doc_id=doc_id,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                status=status_filter,
                 actor_context=_actor_context(auth_context),
             )
     except AuthServiceError as exc:
@@ -987,13 +1131,16 @@ async def list_document_chunks(
         return _database_error_response(exc, stage="admin_document_chunk_list")
     return ChunkListResponse(
         request_id=_request_id(),
-        data=[_admin_chunk_data(chunk) for chunk in chunks],
+        data=[_admin_chunk_data(chunk) for chunk in chunks.items],
+        pagination={"page": page, "page_size": page_size, "total": chunks.total},
     )
 
 
 @router.get("/documents/{doc_id}/preview", response_model=AdminDocumentPreviewResponse)
 async def get_document_preview(
     doc_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
     authorization: str | None = Header(default=None),
 ) -> AdminDocumentPreviewResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
@@ -1005,6 +1152,8 @@ async def get_document_preview(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
                 doc_id=doc_id,
+                page=page,
+                page_size=page_size,
                 actor_context=_actor_context(auth_context),
             )
     except AuthServiceError as exc:
@@ -1016,6 +1165,7 @@ async def get_document_preview(
     return AdminDocumentPreviewResponse(
         request_id=_request_id(),
         data=_admin_document_preview_data(preview),
+        pagination={"page": page, "page_size": page_size, "total": preview.total},
     )
 
 
@@ -1378,6 +1528,11 @@ async def delete_document(
 
 @router.get("/roles", response_model=RoleListResponse)
 async def list_roles(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=200),
+    keyword: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    scope_type: str | None = Query(default=None),
     authorization: str | None = Header(default=None),
 ) -> RoleListResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
@@ -1385,14 +1540,62 @@ async def list_roles(
     try:
         with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="role:read")
-            roles = service.list_roles(session, enterprise_id=auth_context.user.enterprise_id)
+            result = service.list_roles(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                status=status_filter,
+                scope_type=scope_type,
+            )
     except AuthServiceError as exc:
         return _auth_error_response(exc, stage="admin_role_list")
     except AdminServiceError as exc:
         return _admin_error_response(exc, stage="admin_role_list")
     except SQLAlchemyError as exc:
         return _database_error_response(exc, stage="admin_role_list")
-    return RoleListResponse(request_id=_request_id(), data=[_role_data(role) for role in roles])
+    return RoleListResponse(
+        request_id=_request_id(),
+        data=[_role_list_item_data(role) for role in result.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=result.total),
+    )
+
+
+@router.get("/assignable-role-options", response_model=AssignableRoleOptionListResponse)
+async def list_assignable_role_options(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=200),
+    keyword: str | None = Query(default=None),
+    status_filter: str | None = Query(default="active", alias="status"),
+    scope_type: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+) -> AssignableRoleOptionListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = AdminService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="role:read")
+            result = service.list_assignable_role_options(
+                session,
+                enterprise_id=auth_context.user.enterprise_id,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                status=status_filter,
+                scope_type=scope_type,
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="admin_assignable_role_options")
+    except AdminServiceError as exc:
+        return _admin_error_response(exc, stage="admin_assignable_role_options")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="admin_assignable_role_options")
+    return AssignableRoleOptionListResponse(
+        request_id=_request_id(),
+        data=[_assignable_role_option_data(role) for role in result.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=result.total),
+    )
 
 
 @router.get("/roles/{role_id}", response_model=RoleResponse)
@@ -1602,6 +1805,17 @@ def _user_data(user: AdminUser) -> UserData:
     )
 
 
+def _user_list_item_data(user: AdminUserListItem) -> UserListItemData:
+    return UserListItemData(
+        id=user.id,
+        username=user.username,
+        name=user.name,
+        status=user.status,
+        department_names=list(user.department_names),
+        role_names=list(user.role_names),
+    )
+
+
 def _department_data(department: AdminDepartment) -> DepartmentData:
     return DepartmentData(
         id=department.id,
@@ -1613,20 +1827,78 @@ def _department_data(department: AdminDepartment) -> DepartmentData:
     )
 
 
+def _department_list_item_data(department: AdminDepartmentListItem) -> DepartmentListItemData:
+    return DepartmentListItemData(
+        id=department.id,
+        name=department.name,
+        status=department.status,
+        is_default=department.is_default,
+    )
+
+
+def _department_option_data(department: AdminDepartmentOption) -> DepartmentOptionData:
+    return DepartmentOptionData(
+        id=department.id,
+        name=department.name,
+        status=department.status,
+        is_default=department.is_default,
+    )
+
+
 def _knowledge_base_data(knowledge_base: AdminKnowledgeBase) -> KnowledgeBaseData:
     return KnowledgeBaseData(
         id=knowledge_base.id,
         name=knowledge_base.name,
         status=knowledge_base.status,
         owner_department_id=knowledge_base.owner_department_id,
+        owner_department=(
+            _department_data(knowledge_base.owner_department)
+            if knowledge_base.owner_department
+            else None
+        ),
         kb_visibility=knowledge_base.kb_visibility,
         default_document_visibility=knowledge_base.default_document_visibility,
         default_document_owner_department_id=knowledge_base.default_document_owner_department_id,
+        default_document_owner_department=(
+            _department_data(knowledge_base.default_document_owner_department)
+            if knowledge_base.default_document_owner_department
+            else None
+        ),
         access_rules=[
             _knowledge_base_access_rule_data(rule) for rule in knowledge_base.access_rules
         ],
         config_scope_id=knowledge_base.config_scope_id,
         policy_version=knowledge_base.policy_version,
+    )
+
+
+def _knowledge_base_list_item_data(
+    knowledge_base: AdminKnowledgeBaseListItem,
+) -> KnowledgeBaseListItemData:
+    return KnowledgeBaseListItemData(
+        id=knowledge_base.id,
+        name=knowledge_base.name,
+        status=knowledge_base.status,
+        owner_department_id=knowledge_base.owner_department_id,
+        owner_department_name=knowledge_base.owner_department_name,
+        kb_visibility=knowledge_base.kb_visibility,
+        default_document_visibility=knowledge_base.default_document_visibility,
+        default_document_owner_department_id=(
+            knowledge_base.default_document_owner_department_id
+        ),
+        default_document_owner_department_name=(
+            knowledge_base.default_document_owner_department_name
+        ),
+    )
+
+
+def _knowledge_base_option_data(
+    knowledge_base: AdminKnowledgeBaseOption,
+) -> KnowledgeBaseOptionData:
+    return KnowledgeBaseOptionData(
+        id=knowledge_base.id,
+        name=knowledge_base.name,
+        status=knowledge_base.status,
     )
 
 
@@ -1654,6 +1926,14 @@ def _folder_data(folder: AdminFolder) -> FolderData:
     )
 
 
+def _folder_option_data(folder: AdminFolderOption) -> FolderOptionData:
+    return FolderOptionData(
+        id=folder.id,
+        name=folder.name,
+        status=folder.status,
+    )
+
+
 def _document_data(document: AdminDocument) -> DocumentData:
     return DocumentData(
         id=document.id,
@@ -1665,6 +1945,7 @@ def _document_data(document: AdminDocument) -> DocumentData:
         owner_department_id=document.owner_department_id,
         visibility=document.visibility,
         current_version_id=document.current_version_id,
+        current_version_no=document.current_version_no,
     )
 
 
@@ -1747,6 +2028,7 @@ def _admin_chunk_data(chunk: AdminChunk) -> ChunkData:
         page_start=chunk.page_start,
         page_end=chunk.page_end,
         status=chunk.status,
+        ordinal=chunk.ordinal,
     )
 
 
@@ -1811,6 +2093,30 @@ def _role_data(role: AdminRole) -> RoleData:
         is_builtin=role.is_builtin,
         status=role.status,
         scopes=list(role.scopes),
+    )
+
+
+def _role_list_item_data(role: AdminRoleListItem) -> RoleListItemData:
+    return RoleListItemData(
+        id=role.id,
+        code=role.code,
+        name=role.name,
+        scope_type=role.scope_type,
+        is_builtin=role.is_builtin,
+        status=role.status,
+    )
+
+
+def _assignable_role_option_data(
+    role: AdminAssignableRoleOption,
+) -> AssignableRoleOptionData:
+    return AssignableRoleOptionData(
+        id=role.id,
+        code=role.code,
+        name=role.name,
+        scope_type=role.scope_type,
+        status=role.status,
+        risk_level=role.risk_level,
     )
 
 

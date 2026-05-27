@@ -4,7 +4,12 @@ from datetime import UTC, datetime
 
 from app.main import create_app
 from app.modules.auth.schemas import AuthContext, AuthRole, AuthUser
-from app.modules.config.schemas import ConfigItem, ConfigValidationResult, ConfigVersion
+from app.modules.config.schemas import (
+    ConfigItem,
+    ConfigValidationResult,
+    ConfigVersion,
+    ConfigVersionList,
+)
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
 
@@ -199,6 +204,49 @@ def test_config_validation_route_returns_validation_result(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["data"]["valid"] is True
+
+
+def test_config_version_list_route_returns_paginated_summary_without_config(monkeypatch) -> None:
+    seen: dict[str, int] = {}
+
+    def list_versions(_self, _session, *, page, page_size):
+        seen["page"] = page
+        seen["page_size"] = page_size
+        return ConfigVersionList(
+            items=[
+                ConfigVersion(
+                    version=3,
+                    status="draft",
+                    risk_level="medium",
+                    created_by="11111111-1111-1111-1111-111111111111",
+                    config={"auth": {"jwt_issuer": "must-not-leak"}},
+                    created_at=datetime(2026, 5, 22, tzinfo=UTC),
+                    updated_at=datetime(2026, 5, 22, tzinfo=UTC),
+                )
+            ],
+            total=7,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.config.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+    monkeypatch.setattr("app.api.routes.config.ConfigService.list_config_versions", list_versions)
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/config-versions?page=2&page_size=5",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen == {"page": 2, "page_size": 5}
+    payload = response.json()
+    assert payload["pagination"] == {"page": 2, "page_size": 5, "total": 7}
+    assert payload["data"][0]["version"] == 3
+    assert "config" not in payload["data"][0]
 
 
 def test_config_version_create_route_requires_confirmation(monkeypatch) -> None:

@@ -2,6 +2,7 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, ""
 
 export interface ApiErrorPayload {
   request_id?: string;
+  debug_id?: string;
   error_code?: string;
   message?: string;
   stage?: string;
@@ -33,31 +34,11 @@ export interface TokenResponse {
   expires_in: number;
 }
 
-export interface CurrentUserRole {
-  id: string;
-  code: string;
-  name: string;
-  scope_type: string;
-  is_builtin: boolean;
-  status: string;
-}
-
-export interface CurrentUserDepartment {
-  id: string;
-  code: string;
-  name: string;
-  status: string;
-  is_primary: boolean;
-}
-
 export interface CurrentUserData {
   id: string;
   username: string;
   name: string;
   status: string;
-  departments: CurrentUserDepartment[];
-  roles: CurrentUserRole[];
-  scopes: string[];
 }
 
 export interface CurrentUserResponse {
@@ -75,12 +56,6 @@ export interface KnowledgeBaseData {
   id: string;
   name: string;
   status: "active" | "disabled" | "archived";
-  owner_department_id: string;
-  kb_visibility: "enterprise" | "department_acl" | "private";
-  default_document_visibility: "department" | "enterprise";
-  default_document_owner_department_id: string;
-  config_scope_id: string | null;
-  policy_version: number;
 }
 
 export interface KnowledgeBaseListResponse {
@@ -103,8 +78,18 @@ export interface DocumentData {
 
 export interface DocumentListResponse {
   request_id: string;
-  data: DocumentData[];
+  data: DocumentListItemData[];
   pagination: PaginationData;
+}
+
+export interface DocumentListItemData {
+  id: string;
+  title: string;
+  lifecycle_status: string;
+  index_status: string;
+  updated_at: string | null;
+  can_view: boolean;
+  can_cite: boolean;
 }
 
 export interface DocumentResponse {
@@ -122,6 +107,7 @@ export interface DocumentVersionData {
 export interface DocumentVersionListResponse {
   request_id: string;
   data: DocumentVersionData[];
+  pagination: PaginationData;
 }
 
 export interface ChunkData {
@@ -132,11 +118,13 @@ export interface ChunkData {
   page_start: number | null;
   page_end: number | null;
   status: string;
+  ordinal: number;
 }
 
 export interface ChunkListResponse {
   request_id: string;
   data: ChunkData[];
+  pagination: PaginationData;
 }
 
 export interface DocumentPreviewData {
@@ -201,7 +189,7 @@ export interface CitationData {
 }
 
 export interface QueryResponse {
-  request_id: string;
+  debug_id: string;
   conversation_id: string | null;
   message_id: string | null;
   answer: string;
@@ -209,15 +197,13 @@ export interface QueryResponse {
   confidence: QueryConfidence;
   degraded: boolean;
   degrade_reason: string | null;
-  trace_id: string;
 }
 
 export type QueryStreamMetadata = Pick<
   QueryResponse,
-  | "request_id"
+  | "debug_id"
   | "conversation_id"
   | "message_id"
-  | "trace_id"
   | "confidence"
   | "degraded"
   | "degrade_reason"
@@ -254,8 +240,7 @@ export interface QueryMessageData {
   confidence: QueryConfidence | null;
   degraded: boolean;
   degrade_reason: string | null;
-  request_id: string | null;
-  trace_id: string | null;
+  debug_id: string | null;
   created_at: string | null;
   updated_at: string | null;
 }
@@ -270,6 +255,7 @@ export interface QueryConversationResponse {
   request_id: string;
   data: QueryConversationData;
   messages: QueryMessageData[];
+  messages_pagination: PaginationData;
 }
 
 export async function getLiveStatus(): Promise<unknown> {
@@ -317,9 +303,22 @@ export async function getCurrentUser(accessToken: string): Promise<CurrentUserRe
   );
 }
 
-export async function listKnowledgeBases(accessToken: string): Promise<KnowledgeBaseListResponse> {
+export async function listKnowledgeBases(
+  accessToken: string,
+  filters: { page?: number; page_size?: number; keyword?: string; status?: string } = {},
+): Promise<KnowledgeBaseListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
   return requestJson<KnowledgeBaseListResponse>(
-    "/internal/v1/knowledge-bases?page=1&page_size=100",
+    `/internal/v1/knowledge-bases?${params.toString()}`,
     {
       method: "GET",
     },
@@ -330,9 +329,20 @@ export async function listKnowledgeBases(accessToken: string): Promise<Knowledge
 export async function listDocuments(
   kbId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number; keyword?: string; status?: string } = {},
 ): Promise<DocumentListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
   return requestJson<DocumentListResponse>(
-    `/internal/v1/knowledge-bases/${encodeURIComponent(kbId)}/documents?page=1&page_size=100`,
+    `/internal/v1/knowledge-bases/${encodeURIComponent(kbId)}/documents?${params.toString()}`,
     {
       method: "GET",
     },
@@ -356,9 +366,14 @@ export async function getDocument(
 export async function listDocumentVersions(
   documentId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<DocumentVersionListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
   return requestJson<DocumentVersionListResponse>(
-    `/internal/v1/documents/${encodeURIComponent(documentId)}/versions`,
+    `/internal/v1/documents/${encodeURIComponent(documentId)}/versions?${params.toString()}`,
     {
       method: "GET",
     },
@@ -369,9 +384,20 @@ export async function listDocumentVersions(
 export async function listDocumentChunks(
   documentId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number; keyword?: string; status?: string } = {},
 ): Promise<ChunkListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
   return requestJson<ChunkListResponse>(
-    `/internal/v1/documents/${encodeURIComponent(documentId)}/chunks`,
+    `/internal/v1/documents/${encodeURIComponent(documentId)}/chunks?${params.toString()}`,
     {
       method: "GET",
     },
@@ -408,9 +434,14 @@ export async function getCitationSource(
 
 export async function listQueryConversations(
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<QueryConversationListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
   return requestJson<QueryConversationListResponse>(
-    "/internal/v1/query-conversations?page=1&page_size=50",
+    `/internal/v1/query-conversations?${params.toString()}`,
     {
       method: "GET",
     },
@@ -435,9 +466,14 @@ export async function createQueryConversation(
 export async function getQueryConversation(
   conversationId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<QueryConversationResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
   return requestJson<QueryConversationResponse>(
-    `/internal/v1/query-conversations/${encodeURIComponent(conversationId)}`,
+    `/internal/v1/query-conversations/${encodeURIComponent(conversationId)}?${params.toString()}`,
     {
       method: "GET",
     },

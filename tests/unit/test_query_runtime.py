@@ -52,6 +52,43 @@ def test_build_query_service_wires_llm_provider_from_active_config(monkeypatch) 
     assert "secret://rerank" in secrets
 
 
+def test_build_query_service_falls_back_to_default_model_secret_refs(monkeypatch) -> None:
+    secrets: list[str] = []
+    config = _active_config()
+    model_gateway = config["model_gateway"]
+    assert isinstance(model_gateway, dict)
+    model_gateway["auth_token_ref"] = None
+    providers = model_gateway["providers"]
+    assert isinstance(providers, dict)
+    for provider in providers.values():
+        assert isinstance(provider, dict)
+        provider["auth_token_ref"] = None
+
+    monkeypatch.setattr(
+        "app.modules.query.runtime.ConfigService.load_active_config",
+        lambda *_args, **_kwargs: SimpleNamespace(config=config),
+    )
+
+    def _get_secret(_self, _session, *, secret_ref: str) -> str:
+        secrets.append(secret_ref)
+        return f"value-for-{secret_ref}"
+
+    monkeypatch.setattr(
+        "app.modules.query.runtime.SecretStoreService.get_secret_value",
+        _get_secret,
+    )
+
+    service = build_query_service(object())
+
+    assert service.answer_service.chat_client is not None
+    assert service.answer_service.chat_client.auth_token == (
+        "value-for-secret://rag/model/llm-api-key"
+    )
+    assert "secret://rag/model/embedding-api-key" in secrets
+    assert "secret://rag/model/rerank-api-key" in secrets
+    assert "secret://rag/model/llm-api-key" in secrets
+
+
 def _active_config() -> dict[str, object]:
     return {
         "vector_store": {

@@ -187,6 +187,7 @@ def test_department_admin_builtin_role_includes_department_read_scopes() -> None
 
     assert "department:*" in scopes
     assert "user:read" in scopes
+    assert "user:manage" in scopes
     assert "knowledge_base:read" in scopes
     assert "document:read" in scopes
     assert "rag:query" in scopes

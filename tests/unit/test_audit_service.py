@@ -77,7 +77,9 @@ def _query_row() -> dict[str, Any]:
         "request_id": "req_query",
         "trace_id": "trace_query",
         "user_id": "11111111-1111-1111-1111-111111111111",
+        "user_display_name": "系统管理员",
         "kb_ids": ["22222222-2222-2222-2222-222222222222"],
+        "knowledge_base_names": ["员工手册"],
         "query_hash": "hash_query",
         "status": "success",
         "degraded": False,
@@ -167,10 +169,13 @@ def test_audit_service_lists_query_logs_with_diagnostic_filters() -> None:
 
     assert result.total == 1
     assert result.items[0].request_id == "req_query"
+    assert result.items[0].user_display_name == "系统管理员"
+    assert result.items[0].knowledge_base_names == ("员工手册",)
     assert result.items[0].kb_ids == ("22222222-2222-2222-2222-222222222222",)
     sql, params = session.statements[0]
-    assert "FROM query_logs" in sql
-    assert "CAST(:kb_id AS uuid) = ANY(kb_ids)" in sql
+    assert "FROM query_logs q" in sql
+    assert "LEFT JOIN users u" in sql
+    assert "CAST(:kb_id AS uuid) = ANY(q.kb_ids)" in sql
     assert params["enterprise_id"] == "33333333-3333-3333-3333-333333333333"
     assert params["trace_id"] == "trace_query"
     assert params["degraded"] is False
@@ -184,6 +189,8 @@ def test_audit_service_gets_single_query_log() -> None:
     )
 
     assert log.id == "query_log_1"
+    assert log.user_display_name == "系统管理员"
+    assert log.knowledge_base_names == ("员工手册",)
     assert log.candidate_count == 5
 
 
@@ -200,8 +207,25 @@ def test_audit_service_lists_model_call_logs_with_trace_filter() -> None:
 
     assert result.total == 1
     assert result.items[0].model_name == "qwen2.5"
-    assert result.items[0].token_usage_json == {"prompt_tokens": 10, "completion_tokens": 20}
     sql, params = session.statements[0]
     assert "FROM model_call_logs" in sql
-    assert "(model_name ILIKE :model OR model_route_hash ILIKE :model)" in sql
+    assert "(model_name ILIKE :model OR COALESCE(model_version, '') ILIKE :model)" in sql
+    assert "token_usage_json" not in sql
+    assert "prompt_hash" not in sql
+    assert "input_hash" not in sql
+    assert "output_hash" not in sql
+    assert "model_route_hash" not in sql.split("FROM model_call_logs", maxsplit=1)[0]
     assert params["model"] == "%qwen%"
+
+
+def test_audit_service_gets_single_model_call_log() -> None:
+    log = AuditService().get_model_call_log(
+        _FakeSession(),
+        enterprise_id="33333333-3333-3333-3333-333333333333",
+        model_call_log_id="model_call_1",
+    )
+
+    assert log.id == "model_call_1"
+    assert log.trace_id == "trace_query"
+    assert log.token_usage_json == {"prompt_tokens": 10, "completion_tokens": 20}
+    assert log.prompt_hash == "hash_prompt"

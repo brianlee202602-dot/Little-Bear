@@ -246,8 +246,7 @@ def _run_authenticated_smoke(
     recorder.step(
         "query",
         {
-            "request_id": query_response.get("request_id"),
-            "trace_id": query_response.get("trace_id"),
+            "debug_id": query_response.get("debug_id"),
             "degraded": query_response.get("degraded"),
             "degrade_reason": query_response.get("degrade_reason"),
             "citation_count": len(citations),
@@ -257,7 +256,7 @@ def _run_authenticated_smoke(
     print(
         "query=ok "
         f"degraded={query_response.get('degraded')} citations={len(citations)} "
-        f"trace_id={query_response.get('trace_id')}"
+        f"debug_id={query_response.get('debug_id')}"
     )
     if citations:
         first_citation = _object(citations[0], "queries.citations[0]")

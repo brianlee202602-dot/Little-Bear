@@ -55,6 +55,8 @@ class QueryLog:
     citation_count: int
     error_code: str | None
     created_at: datetime | None = None
+    user_display_name: str | None = None
+    knowledge_base_names: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

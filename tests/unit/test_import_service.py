@@ -64,6 +64,8 @@ _ENTERPRISE_ID = "33333333-3333-3333-3333-333333333333"
 _USER_ID = "11111111-1111-1111-1111-111111111111"
 _KB_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _DEPARTMENT_ID = "22222222-2222-2222-2222-222222222222"
+_OTHER_DEPARTMENT_ID = "77777777-7777-7777-7777-777777777777"
+_UNRELATED_DEPARTMENT_ID = "88888888-8888-8888-8888-888888888888"
 
 
 def _actor() -> ImportActorContext:
@@ -72,6 +74,16 @@ def _actor() -> ImportActorContext:
         scopes=("document:import", "import_job:read:self", "import_job:manage:self"),
         department_ids=(_DEPARTMENT_ID,),
         can_import_all_knowledge_bases=True,
+    )
+
+
+def _kb_scoped_actor() -> ImportActorContext:
+    return ImportActorContext(
+        user_id=_USER_ID,
+        scopes=("document:import", "import_job:read:self", "import_job:manage:self"),
+        department_ids=(_DEPARTMENT_ID,),
+        knowledge_base_ids=(_KB_ID,),
+        can_import_all_knowledge_bases=False,
     )
 
 
@@ -214,6 +226,116 @@ def test_create_document_import_rejects_permission_outside_parent_kb() -> None:
     assert exc_info.value.status_code == 409
     assert exc_info.value.details["kb_owner_department_id"] == _DEPARTMENT_ID
     assert exc_info.value.details["document_owner_department_id"] == target_department_id
+
+
+def test_create_document_import_allows_kb_admin_to_use_default_document_owner(
+    monkeypatch,
+) -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_Row(
+                {
+                    "kb_id": _KB_ID,
+                    "owner_department_id": _OTHER_DEPARTMENT_ID,
+                    "kb_visibility": "enterprise",
+                    "default_document_visibility": "department",
+                    "default_document_owner_department_id": _OTHER_DEPARTMENT_ID,
+                    "access_rules": [],
+                    "status": "active",
+                    "policy_version": 1,
+                }
+            )
+        ),
+        _Result(
+            one_or_none=_Row({"department_id": _OTHER_DEPARTMENT_ID, "status": "active"})
+        ),
+    ]
+    service = ImportService()
+    monkeypatch.setattr(service, "_load_permission_version", lambda *_args: 9)
+    monkeypatch.setattr(
+        service,
+        "_replace_resource_policy",
+        lambda *_args, **_kwargs: "66666666-6666-6666-6666-666666666666",
+    )
+    monkeypatch.setattr(
+        service,
+        "_insert_permission_snapshot",
+        lambda *_args, **_kwargs: {
+            "snapshot_id": "77777777-7777-7777-7777-777777777777",
+            "payload_hash": "hash_1",
+        },
+    )
+    monkeypatch.setattr(service, "_insert_audit_log", lambda *_args, **_kwargs: None)
+
+    job = service.create_document_import(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        kb_id=_KB_ID,
+        actor_user_id=_USER_ID,
+        job_type="metadata_batch",
+        items=[DocumentImportItem(title="董事会纪要")],
+        owner_department_id=_OTHER_DEPARTMENT_ID,
+        visibility="department",
+        actor_context=_kb_scoped_actor(),
+    )
+
+    assert job.status == "queued"
+    document_insert = next(
+        params
+        for statement, params in session.executed
+        if "INSERT INTO documents" in statement
+    )
+    assert document_insert["owner_department_id"] == _OTHER_DEPARTMENT_ID
+    job_insert = next(
+        params
+        for statement, params in session.executed
+        if "INSERT INTO import_jobs" in statement
+    )
+    request_json = json.loads(job_insert["request_json"])
+    assert request_json["owner_department_id"] == _OTHER_DEPARTMENT_ID
+
+
+def test_create_document_import_rejects_kb_admin_arbitrary_foreign_owner() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            one_or_none=_Row(
+                {
+                    "kb_id": _KB_ID,
+                    "owner_department_id": _OTHER_DEPARTMENT_ID,
+                    "kb_visibility": "enterprise",
+                    "default_document_visibility": "department",
+                    "default_document_owner_department_id": _OTHER_DEPARTMENT_ID,
+                    "access_rules": [],
+                    "status": "active",
+                    "policy_version": 1,
+                }
+            )
+        ),
+        _Result(
+            one_or_none=_Row(
+                {"department_id": _UNRELATED_DEPARTMENT_ID, "status": "active"}
+            )
+        ),
+    ]
+
+    with pytest.raises(ImportServiceError) as exc_info:
+        ImportService().create_document_import(
+            session,
+            enterprise_id=_ENTERPRISE_ID,
+            kb_id=_KB_ID,
+            actor_user_id=_USER_ID,
+            job_type="metadata_batch",
+            items=[DocumentImportItem(title="任意部门文档")],
+            owner_department_id=_UNRELATED_DEPARTMENT_ID,
+            visibility="department",
+            actor_context=_kb_scoped_actor(),
+        )
+
+    assert exc_info.value.error_code == "IMPORT_OWNER_DEPARTMENT_DENIED"
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.details["owner_department_id"] == _UNRELATED_DEPARTMENT_ID
 
 
 def test_create_upload_import_stores_source_object_and_records_object_key(monkeypatch) -> None:

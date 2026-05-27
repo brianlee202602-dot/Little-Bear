@@ -152,8 +152,7 @@ def _run_case(
         _validate_query_response(query_case, response, citations)
         result.update(
             {
-                "request_id": response.get("request_id"),
-                "trace_id": response.get("trace_id"),
+                "debug_id": response.get("debug_id"),
                 "degraded": response.get("degraded"),
                 "degrade_reason": response.get("degrade_reason"),
                 "confidence": response.get("confidence"),

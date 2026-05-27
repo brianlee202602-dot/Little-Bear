@@ -30,6 +30,38 @@ class AdminRole:
 
 
 @dataclass(frozen=True)
+class AdminRoleListItem:
+    id: str
+    code: str
+    name: str
+    scope_type: str
+    is_builtin: bool
+    status: str
+
+
+@dataclass(frozen=True)
+class AdminRoleList:
+    items: list[AdminRoleListItem]
+    total: int
+
+
+@dataclass(frozen=True)
+class AdminAssignableRoleOption:
+    id: str
+    code: str
+    name: str
+    scope_type: str
+    status: str
+    risk_level: str
+
+
+@dataclass(frozen=True)
+class AdminAssignableRoleOptionList:
+    items: list[AdminAssignableRoleOption]
+    total: int
+
+
+@dataclass(frozen=True)
 class AdminUser:
     id: str
     username: str
@@ -44,14 +76,46 @@ class AdminUser:
 
 
 @dataclass(frozen=True)
+class AdminUserListItem:
+    id: str
+    username: str
+    name: str
+    status: str
+    department_names: tuple[str, ...] = field(default_factory=tuple)
+    role_names: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class AdminUserList:
-    items: list[AdminUser]
+    items: list[AdminUserListItem]
     total: int
 
 
 @dataclass(frozen=True)
+class AdminDepartmentListItem:
+    id: str
+    name: str
+    status: str
+    is_default: bool = False
+
+
+@dataclass(frozen=True)
 class AdminDepartmentList:
-    items: list[AdminDepartment]
+    items: list[AdminDepartmentListItem]
+    total: int
+
+
+@dataclass(frozen=True)
+class AdminDepartmentOption:
+    id: str
+    name: str
+    status: str
+    is_default: bool = False
+
+
+@dataclass(frozen=True)
+class AdminDepartmentOptionList:
+    items: list[AdminDepartmentOption]
     total: int
 
 
@@ -78,14 +142,42 @@ class AdminKnowledgeBase:
     kb_visibility: str
     default_document_visibility: str
     default_document_owner_department_id: str
+    owner_department: AdminDepartment | None = None
+    default_document_owner_department: AdminDepartment | None = None
     config_scope_id: str | None = None
     policy_version: int = 1
     access_rules: tuple[AdminKnowledgeBaseAccessRule, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
+class AdminKnowledgeBaseListItem:
+    id: str
+    name: str
+    status: str
+    owner_department_id: str
+    kb_visibility: str
+    default_document_visibility: str
+    default_document_owner_department_id: str
+    owner_department_name: str | None = None
+    default_document_owner_department_name: str | None = None
+
+
+@dataclass(frozen=True)
 class AdminKnowledgeBaseList:
-    items: list[AdminKnowledgeBase]
+    items: list[AdminKnowledgeBaseListItem]
+    total: int
+
+
+@dataclass(frozen=True)
+class AdminKnowledgeBaseOption:
+    id: str
+    name: str
+    status: str
+
+
+@dataclass(frozen=True)
+class AdminKnowledgeBaseOptionList:
+    items: list[AdminKnowledgeBaseOption]
     total: int
 
 
@@ -112,6 +204,19 @@ class AdminFolderList:
 
 
 @dataclass(frozen=True)
+class AdminFolderOption:
+    id: str
+    name: str
+    status: str
+
+
+@dataclass(frozen=True)
+class AdminFolderOptionList:
+    items: list[AdminFolderOption]
+    total: int
+
+
+@dataclass(frozen=True)
 class AdminDocument:
     id: str
     kb_id: str
@@ -122,6 +227,7 @@ class AdminDocument:
     visibility: str
     folder_id: str | None = None
     current_version_id: str | None = None
+    current_version_no: int | None = None
     tags: tuple[str, ...] = field(default_factory=tuple)
     permission_snapshot_id: str | None = None
     content_hash: str | None = None
@@ -140,6 +246,12 @@ class AdminDocumentVersion:
     document_id: str
     version_no: int
     status: str
+
+
+@dataclass(frozen=True)
+class AdminDocumentVersionList:
+    items: list[AdminDocumentVersion]
+    total: int
 
 
 @dataclass(frozen=True)
@@ -166,6 +278,13 @@ class AdminChunk:
     page_start: int | None
     page_end: int | None
     status: str
+    ordinal: int
+
+
+@dataclass(frozen=True)
+class AdminChunkList:
+    items: list[AdminChunk]
+    total: int
 
 
 @dataclass(frozen=True)
@@ -189,6 +308,7 @@ class AdminDocumentPreview:
     doc_id: str
     title: str
     chunks: tuple[AdminDocumentPreviewChunk, ...]
+    total: int = 0
 
 
 @dataclass(frozen=True)

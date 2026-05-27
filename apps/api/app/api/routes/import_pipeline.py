@@ -13,6 +13,7 @@ from app.api.schemas.config import PaginationData
 from app.api.schemas.import_pipeline import (
     DocumentImportRequest,
     ImportJobData,
+    ImportJobListItemData,
     ImportJobListResponse,
     ImportJobPatchRequest,
     ImportJobResponse,
@@ -246,7 +247,7 @@ async def admin_list_import_jobs(
         return _database_error_response(exc, stage="admin_import_job_list")
     return ImportJobListResponse(
         request_id=_request_id(),
-        data=[_job_data(job) for job in result.items],
+        data=[_job_list_item_data(job) for job in result.items],
         pagination=PaginationData(page=page, page_size=page_size, total=result.total),
     )
 
@@ -288,7 +289,7 @@ async def admin_retry_index_jobs(
         return _database_error_response(exc, stage="admin_index_job_retry")
     return ImportJobListResponse(
         request_id=_request_id(),
-        data=[_job_data(job) for job in result.items],
+        data=[_job_list_item_data(job) for job in result.items],
         pagination=PaginationData(page=1, page_size=len(result.items), total=result.total),
     )
 
@@ -358,6 +359,18 @@ def _job_data(job: ImportJob) -> ImportJobData:
         status=job.status,
         stage=job.stage,
         document_ids=list(job.document_ids),
+        error_summary=job.error_summary,
+    )
+
+
+def _job_list_item_data(job: ImportJob) -> ImportJobListItemData:
+    return ImportJobListItemData(
+        id=job.id,
+        kb_id=job.kb_id,
+        job_type=job.job_type,
+        status=job.status,
+        stage=job.stage,
+        document_count=len(job.document_ids),
         error_summary=job.error_summary,
     )
 

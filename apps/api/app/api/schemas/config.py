@@ -60,6 +60,18 @@ class ConfigVersionData(BaseModel):
     activated_at: datetime | None = None
 
 
+class ConfigVersionListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int
+    status: Literal["draft", "validating", "active", "inactive", "archived", "failed"]
+    risk_level: Literal["low", "medium", "high", "critical"]
+    created_by: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    activated_at: datetime | None = None
+
+
 class ConfigVersionCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -89,7 +101,8 @@ class ConfigVersionListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[ConfigVersionData]
+    data: list[ConfigVersionListItemData]
+    pagination: PaginationData
 
 
 class ConfigValidationRequest(BaseModel):

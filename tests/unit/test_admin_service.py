@@ -5,11 +5,15 @@ import json
 import pytest
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
+    AdminAssignableRoleOption,
     AdminDepartment,
+    AdminDepartmentOption,
     AdminDocument,
     AdminFolder,
+    AdminFolderOption,
     AdminKnowledgeBase,
     AdminKnowledgeBaseAccessRule,
+    AdminKnowledgeBaseOption,
     AdminRole,
     AdminRoleBinding,
     AdminUser,
@@ -98,6 +102,19 @@ def _role(
     )
 
 
+def _department(
+    department_id: str = "22222222-2222-2222-2222-222222222222",
+) -> AdminDepartment:
+    return AdminDepartment(
+        id=department_id,
+        code="default",
+        name="默认部门",
+        status="active",
+        is_primary=True,
+        is_default=False,
+    )
+
+
 def test_merge_scopes_always_keeps_session_scopes() -> None:
     scopes = _merge_scopes((_role(scopes=("config:read",)),))
 
@@ -136,7 +153,36 @@ def test_list_users_scopes_department_reader_to_shared_departments() -> None:
     assert result.total == 0
     sql, params = session.executed[0]
     assert "user_department_memberships actor_udm" in sql
+    assert "rb.user_id = users.id" in sql
+    assert "rb.subject_id" not in sql
+    assert "rb.subject_type" not in sql
     assert params["actor_user_id"] == actor.user_id
+
+
+def test_create_user_department_scope_allows_actor_department() -> None:
+    actor = AdminActorContext(
+        user_id=_ACTOR_USER_ID,
+        scopes=("user:manage",),
+        department_ids=("22222222-2222-2222-2222-222222222222",),
+    )
+
+    AdminService()._ensure_actor_can_create_user_departments(actor, [_department()])
+
+
+def test_create_user_department_scope_rejects_other_department() -> None:
+    actor = AdminActorContext(
+        user_id=_ACTOR_USER_ID,
+        scopes=("user:manage",),
+        department_ids=("22222222-2222-2222-2222-222222222222",),
+    )
+
+    with pytest.raises(AdminServiceError) as exc_info:
+        AdminService()._ensure_actor_can_create_user_departments(
+            actor,
+            [_department("44444444-4444-4444-4444-444444444444")],
+        )
+
+    assert exc_info.value.error_code == "ADMIN_RESOURCE_FORBIDDEN"
 
 
 def test_list_departments_filters_enterprise_and_status() -> None:
@@ -147,7 +193,6 @@ def test_list_departments_filters_enterprise_and_status() -> None:
                 _Row(
                     {
                         "department_id": "department_1",
-                        "code": "default",
                         "name": "默认部门",
                         "status": "active",
                         "is_default": True,
@@ -170,12 +215,56 @@ def test_list_departments_filters_enterprise_and_status() -> None:
     assert result.total == 1
     assert result.items[0].is_default is True
     sql, params = session.executed[0]
-    assert "enterprise_id = CAST(:enterprise_id AS uuid)" in sql
-    assert "deleted_at IS NULL" in sql
-    assert "(code ILIKE :keyword OR name ILIKE :keyword)" in sql
-    assert "status = :status" in sql
+    assert "departments.enterprise_id = CAST(:enterprise_id AS uuid)" in sql
+    assert "departments.deleted_at IS NULL" in sql
+    assert "departments.status != 'deleted'" in sql
+    assert "departments.name ILIKE :keyword" in sql
+    assert "departments.code" not in sql
+    assert "departments.status = :status" in sql
+    assert "knowledge_bases." not in sql
     assert params["enterprise_id"] == _ENTERPRISE_ID
     assert params["status"] == "active"
+
+
+def test_list_department_options_returns_minimal_selector_rows() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "department_id": "department_1",
+                        "name": "默认部门",
+                        "status": "active",
+                        "is_default": True,
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+
+    result = AdminService().list_department_options(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        page=1,
+        page_size=20,
+        keyword="默认",
+        status="active",
+    )
+
+    assert result.total == 1
+    assert isinstance(result.items[0], AdminDepartmentOption)
+    assert result.items[0].name == "默认部门"
+    assert result.items[0].is_default is True
+    sql, params = session.executed[0]
+    assert "SELECT id::text AS department_id, name, status, is_default" in sql
+    assert "departments.name ILIKE :keyword" in sql
+    assert "departments.code" not in sql
+    assert "departments.status = :status" in sql
+    assert params["enterprise_id"] == _ENTERPRISE_ID
+    assert params["status"] == "active"
+    assert params["limit"] == 20
 
 
 def test_list_knowledge_bases_filters_enterprise_and_status() -> None:
@@ -189,11 +278,11 @@ def test_list_knowledge_bases_filters_enterprise_and_status() -> None:
                         "name": "制度知识库",
                         "status": "active",
                         "owner_department_id": "department_1",
+                        "owner_department_name": "研发部",
                         "kb_visibility": "department_acl",
                         "default_document_visibility": "department",
                         "default_document_owner_department_id": "department_1",
-                        "config_scope_id": None,
-                        "policy_version": 1,
+                        "default_document_owner_department_name": "研发部",
                     }
                 )
             ]
@@ -212,14 +301,60 @@ def test_list_knowledge_bases_filters_enterprise_and_status() -> None:
 
     assert result.total == 1
     assert result.items[0].name == "制度知识库"
+    assert result.items[0].owner_department_name == "研发部"
     sql, params = session.executed[0]
     assert "FROM knowledge_bases" in sql
+    assert "access_rules" not in sql
+    assert "policy_version" not in sql
+    assert "config_scope_id" not in sql
     assert "enterprise_id = CAST(:enterprise_id AS uuid)" in sql
     assert "deleted_at IS NULL" in sql
     assert "name ILIKE :keyword" in sql
     assert "status = :status" in sql
     assert params["enterprise_id"] == _ENTERPRISE_ID
     assert params["status"] == "active"
+
+
+def test_list_knowledge_base_options_returns_minimal_selector_rows() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "kb_id": "kb_1",
+                        "name": "制度知识库",
+                        "status": "active",
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+
+    result = AdminService().list_knowledge_base_options(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        page=1,
+        page_size=20,
+        keyword="制度",
+        status="active",
+    )
+
+    assert result.total == 1
+    assert isinstance(result.items[0], AdminKnowledgeBaseOption)
+    assert result.items[0].name == "制度知识库"
+    sql, params = session.executed[0]
+    assert "SELECT" in sql
+    assert "knowledge_bases.id::text AS kb_id" in sql
+    assert "access_rules" not in sql
+    assert "policy_version" not in sql
+    assert "config_scope_id" not in sql
+    assert "name ILIKE :keyword" in sql
+    assert "status = :status" in sql
+    assert params["enterprise_id"] == _ENTERPRISE_ID
+    assert params["status"] == "active"
+    assert params["limit"] == 20
 
 
 def test_list_knowledge_bases_scopes_resource_limited_actor() -> None:
@@ -250,6 +385,88 @@ def test_list_knowledge_bases_scopes_resource_limited_actor() -> None:
     assert "id = ANY" in sql
     assert params["actor_department_ids"] == ["22222222-2222-2222-2222-222222222222"]
     assert params["actor_kb_ids"] == ["55555555-5555-5555-5555-555555555555"]
+
+
+def test_list_roles_returns_paginated_summary_without_scopes() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "role_id": "role_1",
+                        "code": "system_admin",
+                        "name": "System Admin",
+                        "scope_type": "enterprise",
+                        "is_builtin": True,
+                        "status": "active",
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+
+    result = AdminService().list_roles(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        page=1,
+        page_size=20,
+        keyword="admin",
+        status="active",
+        scope_type="enterprise",
+    )
+
+    assert result.total == 1
+    assert result.items[0].code == "system_admin"
+    sql, params = session.executed[0]
+    assert "scopes" not in sql
+    assert "code ILIKE :keyword OR name ILIKE :keyword" in sql
+    assert "status = :status" in sql
+    assert "scope_type = :scope_type" in sql
+    assert params["status"] == "active"
+    assert params["scope_type"] == "enterprise"
+    assert params["limit"] == 20
+
+
+def test_list_assignable_role_options_returns_risk_level_without_exposing_scopes() -> None:
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "role_id": "role_1",
+                        "code": "system_admin",
+                        "name": "System Admin",
+                        "scope_type": "enterprise",
+                        "scopes": ["*"],
+                        "is_builtin": True,
+                        "status": "active",
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+
+    result = AdminService().list_assignable_role_options(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        page=1,
+        page_size=20,
+        keyword="admin",
+        status="active",
+    )
+
+    assert result.total == 1
+    assert isinstance(result.items[0], AdminAssignableRoleOption)
+    assert result.items[0].risk_level == "high"
+    sql, params = session.executed[0]
+    assert "scopes" in sql
+    assert "status = :status" in sql
+    assert params["status"] == "active"
+    assert params["limit"] == 20
 
 
 def test_create_knowledge_base_requires_confirmation_for_enterprise_visibility() -> None:
@@ -586,6 +803,67 @@ def test_list_folders_filters_by_knowledge_base(monkeypatch) -> None:
     assert params["kb_id"] == "kb_1"
 
 
+def test_list_folder_options_returns_minimal_selector_rows(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "folder_id": "folder_1",
+                        "name": "制度",
+                        "status": "active",
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+    monkeypatch.setattr(
+        service,
+        "get_knowledge_base",
+        lambda *_args, **_kwargs: AdminKnowledgeBase(
+            id="kb_1",
+            name="制度知识库",
+            status="active",
+            owner_department_id="department_1",
+            kb_visibility="enterprise",
+            default_document_visibility="department",
+            default_document_owner_department_id="department_1",
+        ),
+    )
+
+    result = service.list_folder_options(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        kb_id="kb_1",
+        page=1,
+        page_size=20,
+        keyword="制度",
+        status="active",
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("folder:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert result.total == 1
+    assert isinstance(result.items[0], AdminFolderOption)
+    assert result.items[0].name == "制度"
+    sql, params = session.executed[0]
+    select_clause = sql.split("FROM folders", 1)[0]
+    assert "id::text AS folder_id" in sql
+    assert "kb_id::text AS kb_id" not in select_clause
+    assert "parent_id::text AS parent_id" not in select_clause
+    assert "path" not in select_clause
+    assert "name ILIKE :keyword" in sql
+    assert "status = :status" in sql
+    assert params["kb_id"] == "kb_1"
+    assert params["status"] == "active"
+
+
 def test_create_folder_writes_audit(monkeypatch) -> None:
     service = AdminService()
     session = _FakeSession()
@@ -845,6 +1123,8 @@ def test_list_document_versions_requires_document_manage_scope() -> None:
             _FakeSession(),
             enterprise_id=_ENTERPRISE_ID,
             doc_id="44444444-4444-4444-4444-444444444444",
+            page=1,
+            page_size=50,
             actor_context=actor,
         )
 
@@ -867,7 +1147,8 @@ def test_list_document_versions_filters_by_document(monkeypatch) -> None:
                     }
                 )
             ]
-        )
+        ),
+        _Result(one=_Row({"total": 1})),
     ]
     monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: _document())
 
@@ -875,6 +1156,8 @@ def test_list_document_versions_filters_by_document(monkeypatch) -> None:
         session,
         enterprise_id=_ENTERPRISE_ID,
         doc_id="44444444-4444-4444-4444-444444444444",
+        page=2,
+        page_size=10,
         actor_context=AdminActorContext(
             user_id=_ACTOR_USER_ID,
             scopes=("document:manage",),
@@ -882,10 +1165,13 @@ def test_list_document_versions_filters_by_document(monkeypatch) -> None:
         ),
     )
 
-    assert versions[0].version_no == 2
+    assert versions.items[0].version_no == 2
+    assert versions.total == 1
     sql, params = session.executed[0]
     assert "FROM document_versions" in sql
     assert params["doc_id"] == "44444444-4444-4444-4444-444444444444"
+    assert params["limit"] == 10
+    assert params["offset"] == 10
 
 
 def test_list_document_chunks_filters_by_document(monkeypatch) -> None:
@@ -903,10 +1189,12 @@ def test_list_document_chunks_filters_by_document(monkeypatch) -> None:
                         "page_start": 1,
                         "page_end": 2,
                         "status": "active",
+                        "ordinal": 1,
                     }
                 )
             ]
-        )
+        ),
+        _Result(one=_Row({"total": 1})),
     ]
     monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: _document())
 
@@ -914,6 +1202,8 @@ def test_list_document_chunks_filters_by_document(monkeypatch) -> None:
         session,
         enterprise_id=_ENTERPRISE_ID,
         doc_id="44444444-4444-4444-4444-444444444444",
+        page=2,
+        page_size=10,
         actor_context=AdminActorContext(
             user_id=_ACTOR_USER_ID,
             scopes=("document:manage",),
@@ -921,10 +1211,13 @@ def test_list_document_chunks_filters_by_document(monkeypatch) -> None:
         ),
     )
 
-    assert chunks[0].text_preview == "制度正文"
+    assert chunks.items[0].text_preview == "制度正文"
+    assert chunks.total == 1
     sql, params = session.executed[0]
     assert "FROM chunks" in sql
     assert params["doc_id"] == "44444444-4444-4444-4444-444444444444"
+    assert params["limit"] == 10
+    assert params["offset"] == 10
 
 
 def test_get_document_preview_reads_full_chunk_text_from_object_storage(monkeypatch) -> None:
@@ -950,7 +1243,8 @@ def test_get_document_preview_reads_full_chunk_text_from_object_storage(monkeypa
                     }
                 )
             ]
-        )
+        ),
+        _Result(one=_Row({"total": 1})),
     ]
     monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: _document())
 
@@ -970,9 +1264,12 @@ def test_get_document_preview_reads_full_chunk_text_from_object_storage(monkeypa
     assert preview.chunks[0].text_status == "object"
     assert preview.chunks[0].heading_path == "总则 / 采购"
     assert preview.chunks[0].source_offsets == {"start": 0, "end": 6}
+    assert preview.total == 1
     sql, params = session.executed[0]
     assert "FROM chunks" in sql
     assert params["doc_id"] == "44444444-4444-4444-4444-444444444444"
+    assert params["limit"] == 20
+    assert params["offset"] == 0
 
 
 def test_list_document_index_versions_filters_by_document(monkeypatch) -> None:

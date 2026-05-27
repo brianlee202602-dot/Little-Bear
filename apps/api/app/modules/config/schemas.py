@@ -93,6 +93,17 @@ class ConfigVersion:
 
 
 @dataclass(frozen=True)
+class ConfigVersionList:
+    """配置版本列表分页结果。
+
+    列表项只携带版本元数据，不携带完整 active_config payload。
+    """
+
+    items: list[ConfigVersion]
+    total: int
+
+
+@dataclass(frozen=True)
 class ConfigValidationResult:
     """配置校验结果，兼容 setup 校验响应结构。"""
 

@@ -51,6 +51,9 @@ class QueryMessage:
 class QueryConversationDetail:
     conversation: QueryConversationSummary
     messages: tuple[QueryMessage, ...]
+    message_page: int
+    message_page_size: int
+    message_total: int
 
 
 @dataclass(frozen=True)
@@ -189,7 +192,11 @@ class QueryConversationService:
         enterprise_id: str,
         user_id: str,
         conversation_id: str,
+        page: int,
+        page_size: int,
     ) -> QueryConversationDetail:
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 100)
         conversation = self._load_owned_active_conversation(
             session,
             enterprise_id=enterprise_id,
@@ -200,25 +207,48 @@ class QueryConversationService:
             rows = session.execute(
                 text(
                     """
-                    SELECT
-                        id::text AS id,
-                        conversation_id::text AS conversation_id,
-                        role,
-                        content,
-                        status,
-                        citations_json,
-                        confidence,
-                        degraded,
-                        degrade_reason,
-                        request_id,
-                        trace_id,
-                        created_at,
-                        updated_at
+                    SELECT *
+                    FROM (
+                        SELECT
+                            id::text AS id,
+                            conversation_id::text AS conversation_id,
+                            role,
+                            content,
+                            status,
+                            citations_json,
+                            confidence,
+                            degraded,
+                            degrade_reason,
+                            request_id,
+                            trace_id,
+                            created_at,
+                            updated_at
+                        FROM query_messages
+                        WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                          AND user_id = CAST(:user_id AS uuid)
+                          AND conversation_id = CAST(:conversation_id AS uuid)
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT :limit OFFSET :offset
+                    ) latest_messages
+                    ORDER BY created_at ASC, id ASC
+                    """
+                ),
+                {
+                    "enterprise_id": enterprise_id,
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                    "limit": page_size,
+                    "offset": (page - 1) * page_size,
+                },
+            ).all()
+            total_row = session.execute(
+                text(
+                    """
+                    SELECT count(*) AS total
                     FROM query_messages
                     WHERE enterprise_id = CAST(:enterprise_id AS uuid)
                       AND user_id = CAST(:user_id AS uuid)
                       AND conversation_id = CAST(:conversation_id AS uuid)
-                    ORDER BY created_at ASC
                     """
                 ),
                 {
@@ -226,7 +256,7 @@ class QueryConversationService:
                     "user_id": user_id,
                     "conversation_id": conversation_id,
                 },
-            ).all()
+            ).one()
         except SQLAlchemyError as exc:
             raise _conversation_database_error(
                 "QUERY_CONVERSATION_READ_FAILED",
@@ -236,6 +266,9 @@ class QueryConversationService:
         return QueryConversationDetail(
             conversation=conversation,
             messages=tuple(_message_from_mapping(dict(row._mapping)) for row in rows),
+            message_page=page,
+            message_page_size=page_size,
+            message_total=int(total_row._mapping["total"]),
         )
 
     def delete_conversation(

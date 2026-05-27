@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
@@ -11,12 +12,6 @@ class AccessibleKnowledgeBase:
     id: str
     name: str
     status: str
-    owner_department_id: str
-    kb_visibility: str
-    default_document_visibility: str
-    default_document_owner_department_id: str
-    config_scope_id: str | None
-    policy_version: int
 
 
 @dataclass(frozen=True)
@@ -39,8 +34,19 @@ class AccessibleDocument:
 
 
 @dataclass(frozen=True)
+class AccessibleDocumentListItem:
+    id: str
+    title: str
+    lifecycle_status: str
+    index_status: str
+    updated_at: datetime | None
+    can_view: bool = True
+    can_cite: bool = True
+
+
+@dataclass(frozen=True)
 class AccessibleDocumentList:
-    items: list[AccessibleDocument]
+    items: list[AccessibleDocumentListItem]
     total: int
 
 
@@ -53,6 +59,12 @@ class AccessibleDocumentVersion:
 
 
 @dataclass(frozen=True)
+class AccessibleDocumentVersionList:
+    items: list[AccessibleDocumentVersion]
+    total: int
+
+
+@dataclass(frozen=True)
 class AccessibleChunk:
     id: str
     document_id: str
@@ -61,6 +73,13 @@ class AccessibleChunk:
     page_start: int | None
     page_end: int | None
     status: str
+    ordinal: int
+
+
+@dataclass(frozen=True)
+class AccessibleChunkList:
+    items: list[AccessibleChunk]
+    total: int
 
 
 @dataclass(frozen=True)

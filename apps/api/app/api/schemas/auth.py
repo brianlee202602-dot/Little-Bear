@@ -26,7 +26,6 @@ class DepartmentData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    code: str
     name: str
     status: str
     is_primary: bool = False
@@ -50,9 +49,6 @@ class CurrentUserData(BaseModel):
     username: str
     name: str
     status: str
-    departments: list[DepartmentData] = Field(default_factory=list)
-    roles: list[RoleData] = Field(default_factory=list)
-    scopes: list[str] = Field(default_factory=list)
 
 
 class CurrentUserResponse(BaseModel):
@@ -60,6 +56,25 @@ class CurrentUserResponse(BaseModel):
 
     request_id: str
     data: CurrentUserData
+
+
+class AdminCurrentUserCapabilitiesData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    username: str
+    name: str
+    status: str
+    departments: list[DepartmentData] = Field(default_factory=list)
+    roles: list[RoleData] = Field(default_factory=list)
+    scopes: list[str] = Field(default_factory=list)
+
+
+class AdminCurrentUserCapabilitiesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: AdminCurrentUserCapabilitiesData
 
 
 class PasswordChangeRequest(BaseModel):

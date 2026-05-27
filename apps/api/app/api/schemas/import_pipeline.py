@@ -70,6 +70,36 @@ class ImportJobData(BaseModel):
     error_summary: str | None = None
 
 
+class ImportJobListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kb_id: str | None = None
+    job_type: str | None = None
+    status: Literal[
+        "queued",
+        "running",
+        "retrying",
+        "partial_success",
+        "success",
+        "failed",
+        "cancelled",
+    ]
+    stage: Literal[
+        "validate",
+        "parse",
+        "clean",
+        "chunk",
+        "embed",
+        "index",
+        "publish",
+        "cleanup",
+        "finished",
+    ]
+    document_count: int = 0
+    error_summary: str | None = None
+
+
 class ImportJobResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -81,5 +111,5 @@ class ImportJobListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[ImportJobData]
+    data: list[ImportJobListItemData]
     pagination: PaginationData

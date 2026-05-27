@@ -39,11 +39,27 @@ class AuditLogResponse(BaseModel):
     data: AuditLogData
 
 
+class AuditLogListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    event_name: str
+    actor_type: str
+    action: str
+    resource_type: str
+    result: Literal["success", "failure", "denied"]
+    risk_level: Literal["low", "medium", "high", "critical"]
+    config_version: int | None = None
+    permission_version: int | None = None
+    error_code: str | None = None
+    created_at: datetime | None = None
+
+
 class AuditLogListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[AuditLogData]
+    data: list[AuditLogListItemData]
     pagination: PaginationData
 
 
@@ -54,7 +70,9 @@ class QueryLogData(BaseModel):
     request_id: str
     trace_id: str
     user_id: str
+    user_display_name: str | None = None
     kb_ids: list[str] = Field(default_factory=list)
+    knowledge_base_names: list[str] = Field(default_factory=list)
     query_hash: str
     status: Literal["success", "failed", "denied"]
     degraded: bool
@@ -78,11 +96,27 @@ class QueryLogResponse(BaseModel):
     data: QueryLogData
 
 
+class QueryLogListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    user_display_name: str | None = None
+    knowledge_base_names: list[str] = Field(default_factory=list)
+    status: Literal["success", "failed", "denied"]
+    degraded: bool
+    degrade_reason: str | None = None
+    latency_ms: int
+    candidate_count: int
+    citation_count: int
+    error_code: str | None = None
+    created_at: datetime | None = None
+
+
 class QueryLogListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[QueryLogData]
+    data: list[QueryLogListItemData]
     pagination: PaginationData
 
 
@@ -109,9 +143,31 @@ class ModelCallLogData(BaseModel):
     created_at: datetime | None = None
 
 
+class ModelCallLogResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: ModelCallLogData
+
+
+class ModelCallLogListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    caller: str
+    model_type: str
+    model_name: str
+    model_version: str | None = None
+    status: Literal["success", "failed", "degraded"]
+    latency_ms: int
+    degraded: bool
+    error_code: str | None = None
+    created_at: datetime | None = None
+
+
 class ModelCallLogListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[ModelCallLogData]
+    data: list[ModelCallLogListItemData]
     pagination: PaginationData

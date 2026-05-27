@@ -27,6 +27,12 @@ from app.modules.secrets.service import SecretStoreError, SecretStoreService
 from app.shared.json_utils import as_dict, json_bool, json_int, json_str
 from sqlalchemy.orm import Session
 
+DEFAULT_MODEL_PROVIDER_SECRET_REFS = {
+    "embedding": "secret://rag/model/embedding-api-key",
+    "rerank": "secret://rag/model/rerank-api-key",
+    "llm": "secret://rag/model/llm-api-key",
+}
+
 
 def build_query_service(session: Session) -> QueryService:
     """按 active_config 组装 QueryService。
@@ -80,8 +86,7 @@ def _build_vector_retriever(session: Session, config: dict[str, Any]):
     if not qdrant_base_url or not embedding_base_url or not embedding_model:
         return UnavailableVectorRetriever(reason="vector_runtime_config_incomplete")
 
-    gateway_auth_ref = json_str(model_gateway, "auth_token_ref")
-    provider_auth_ref = json_str(embedding_provider, "auth_token_ref") or gateway_auth_ref
+    provider_auth_ref = _model_provider_auth_ref(model_gateway, embedding_provider, "embedding")
     embedding_client = ModelGatewayEmbeddingClient(
         base_url=embedding_base_url,
         path=_embedding_path(embedding_provider),
@@ -123,8 +128,7 @@ def _build_answer_service(session: Session, config: dict[str, Any]) -> AnswerSer
     if not llm_base_url or not llm_model:
         return AnswerService()
 
-    gateway_auth_ref = json_str(model_gateway, "auth_token_ref")
-    provider_auth_ref = json_str(llm_provider, "auth_token_ref") or gateway_auth_ref
+    provider_auth_ref = _model_provider_auth_ref(model_gateway, llm_provider, "llm")
     chat_client = ModelGatewayChatClient(
         base_url=llm_base_url,
         path=_chat_completions_path(llm_provider),
@@ -155,8 +159,7 @@ def _build_candidate_reranker(session: Session, config: dict[str, Any]):
     if not rerank_base_url or not rerank_model:
         return NoopCandidateReranker()
 
-    gateway_auth_ref = json_str(model_gateway, "auth_token_ref")
-    provider_auth_ref = json_str(rerank_provider, "auth_token_ref") or gateway_auth_ref
+    provider_auth_ref = _model_provider_auth_ref(model_gateway, rerank_provider, "rerank")
     rerank_client = ModelGatewayRerankClient(
         base_url=rerank_base_url,
         path=_rerank_path(rerank_provider),
@@ -173,6 +176,18 @@ def _build_candidate_reranker(session: Session, config: dict[str, Any]):
 
 def _chat_completions_path(provider: dict[str, Any]) -> str:
     return json_str(provider, "chat_completions_path") or "/v1/chat/completions"
+
+
+def _model_provider_auth_ref(
+    model_gateway: dict[str, Any],
+    provider: dict[str, Any],
+    provider_name: str,
+) -> str | None:
+    return (
+        json_str(provider, "auth_token_ref")
+        or json_str(model_gateway, "auth_token_ref")
+        or DEFAULT_MODEL_PROVIDER_SECRET_REFS.get(provider_name)
+    )
 
 
 def _rerank_path(provider: dict[str, Any]) -> str:

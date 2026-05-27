@@ -6,11 +6,14 @@ from app.main import create_app
 from app.modules.auth.schemas import AuthContext, AuthRole, AuthUser
 from app.modules.knowledge import (
     AccessibleChunk,
+    AccessibleChunkList,
     AccessibleCitationSource,
     AccessibleDocument,
     AccessibleDocumentList,
+    AccessibleDocumentListItem,
     AccessibleDocumentPreview,
     AccessibleDocumentVersion,
+    AccessibleDocumentVersionList,
     AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
     AccessiblePreviewCitation,
@@ -88,14 +91,6 @@ def test_list_knowledge_bases_route_requires_read_scope(monkeypatch) -> None:
                     id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     name="制度知识库",
                     status="active",
-                    owner_department_id="22222222-2222-2222-2222-222222222222",
-                    kb_visibility="enterprise",
-                    default_document_visibility="department",
-                    default_document_owner_department_id=(
-                        "22222222-2222-2222-2222-222222222222"
-                    ),
-                    config_scope_id=None,
-                    policy_version=1,
                 )
             ],
             total=1,
@@ -121,7 +116,12 @@ def test_list_knowledge_bases_route_requires_read_scope(monkeypatch) -> None:
     assert seen["required_scope"] == "knowledge_base:read"
     assert seen["user_id"] == _auth_context().user.id
     assert response.json()["request_id"] == "req_kb"
-    assert response.json()["data"][0]["name"] == "制度知识库"
+    payload = response.json()["data"][0]
+    assert payload["name"] == "制度知识库"
+    assert "owner_department_id" not in payload
+    assert "kb_visibility" not in payload
+    assert "default_document_visibility" not in payload
+    assert "policy_version" not in payload
 
 
 def test_list_documents_route_requires_document_read_scope(monkeypatch) -> None:
@@ -135,16 +135,12 @@ def test_list_documents_route_requires_document_read_scope(monkeypatch) -> None:
         seen.update(kwargs)
         return AccessibleDocumentList(
             items=[
-                AccessibleDocument(
+                AccessibleDocumentListItem(
                     id="44444444-4444-4444-4444-444444444444",
-                    kb_id=kwargs["kb_id"],
-                    folder_id=None,
                     title="员工手册",
                     lifecycle_status="active",
                     index_status="indexed",
-                    owner_department_id="22222222-2222-2222-2222-222222222222",
-                    visibility="enterprise",
-                    current_version_id="55555555-5555-5555-5555-555555555555",
+                    updated_at=datetime(2026, 5, 25, tzinfo=UTC),
                 )
             ],
             total=1,
@@ -169,7 +165,14 @@ def test_list_documents_route_requires_document_read_scope(monkeypatch) -> None:
     assert response.status_code == 200
     assert seen["required_scope"] == "document:read"
     assert seen["kb_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-    assert response.json()["data"][0]["title"] == "员工手册"
+    payload = response.json()["data"][0]
+    assert payload["title"] == "员工手册"
+    assert payload["can_view"] is True
+    assert payload["can_cite"] is True
+    assert "kb_id" not in payload
+    assert "owner_department_id" not in payload
+    assert "visibility" not in payload
+    assert "current_version_id" not in payload
 
 
 def test_get_document_route_requires_document_read_scope(monkeypatch) -> None:
@@ -217,13 +220,16 @@ def test_list_document_versions_route_returns_versions(monkeypatch) -> None:
 
     def list_document_versions(_self, _session, **kwargs):
         seen.update(kwargs)
-        return (
-            AccessibleDocumentVersion(
-                id="55555555-5555-5555-5555-555555555555",
-                document_id=kwargs["document_id"],
-                version_no=1,
-                status="active",
-            ),
+        return AccessibleDocumentVersionList(
+            items=[
+                AccessibleDocumentVersion(
+                    id="55555555-5555-5555-5555-555555555555",
+                    document_id=kwargs["document_id"],
+                    version_no=1,
+                    status="active",
+                ),
+            ],
+            total=1,
         )
 
     _open_business_api(monkeypatch)
@@ -244,7 +250,10 @@ def test_list_document_versions_route_returns_versions(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
+    assert seen["page"] == 1
+    assert seen["page_size"] == 50
     assert response.json()["data"][0]["version_no"] == 1
+    assert response.json()["pagination"] == {"page": 1, "page_size": 50, "total": 1}
 
 
 def test_list_document_chunks_route_returns_chunk_previews(monkeypatch) -> None:
@@ -252,16 +261,20 @@ def test_list_document_chunks_route_returns_chunk_previews(monkeypatch) -> None:
 
     def list_document_chunks(_self, _session, **kwargs):
         seen.update(kwargs)
-        return (
-            AccessibleChunk(
-                id="66666666-6666-6666-6666-666666666666",
-                document_id=kwargs["document_id"],
-                document_version_id="55555555-5555-5555-5555-555555555555",
-                text_preview="员工年假需要提前申请",
-                page_start=1,
-                page_end=2,
-                status="active",
-            ),
+        return AccessibleChunkList(
+            items=[
+                AccessibleChunk(
+                    id="66666666-6666-6666-6666-666666666666",
+                    document_id=kwargs["document_id"],
+                    document_version_id="55555555-5555-5555-5555-555555555555",
+                    text_preview="员工年假需要提前申请",
+                    page_start=1,
+                    page_end=2,
+                    status="active",
+                    ordinal=1,
+                ),
+            ],
+            total=1,
         )
 
     _open_business_api(monkeypatch)
@@ -276,13 +289,17 @@ def test_list_document_chunks_route_returns_chunk_previews(monkeypatch) -> None:
     )
 
     response = TestClient(_create_test_app()).get(
-        "/internal/v1/documents/44444444-4444-4444-4444-444444444444/chunks",
+        "/internal/v1/documents/44444444-4444-4444-4444-444444444444/chunks?page=2&page_size=10",
         headers={"authorization": "Bearer access.jwt"},
     )
 
     assert response.status_code == 200
     assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
+    assert seen["page"] == 2
+    assert seen["page_size"] == 10
     assert response.json()["data"][0]["text_preview"] == "员工年假需要提前申请"
+    assert response.json()["data"][0]["ordinal"] == 1
+    assert response.json()["pagination"]["total"] == 1
 
 
 def test_get_document_preview_route_returns_preview(monkeypatch) -> None:

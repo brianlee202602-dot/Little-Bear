@@ -166,6 +166,9 @@ class _FakeConversationService:
                     updated_at=None,
                 ),
             ),
+            message_page=kwargs.get("page", 1),
+            message_page_size=kwargs.get("page_size", 50),
+            message_total=1,
         )
 
     def delete_conversation(self, _session, **kwargs):
@@ -295,7 +298,9 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["request_id"] == "req_query"
+    assert body["debug_id"].startswith("dbg_")
+    assert "request_id" not in body
+    assert "trace_id" not in body
     assert body["conversation_id"] == "22222222-2222-2222-2222-222222222222"
     assert body["message_id"] == "99999999-9999-9999-9999-999999999999"
     assert body["citations"][0]["title"] == "员工手册"
@@ -366,6 +371,9 @@ def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
     assert 'data: {"delta":"员工年假需要提前申请。"}' in response.text
     assert "event: citation" in response.text
     assert "event: done" in response.text
+    assert '"debug_id":"dbg_' in response.text
+    assert '"request_id"' not in response.text
+    assert '"trace_id"' not in response.text
     assert '"conversation_id":"22222222-2222-2222-2222-222222222222"' in response.text
     assert '"message_id":"99999999-9999-9999-9999-999999999999"' in response.text
     assert "员工手册" in response.text
@@ -410,6 +418,9 @@ def test_create_query_stream_route_uses_provider_token_stream(monkeypatch) -> No
     assert "[source:chunk_1]" not in response.text
     assert "event: citation" in response.text
     assert "event: done" in response.text
+    assert '"debug_id":"dbg_' in response.text
+    assert '"request_id"' not in response.text
+    assert '"trace_id"' not in response.text
     assert captured["required_scope"] == "rag:query"
     assert captured["final_answer"] == "员工年假需要提前申请。[source:chunk_1]"
     assert captured["query_text"] == "员工手册"
@@ -477,7 +488,32 @@ def test_query_conversation_routes_use_current_user_scope(monkeypatch) -> None:
         headers={"Authorization": "Bearer token", "x-request-id": "req_get"},
     )
     assert detail_response.status_code == 200
-    assert detail_response.json()["messages"][0]["content"] == "员工手册"
+    message = detail_response.json()["messages"][0]
+    assert message["content"] == "员工手册"
+    assert message["debug_id"].startswith("dbg_")
+    assert "request_id" not in message
+    assert "trace_id" not in message
+    assert detail_response.json()["messages_pagination"] == {
+        "page": 1,
+        "page_size": 50,
+        "total": 1,
+    }
+    assert captured["conversation_get_kwargs"]["page"] == 1
+    assert captured["conversation_get_kwargs"]["page_size"] == 50
+
+    paged_detail_response = client.get(
+        "/internal/v1/query-conversations/22222222-2222-2222-2222-222222222222"
+        "?page=2&page_size=10",
+        headers={"Authorization": "Bearer token", "x-request-id": "req_get_page"},
+    )
+    assert paged_detail_response.status_code == 200
+    assert paged_detail_response.json()["messages_pagination"] == {
+        "page": 2,
+        "page_size": 10,
+        "total": 1,
+    }
+    assert captured["conversation_get_kwargs"]["page"] == 2
+    assert captured["conversation_get_kwargs"]["page_size"] == 10
 
     delete_response = client.delete(
         "/internal/v1/query-conversations/22222222-2222-2222-2222-222222222222",

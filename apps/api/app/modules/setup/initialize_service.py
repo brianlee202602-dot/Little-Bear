@@ -1085,6 +1085,7 @@ def _role_scopes(role_code: str) -> list[str]:
         "department_admin": [
             "department:*",
             "user:read",
+            "user:manage",
             "knowledge_base:read",
             "document:read",
             "rag:query",

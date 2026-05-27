@@ -21,6 +21,24 @@ class DepartmentData(BaseModel):
     is_default: bool = False
 
 
+class DepartmentListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    status: Literal["active", "disabled", "deleted"]
+    is_default: bool = False
+
+
+class DepartmentOptionData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    status: Literal["active", "disabled", "deleted"]
+    is_default: bool = False
+
+
 class DepartmentCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -47,6 +65,28 @@ class RoleData(BaseModel):
     scopes: list[str] = Field(default_factory=list)
 
 
+class RoleListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    code: str
+    name: str
+    scope_type: Literal["enterprise", "department", "knowledge_base"]
+    is_builtin: bool
+    status: Literal["active", "disabled", "archived"]
+
+
+class AssignableRoleOptionData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    code: str
+    name: str
+    scope_type: Literal["enterprise", "department", "knowledge_base"]
+    status: Literal["active", "disabled", "archived"]
+    risk_level: Literal["low", "high"]
+
+
 class UserData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -60,6 +100,17 @@ class UserData(BaseModel):
     departments: list[DepartmentData] = Field(default_factory=list)
     roles: list[RoleData] = Field(default_factory=list)
     scopes: list[str] = Field(default_factory=list)
+
+
+class UserListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    username: str
+    name: str
+    status: Literal["active", "disabled", "locked", "deleted"]
+    department_names: list[str] = Field(default_factory=list)
+    role_names: list[str] = Field(default_factory=list)
 
 
 class UserCreateRequest(BaseModel):
@@ -103,7 +154,7 @@ class UserListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[UserData]
+    data: list[UserListItemData]
     pagination: PaginationData
 
 
@@ -118,7 +169,15 @@ class DepartmentListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[DepartmentData]
+    data: list[DepartmentListItemData]
+    pagination: PaginationData
+
+
+class DepartmentOptionListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[DepartmentOptionData]
     pagination: PaginationData
 
 
@@ -129,12 +188,36 @@ class KnowledgeBaseData(BaseModel):
     name: str
     status: Literal["active", "disabled", "archived"]
     owner_department_id: str
+    owner_department: DepartmentData | None = None
     kb_visibility: Literal["enterprise", "department_acl", "private"]
     default_document_visibility: Literal["department", "enterprise"]
     default_document_owner_department_id: str
+    default_document_owner_department: DepartmentData | None = None
     access_rules: list[KnowledgeBaseAccessRuleData] = Field(default_factory=list)
     config_scope_id: str | None = None
     policy_version: int = 1
+
+
+class KnowledgeBaseListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    status: Literal["active", "disabled", "archived"]
+    owner_department_id: str
+    owner_department_name: str | None = None
+    kb_visibility: Literal["enterprise", "department_acl", "private"]
+    default_document_visibility: Literal["department", "enterprise"]
+    default_document_owner_department_id: str
+    default_document_owner_department_name: str | None = None
+
+
+class KnowledgeBaseOptionData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    status: Literal["active", "disabled", "archived"]
 
 
 class KnowledgeBaseAccessRuleData(BaseModel):
@@ -187,7 +270,15 @@ class KnowledgeBaseListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[KnowledgeBaseData]
+    data: list[KnowledgeBaseListItemData]
+    pagination: PaginationData
+
+
+class KnowledgeBaseOptionListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[KnowledgeBaseOptionData]
     pagination: PaginationData
 
 
@@ -211,6 +302,14 @@ class FolderData(BaseModel):
     id: str
     kb_id: str
     parent_id: str | None = None
+    name: str
+    status: Literal["active", "disabled", "archived"]
+
+
+class FolderOptionData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
     name: str
     status: Literal["active", "disabled", "archived"]
 
@@ -245,6 +344,14 @@ class FolderListResponse(BaseModel):
     pagination: PaginationData
 
 
+class FolderOptionListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[FolderOptionData]
+    pagination: PaginationData
+
+
 class DocumentData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -257,6 +364,7 @@ class DocumentData(BaseModel):
     owner_department_id: str
     visibility: Literal["department", "enterprise"]
     current_version_id: str | None = None
+    current_version_no: int | None = None
 
 
 class DocumentPatchRequest(BaseModel):
@@ -307,6 +415,7 @@ class AdminDocumentPreviewResponse(BaseModel):
 
     request_id: str
     data: AdminDocumentPreviewData
+    pagination: PaginationData
 
 
 class IndexVersionData(BaseModel):
@@ -448,7 +557,16 @@ class RoleListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[RoleData]
+    data: list[RoleListItemData]
+    pagination: PaginationData
+
+
+class AssignableRoleOptionListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[AssignableRoleOptionData]
+    pagination: PaginationData
 
 
 class RoleBindingData(BaseModel):

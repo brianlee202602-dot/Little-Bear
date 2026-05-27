@@ -74,10 +74,11 @@ export interface CurrentUserRole {
 
 export interface CurrentUserDepartment {
   id: string;
-  code: string;
+  code?: string | null;
   name: string;
   status: string;
   is_primary: boolean;
+  is_default?: boolean;
 }
 
 export interface CurrentUserData {
@@ -85,14 +86,22 @@ export interface CurrentUserData {
   username: string;
   name: string;
   status: string;
-  departments: CurrentUserDepartment[];
-  roles: CurrentUserRole[];
-  scopes: string[];
 }
 
 export interface CurrentUserResponse {
   request_id: string;
   data: CurrentUserData;
+}
+
+export interface AdminCurrentUserCapabilitiesData extends CurrentUserData {
+  departments: CurrentUserDepartment[];
+  roles: CurrentUserRole[];
+  scopes: string[];
+}
+
+export interface AdminCurrentUserCapabilitiesResponse {
+  request_id: string;
+  data: AdminCurrentUserCapabilitiesData;
 }
 
 export interface PasswordChangeRequest {
@@ -139,6 +148,16 @@ export interface ConfigVersionData {
   activated_at: string | null;
 }
 
+export interface ConfigVersionListItemData {
+  version: number;
+  status: ConfigStatus;
+  risk_level: ConfigRiskLevel;
+  created_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  activated_at: string | null;
+}
+
 export interface ConfigVersionResponse {
   request_id: string;
   data: ConfigVersionData;
@@ -146,7 +165,8 @@ export interface ConfigVersionResponse {
 
 export interface ConfigVersionListResponse {
   request_id: string;
-  data: ConfigVersionData[];
+  data: ConfigVersionListItemData[];
+  pagination: PaginationData;
 }
 
 export type AuditResult = "success" | "failure" | "denied";
@@ -171,10 +191,29 @@ export interface AuditLogData {
   created_at: string | null;
 }
 
+export interface AuditLogListItemData {
+  id: string;
+  event_name: string;
+  actor_type: string;
+  action: string;
+  resource_type: string;
+  result: AuditResult;
+  risk_level: ConfigRiskLevel;
+  config_version: number | null;
+  permission_version: number | null;
+  error_code: string | null;
+  created_at: string | null;
+}
+
 export interface AuditLogListResponse {
   request_id: string;
-  data: AuditLogData[];
+  data: AuditLogListItemData[];
   pagination: PaginationData;
+}
+
+export interface AuditLogResponse {
+  request_id: string;
+  data: AuditLogData;
 }
 
 export interface QueryLogData {
@@ -182,7 +221,9 @@ export interface QueryLogData {
   request_id: string;
   trace_id: string;
   user_id: string;
+  user_display_name: string | null;
   kb_ids: string[];
+  knowledge_base_names: string[];
   query_hash: string;
   status: "success" | "failed" | "denied";
   degraded: boolean;
@@ -204,9 +245,23 @@ export interface QueryLogResponse {
   data: QueryLogData;
 }
 
+export interface QueryLogListItemData {
+  id: string;
+  user_display_name: string | null;
+  knowledge_base_names: string[];
+  status: "success" | "failed" | "denied";
+  degraded: boolean;
+  degrade_reason: string | null;
+  latency_ms: number;
+  candidate_count: number;
+  citation_count: number;
+  error_code: string | null;
+  created_at: string | null;
+}
+
 export interface QueryLogListResponse {
   request_id: string;
-  data: QueryLogData[];
+  data: QueryLogListItemData[];
   pagination: PaginationData;
 }
 
@@ -231,9 +286,27 @@ export interface ModelCallLogData {
   created_at: string | null;
 }
 
+export interface ModelCallLogResponse {
+  request_id: string;
+  data: ModelCallLogData;
+}
+
+export interface ModelCallLogListItemData {
+  id: string;
+  caller: string;
+  model_type: string;
+  model_name: string;
+  model_version: string | null;
+  status: "success" | "failed" | "degraded";
+  latency_ms: number;
+  degraded: boolean;
+  error_code: string | null;
+  created_at: string | null;
+}
+
 export interface ModelCallLogListResponse {
   request_id: string;
-  data: ModelCallLogData[];
+  data: ModelCallLogListItemData[];
   pagination: PaginationData;
 }
 
@@ -245,6 +318,22 @@ export interface AdminDepartmentData {
   name: string;
   status: string;
   is_primary: boolean;
+  is_default: boolean;
+}
+
+export interface AdminDepartmentListItemData {
+  id: string;
+  name: string;
+  status: string;
+  is_primary?: boolean;
+  is_default: boolean;
+}
+
+export interface AdminDepartmentOptionData {
+  id: string;
+  name: string;
+  status: string;
+  is_primary?: boolean;
   is_default: boolean;
 }
 
@@ -260,7 +349,13 @@ export interface AdminDepartmentPatchRequest {
 
 export interface AdminDepartmentListResponse {
   request_id: string;
-  data: AdminDepartmentData[];
+  data: AdminDepartmentListItemData[];
+  pagination: PaginationData;
+}
+
+export interface AdminDepartmentOptionListResponse {
+  request_id: string;
+  data: AdminDepartmentOptionData[];
   pagination: PaginationData;
 }
 
@@ -283,12 +378,32 @@ export interface AdminKnowledgeBaseData {
   name: string;
   status: "active" | "disabled" | "archived";
   owner_department_id: string;
+  owner_department: AdminDepartmentData | null;
   kb_visibility: "enterprise" | "department_acl" | "private";
   default_document_visibility: "department" | "enterprise";
   default_document_owner_department_id: string;
+  default_document_owner_department: AdminDepartmentData | null;
   access_rules: KnowledgeBaseAccessRuleData[];
   config_scope_id: string | null;
   policy_version: number;
+}
+
+export interface AdminKnowledgeBaseListItemData {
+  id: string;
+  name: string;
+  status: "active" | "disabled" | "archived";
+  owner_department_id: string;
+  owner_department_name: string | null;
+  kb_visibility: "enterprise" | "department_acl" | "private";
+  default_document_visibility: "department" | "enterprise";
+  default_document_owner_department_id: string;
+  default_document_owner_department_name: string | null;
+}
+
+export interface AdminKnowledgeBaseOptionData {
+  id: string;
+  name: string;
+  status: "active" | "disabled" | "archived";
 }
 
 export interface KnowledgeBaseAccessRuleData {
@@ -318,7 +433,13 @@ export interface AdminKnowledgeBasePatchRequest {
 
 export interface AdminKnowledgeBaseListResponse {
   request_id: string;
-  data: AdminKnowledgeBaseData[];
+  data: AdminKnowledgeBaseListItemData[];
+  pagination: PaginationData;
+}
+
+export interface AdminKnowledgeBaseOptionListResponse {
+  request_id: string;
+  data: AdminKnowledgeBaseOptionData[];
   pagination: PaginationData;
 }
 
@@ -331,6 +452,12 @@ export interface AdminFolderData {
   id: string;
   kb_id: string;
   parent_id: string | null;
+  name: string;
+  status: "active" | "disabled" | "archived";
+}
+
+export interface AdminFolderOptionData {
+  id: string;
   name: string;
   status: "active" | "disabled" | "archived";
 }
@@ -352,6 +479,12 @@ export interface AdminFolderListResponse {
   pagination: PaginationData;
 }
 
+export interface AdminFolderOptionListResponse {
+  request_id: string;
+  data: AdminFolderOptionData[];
+  pagination: PaginationData;
+}
+
 export interface AdminFolderResponse {
   request_id: string;
   data: AdminFolderData;
@@ -367,6 +500,7 @@ export interface AdminDocumentData {
   owner_department_id: string;
   visibility: "department" | "enterprise";
   current_version_id: string | null;
+  current_version_no: number | null;
 }
 
 export interface AdminDocumentListResponse {
@@ -390,6 +524,7 @@ export interface DocumentVersionData {
 export interface DocumentVersionListResponse {
   request_id: string;
   data: DocumentVersionData[];
+  pagination: PaginationData;
 }
 
 export interface IndexVersionData {
@@ -489,11 +624,13 @@ export interface ChunkData {
   page_start: number | null;
   page_end: number | null;
   status: string;
+  ordinal: number;
 }
 
 export interface ChunkListResponse {
   request_id: string;
   data: ChunkData[];
+  pagination: PaginationData;
 }
 
 export interface AdminDocumentPreviewChunkData {
@@ -520,6 +657,7 @@ export interface AdminDocumentPreviewData {
 export interface AdminDocumentPreviewResponse {
   request_id: string;
   data: AdminDocumentPreviewData;
+  pagination: PaginationData;
 }
 
 export interface ResourcePermissionPutRequest {
@@ -595,6 +733,16 @@ export interface ImportJobData {
   error_summary: string | null;
 }
 
+export interface ImportJobListItemData {
+  id: string;
+  kb_id: string | null;
+  job_type: string | null;
+  status: ImportJobStatus;
+  stage: ImportJobStage;
+  document_count: number;
+  error_summary: string | null;
+}
+
 export interface ImportJobResponse {
   request_id: string;
   data: ImportJobData;
@@ -602,7 +750,7 @@ export interface ImportJobResponse {
 
 export interface ImportJobListResponse {
   request_id: string;
-  data: ImportJobData[];
+  data: ImportJobListItemData[];
   pagination: PaginationData;
 }
 
@@ -620,6 +768,24 @@ export interface AdminRoleData {
   scopes: string[];
 }
 
+export interface AdminRoleListItemData {
+  id: string;
+  code: string;
+  name: string;
+  scope_type: "enterprise" | "department" | "knowledge_base";
+  is_builtin: boolean;
+  status: "active" | "disabled" | "archived";
+}
+
+export interface AdminAssignableRoleOptionData {
+  id: string;
+  code: string;
+  name: string;
+  scope_type: "enterprise" | "department" | "knowledge_base";
+  status: "active" | "disabled" | "archived";
+  risk_level: "low" | "high";
+}
+
 export interface AdminUserData {
   id: string;
   username: string;
@@ -633,9 +799,18 @@ export interface AdminUserData {
   scopes: string[];
 }
 
+export interface AdminUserListItemData {
+  id: string;
+  username: string;
+  name: string;
+  status: AdminUserStatus;
+  department_names: string[];
+  role_names: string[];
+}
+
 export interface AdminUserListResponse {
   request_id: string;
-  data: AdminUserData[];
+  data: AdminUserListItemData[];
   pagination: PaginationData;
 }
 
@@ -664,7 +839,14 @@ export interface AdminPasswordResetRequest {
 
 export interface AdminRoleListResponse {
   request_id: string;
-  data: AdminRoleData[];
+  data: AdminRoleListItemData[];
+  pagination: PaginationData;
+}
+
+export interface AdminAssignableRoleOptionListResponse {
+  request_id: string;
+  data: AdminAssignableRoleOptionData[];
+  pagination: PaginationData;
 }
 
 export interface AdminRoleBindingData {
@@ -782,6 +964,18 @@ export async function getCurrentUser(accessToken: string): Promise<CurrentUserRe
   );
 }
 
+export async function getAdminCurrentUserCapabilities(
+  accessToken: string,
+): Promise<AdminCurrentUserCapabilitiesResponse> {
+  return requestJson<AdminCurrentUserCapabilitiesResponse>(
+    "/internal/v1/admin/users/me/capabilities",
+    {
+      method: "GET",
+    },
+    accessToken,
+  );
+}
+
 export async function changeCurrentUserPassword(
   payload: PasswordChangeRequest,
   accessToken: string,
@@ -847,9 +1041,25 @@ export async function validateAdminConfig(
 
 export async function listConfigVersions(
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<ConfigVersionListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
   return requestJson<ConfigVersionListResponse>(
-    "/internal/v1/admin/config-versions",
+    `/internal/v1/admin/config-versions?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function getConfigVersion(
+  version: number,
+  accessToken: string,
+): Promise<ConfigVersionResponse> {
+  return requestJson<ConfigVersionResponse>(
+    `/internal/v1/admin/config-versions/${version}`,
     { method: "GET" },
     accessToken,
   );
@@ -914,16 +1124,31 @@ export async function archiveConfigVersion(version: number, accessToken: string)
 
 export async function listAuditLogs(
   accessToken: string,
-  filters: { resource_type?: string; result?: string; risk_level?: string } = {},
+  filters: { page?: number; page_size?: number; resource_type?: string; result?: string; risk_level?: string } = {},
 ): Promise<AuditLogListResponse> {
-  const params = new URLSearchParams({ page_size: "20" });
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
   for (const [key, value] of Object.entries(filters)) {
-    if (value) {
-      params.set(key, value);
+    if (key === "page" || key === "page_size" || value === undefined || value === null || value === "") {
+      continue;
     }
+    params.set(key, String(value));
   }
   return requestJson<AuditLogListResponse>(
     `/internal/v1/admin/audit-logs?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function getAuditLog(
+  auditLogId: string,
+  accessToken: string,
+): Promise<AuditLogResponse> {
+  return requestJson<AuditLogResponse>(
+    `/internal/v1/admin/audit-logs/${encodeURIComponent(auditLogId)}`,
     { method: "GET" },
     accessToken,
   );
@@ -1004,6 +1229,17 @@ export async function listModelCallLogs(
   );
 }
 
+export async function getModelCallLog(
+  modelCallLogId: string,
+  accessToken: string,
+): Promise<ModelCallLogResponse> {
+  return requestJson<ModelCallLogResponse>(
+    `/internal/v1/admin/model-call-logs/${encodeURIComponent(modelCallLogId)}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
 export async function listAdminUsers(
   accessToken: string,
   filters: { keyword?: string; status?: string; page?: number; page_size?: number } = {},
@@ -1041,6 +1277,27 @@ export async function listAdminDepartments(
   }
   return requestJson<AdminDepartmentListResponse>(
     `/internal/v1/admin/departments?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminDepartmentOptions(
+  accessToken: string,
+  filters: { keyword?: string; status?: string; page?: number; page_size?: number } = {},
+): Promise<AdminDepartmentOptionListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  return requestJson<AdminDepartmentOptionListResponse>(
+    `/internal/v1/admin/department-options?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1113,6 +1370,17 @@ export async function createAdminUser(
       body: JSON.stringify(payload),
       headers: confirmedHighRisk ? { "x-user-confirm": "create-admin" } : undefined,
     },
+    accessToken,
+  );
+}
+
+export async function getAdminUser(
+  userId: string,
+  accessToken: string,
+): Promise<AdminUserResponse> {
+  return requestJson<AdminUserResponse>(
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}`,
+    { method: "GET" },
     accessToken,
   );
 }
@@ -1204,9 +1472,61 @@ export async function replaceAdminUserDepartments(
   );
 }
 
-export async function listAdminRoles(accessToken: string): Promise<AdminRoleListResponse> {
+export async function listAdminRoles(
+  accessToken: string,
+  filters: {
+    keyword?: string;
+    status?: string;
+    scope_type?: string;
+    page?: number;
+    page_size?: number;
+  } = {},
+): Promise<AdminRoleListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  if (filters.scope_type) {
+    params.set("scope_type", filters.scope_type);
+  }
   return requestJson<AdminRoleListResponse>(
-    "/internal/v1/admin/roles",
+    `/internal/v1/admin/roles?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminAssignableRoleOptions(
+  accessToken: string,
+  filters: {
+    keyword?: string;
+    status?: string;
+    scope_type?: string;
+    page?: number;
+    page_size?: number;
+  } = {},
+): Promise<AdminAssignableRoleOptionListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  if (filters.scope_type) {
+    params.set("scope_type", filters.scope_type);
+  }
+  return requestJson<AdminAssignableRoleOptionListResponse>(
+    `/internal/v1/admin/assignable-role-options?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1228,6 +1548,27 @@ export async function listAdminKnowledgeBases(
   }
   return requestJson<AdminKnowledgeBaseListResponse>(
     `/internal/v1/admin/knowledge-bases?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
+export async function listAdminKnowledgeBaseOptions(
+  accessToken: string,
+  filters: { keyword?: string; status?: string; page?: number; page_size?: number } = {},
+): Promise<AdminKnowledgeBaseOptionListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
+  return requestJson<AdminKnowledgeBaseOptionListResponse>(
+    `/internal/v1/admin/knowledge-base-options?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1312,6 +1653,28 @@ export async function listAdminFolders(
   );
 }
 
+export async function listAdminFolderOptions(
+  kbId: string,
+  accessToken: string,
+  filters: { page?: number; page_size?: number; keyword?: string; status?: string } = {},
+): Promise<AdminFolderOptionListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 100),
+  });
+  for (const [key, value] of Object.entries(filters)) {
+    if (key === "page" || key === "page_size" || value === undefined || value === null || value === "") {
+      continue;
+    }
+    params.set(key, String(value));
+  }
+  return requestJson<AdminFolderOptionListResponse>(
+    `/internal/v1/admin/knowledge-bases/${encodeURIComponent(kbId)}/folder-options?${params.toString()}`,
+    { method: "GET" },
+    accessToken,
+  );
+}
+
 export async function createAdminFolder(
   kbId: string,
   payload: AdminFolderCreateRequest,
@@ -1390,9 +1753,14 @@ export async function getAdminDocument(
 export async function listAdminDocumentVersions(
   documentId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<DocumentVersionListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 50),
+  });
   return requestJson<DocumentVersionListResponse>(
-    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/versions`,
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/versions?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1401,9 +1769,20 @@ export async function listAdminDocumentVersions(
 export async function listAdminDocumentChunks(
   documentId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number; keyword?: string; status?: string } = {},
 ): Promise<ChunkListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
+  if (filters.keyword) {
+    params.set("keyword", filters.keyword);
+  }
+  if (filters.status) {
+    params.set("status", filters.status);
+  }
   return requestJson<ChunkListResponse>(
-    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/chunks`,
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/chunks?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1412,9 +1791,14 @@ export async function listAdminDocumentChunks(
 export async function getAdminDocumentPreview(
   documentId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<AdminDocumentPreviewResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
   return requestJson<AdminDocumentPreviewResponse>(
-    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/preview`,
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/preview?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );

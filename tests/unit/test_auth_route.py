@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.main import create_app
 from app.modules.auth.errors import AuthServiceError
-from app.modules.auth.schemas import AuthContext, AuthRole, AuthUser, TokenPair
+from app.modules.auth.schemas import AuthContext, AuthDepartment, AuthRole, AuthUser, TokenPair
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
 
@@ -56,6 +56,15 @@ def _auth_context() -> AuthContext:
         username="admin",
         display_name="系统管理员",
         status="active",
+        departments=(
+            AuthDepartment(
+                id="dept_1",
+                code="CEO",
+                name="总裁办",
+                status="active",
+                is_primary=True,
+            ),
+        ),
         roles=(
             AuthRole(
                 id="role_1",
@@ -75,6 +84,44 @@ def _auth_context() -> AuthContext:
         token_type="access",
         scopes=user.scopes,
         claims={"sub": "user_1"},
+    )
+
+
+def _employee_auth_context() -> AuthContext:
+    user = AuthUser(
+        id="user_2",
+        enterprise_id="ent_1",
+        username="employee",
+        display_name="普通员工",
+        status="active",
+        departments=(
+            AuthDepartment(
+                id="dept_1",
+                code="CEO",
+                name="总裁办",
+                status="active",
+                is_primary=True,
+            ),
+        ),
+        roles=(
+            AuthRole(
+                id="role_2",
+                code="employee",
+                name="Employee",
+                scope_type="enterprise",
+                is_builtin=True,
+                status="active",
+                scopes=("knowledge_base:read", "document:read", "rag:query"),
+            ),
+        ),
+        scopes=("auth:session", "knowledge_base:read", "document:read", "rag:query"),
+    )
+    return AuthContext(
+        user=user,
+        token_jti="access_2",
+        token_type="access",
+        scopes=user.scopes,
+        claims={"sub": "user_2"},
     )
 
 
@@ -159,7 +206,50 @@ def test_current_user_route_wraps_user_response(monkeypatch) -> None:
     payload = response.json()
     assert payload["request_id"] == "req_me"
     assert payload["data"]["username"] == "admin"
-    assert payload["data"]["roles"][0]["code"] == "system_admin"
+    assert "roles" not in payload["data"]
+    assert "scopes" not in payload["data"]
+    assert "departments" not in payload["data"]
+
+
+def test_admin_current_user_capabilities_route_returns_admin_capabilities(monkeypatch) -> None:
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.auth.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.auth.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _auth_context(),
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/users/me/capabilities",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["username"] == "admin"
+    assert payload["roles"][0]["code"] == "system_admin"
+    assert payload["departments"][0]["name"] == "总裁办"
+    assert "code" not in payload["departments"][0]
+    assert "*" in payload["scopes"]
+
+
+def test_admin_current_user_capabilities_route_rejects_employee(monkeypatch) -> None:
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.auth.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.api.routes.auth.AuthService.authenticate_access_token",
+        lambda _self, _session, **_kwargs: _employee_auth_context(),
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/users/me/capabilities",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error_code"] == "AUTH_ADMIN_PORTAL_FORBIDDEN"
 
 
 def test_logout_route_returns_204(monkeypatch) -> None:

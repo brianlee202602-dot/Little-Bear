@@ -12,6 +12,7 @@ from app.api.schemas.knowledge import (
     CitationSourceData,
     CitationSourceResponse,
     DocumentData,
+    DocumentListItemData,
     DocumentListResponse,
     DocumentPreviewData,
     DocumentPreviewResponse,
@@ -32,6 +33,7 @@ from app.modules.knowledge import (
     AccessibleChunk,
     AccessibleCitationSource,
     AccessibleDocument,
+    AccessibleDocumentListItem,
     AccessibleDocumentPreview,
     AccessibleDocumentVersion,
     AccessibleKnowledgeBase,
@@ -116,7 +118,7 @@ async def list_documents(
         return _database_error_response(exc, stage="document_list")
     return DocumentListResponse(
         request_id=_request_id(),
-        data=[_document_data(item) for item in result.items],
+        data=[_document_list_item_data(item) for item in result.items],
         pagination=PaginationData(page=page, page_size=page_size, total=result.total),
     )
 
@@ -150,6 +152,8 @@ async def get_document(
 @router.get("/documents/{doc_id}/versions", response_model=DocumentVersionListResponse)
 async def list_document_versions(
     doc_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
     authorization: str | None = Header(default=None),
 ) -> DocumentVersionListResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
@@ -162,6 +166,8 @@ async def list_document_versions(
                 user_id=auth_context.user.id,
                 enterprise_id=auth_context.user.enterprise_id,
                 document_id=doc_id,
+                page=page,
+                page_size=page_size,
                 request_id=_request_id(),
             )
     except AuthServiceError as exc:
@@ -172,13 +178,18 @@ async def list_document_versions(
         return _database_error_response(exc, stage="document_version_list")
     return DocumentVersionListResponse(
         request_id=_request_id(),
-        data=[_document_version_data(item) for item in versions],
+        data=[_document_version_data(item) for item in versions.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=versions.total),
     )
 
 
 @router.get("/documents/{doc_id}/chunks", response_model=ChunkListResponse)
 async def list_document_chunks(
     doc_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    keyword: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
     authorization: str | None = Header(default=None),
 ) -> ChunkListResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
@@ -191,6 +202,10 @@ async def list_document_chunks(
                 user_id=auth_context.user.id,
                 enterprise_id=auth_context.user.enterprise_id,
                 document_id=doc_id,
+                page=page,
+                page_size=page_size,
+                keyword=keyword,
+                status=status_filter,
                 request_id=_request_id(),
             )
     except AuthServiceError as exc:
@@ -201,7 +216,8 @@ async def list_document_chunks(
         return _database_error_response(exc, stage="document_chunk_list")
     return ChunkListResponse(
         request_id=_request_id(),
-        data=[_chunk_data(item) for item in chunks],
+        data=[_chunk_data(item) for item in chunks.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=chunks.total),
     )
 
 
@@ -275,12 +291,6 @@ def _knowledge_base_data(item: AccessibleKnowledgeBase) -> KnowledgeBaseData:
         id=item.id,
         name=item.name,
         status=item.status,
-        owner_department_id=item.owner_department_id,
-        kb_visibility=item.kb_visibility,
-        default_document_visibility=item.default_document_visibility,
-        default_document_owner_department_id=item.default_document_owner_department_id,
-        config_scope_id=item.config_scope_id,
-        policy_version=item.policy_version,
     )
 
 
@@ -295,6 +305,18 @@ def _document_data(item: AccessibleDocument) -> DocumentData:
         owner_department_id=item.owner_department_id,
         visibility=item.visibility,
         current_version_id=item.current_version_id,
+    )
+
+
+def _document_list_item_data(item: AccessibleDocumentListItem) -> DocumentListItemData:
+    return DocumentListItemData(
+        id=item.id,
+        title=item.title,
+        lifecycle_status=item.lifecycle_status,
+        index_status=item.index_status,
+        updated_at=item.updated_at,
+        can_view=item.can_view,
+        can_cite=item.can_cite,
     )
 
 
@@ -316,6 +338,7 @@ def _chunk_data(item: AccessibleChunk) -> ChunkData:
         page_start=item.page_start,
         page_end=item.page_end,
         status=item.status,
+        ordinal=item.ordinal,
     )
 
 

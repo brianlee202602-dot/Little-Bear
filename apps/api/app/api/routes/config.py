@@ -21,6 +21,7 @@ from app.api.schemas.config import (
     ConfigValidationResponse,
     ConfigVersionCreateRequest,
     ConfigVersionData,
+    ConfigVersionListItemData,
     ConfigVersionListResponse,
     ConfigVersionPatchRequest,
     ConfigVersionPutRequest,
@@ -122,6 +123,8 @@ async def put_config(
 
 @router.get("/config-versions", response_model=ConfigVersionListResponse)
 async def list_config_versions(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
     authorization: str | None = Header(default=None),
 ) -> ConfigVersionListResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
@@ -129,7 +132,7 @@ async def list_config_versions(
     try:
         with session_scope() as session:
             _authenticate(session, token, required_scope="config:read")
-            versions = service.list_config_versions(session)
+            versions = service.list_config_versions(session, page=page, page_size=page_size)
     except AuthServiceError as exc:
         return _auth_error_response(exc, stage="config_version_list")
     except ConfigServiceError as exc:
@@ -138,7 +141,8 @@ async def list_config_versions(
         return _database_error_response(exc, stage="config_version_list")
     return ConfigVersionListResponse(
         request_id=_request_id(),
-        data=[_version_data(version) for version in versions],
+        data=[_version_list_item_data(version) for version in versions.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=versions.total),
     )
 
 
@@ -378,6 +382,18 @@ def _version_data(version: ConfigVersion) -> ConfigVersionData:
         risk_level=version.risk_level,
         created_by=version.created_by,
         config=version.config,
+        created_at=version.created_at,
+        updated_at=version.updated_at,
+        activated_at=version.activated_at,
+    )
+
+
+def _version_list_item_data(version: ConfigVersion) -> ConfigVersionListItemData:
+    return ConfigVersionListItemData(
+        version=version.version,
+        status=version.status,
+        risk_level=version.risk_level,
+        created_by=version.created_by,
         created_at=version.created_at,
         updated_at=version.updated_at,
         activated_at=version.activated_at,

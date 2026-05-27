@@ -49,8 +49,7 @@ type ChatMessage = {
   confidence: QueryConfidence | null;
   degraded: boolean;
   degradeReason: string | null;
-  requestId: string;
-  traceId: string;
+  debugId: string;
   createdAt: number;
 };
 
@@ -60,6 +59,9 @@ type ChatConversation = {
   status: "active" | "deleted";
   kbIds: string[];
   messages: ChatMessage[];
+  messagePage: number;
+  messagePageSize: number;
+  messageTotal: number;
   createdAt: number;
   updatedAt: number;
   lastMessageAt: number | null;
@@ -69,6 +71,9 @@ const AUTH_STORAGE_KEY = "little-bear.web.auth";
 const KB_STORAGE_KEY = "little-bear.web.kb-ids";
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 const LOCAL_CONVERSATION_PREFIX = "local-";
+const KNOWLEDGE_BASE_PAGE_SIZE = 50;
+const SOURCE_CHUNK_PAGE_SIZE = 20;
+const CONVERSATION_MESSAGE_PAGE_SIZE = 50;
 
 const form = reactive({
   kbIds: "",
@@ -95,10 +100,21 @@ const authTokens = ref<AuthTokenState | null>(loadStoredAuthTokens());
 const currentUser = ref<CurrentUserData | null>(null);
 const authFeedback = ref("");
 const knowledgeBases = ref<KnowledgeBaseData[]>([]);
+const knowledgeBasePagination = reactive({
+  page: 1,
+  pageSize: KNOWLEDGE_BASE_PAGE_SIZE,
+  total: 0,
+});
 const sourceDetail = ref<CitationSourceData | null>(null);
 const sourceChunks = ref<ChunkData[]>([]);
+const sourceChunkPagination = reactive({
+  page: 1,
+  pageSize: SOURCE_CHUNK_PAGE_SIZE,
+  total: 0,
+});
 const highlightedSourceId = ref("");
 const sourceTitle = ref("");
+const sourceDocumentId = ref("");
 const browserFeedback = ref("");
 const sourceFeedback = ref("");
 const chatRecords = ref<ChatConversation[]>([]);
@@ -112,6 +128,7 @@ const authBusy = reactive({
 const browserBusy = reactive({
   loadingKnowledgeBases: false,
   loadingConversations: false,
+  loadingOlderMessages: false,
   loadingSource: false,
   deletingConversationId: "",
 });
@@ -125,6 +142,9 @@ const selectedKbIds = computed(() => parseKbIds(form.kbIds));
 const selectedKbSet = computed(() => new Set(parseKbIds(form.kbIds)));
 const selectedKnowledgeBases = computed(() =>
   knowledgeBases.value.filter((kb) => selectedKbSet.value.has(kb.id)),
+);
+const hasMoreKnowledgeBases = computed(
+  () => knowledgeBases.value.length < knowledgeBasePagination.total,
 );
 const selectedKbLabel = computed(() => {
   if (!authenticated.value) {
@@ -184,6 +204,12 @@ const activeAssistantMessage = computed(() => {
   const messages = activeMessages.value.filter((message) => message.role === "assistant");
   return messages[messages.length - 1] ?? null;
 });
+const hasMoreSourceChunks = computed(
+  () => sourceChunks.value.length < sourceChunkPagination.total,
+);
+const hasMoreConversationMessages = computed(
+  () => Boolean(activeRecord.value && activeMessages.value.length < activeRecord.value.messageTotal),
+);
 
 onMounted(async () => {
   form.kbIds = window.sessionStorage.getItem(KB_STORAGE_KEY) ?? "";
@@ -240,8 +266,7 @@ async function submitQuery(): Promise<void> {
               confidence: event.confidence,
               degraded: event.degraded,
               degradeReason: event.degrade_reason,
-              requestId: event.request_id,
-              traceId: event.trace_id,
+              debugId: event.debug_id,
             });
             assistantMessageId = nextMessageId;
           },
@@ -257,10 +282,9 @@ async function submitQuery(): Promise<void> {
           },
           onDone: (event) => {
             metadata.value = {
-              request_id: event.request_id,
+              debug_id: event.debug_id,
               conversation_id: event.conversation_id,
               message_id: event.message_id,
-              trace_id: event.trace_id,
               confidence: event.confidence,
               degraded: event.degraded,
               degrade_reason: event.degrade_reason,
@@ -277,8 +301,7 @@ async function submitQuery(): Promise<void> {
               confidence: event.confidence,
               degraded: event.degraded,
               degradeReason: event.degrade_reason,
-              requestId: event.request_id,
-              traceId: event.trace_id,
+              debugId: event.debug_id,
             });
             assistantMessageId = nextMessageId;
           },
@@ -303,8 +326,7 @@ async function submitQuery(): Promise<void> {
         confidence: result.confidence,
         degraded: result.degraded,
         degradeReason: result.degrade_reason,
-        requestId: result.request_id,
-        traceId: result.trace_id,
+        debugId: result.debug_id,
       });
       assistantMessageId = nextMessageId;
     }
@@ -420,7 +442,7 @@ async function logout(): Promise<void> {
   }
 }
 
-async function refreshKnowledgeBases(): Promise<void> {
+async function refreshKnowledgeBases(append = false): Promise<void> {
   const accessToken = await ensureAccessToken();
   if (!accessToken) {
     return;
@@ -428,14 +450,36 @@ async function refreshKnowledgeBases(): Promise<void> {
   browserBusy.loadingKnowledgeBases = true;
   browserFeedback.value = "";
   try {
-    const response = await listKnowledgeBases(accessToken);
-    knowledgeBases.value = response.data;
-    reconcileSelectedKnowledgeBases(response.data);
+    const nextPage = append ? knowledgeBasePagination.page + 1 : 1;
+    const response = await listKnowledgeBases(accessToken, {
+      page: nextPage,
+      page_size: knowledgeBasePagination.pageSize,
+    });
+    knowledgeBasePagination.page = response.pagination.page;
+    knowledgeBasePagination.pageSize = response.pagination.page_size;
+    knowledgeBasePagination.total = response.pagination.total;
+    if (append) {
+      const existing = new Map(knowledgeBases.value.map((kb) => [kb.id, kb]));
+      for (const kb of response.data) {
+        existing.set(kb.id, kb);
+      }
+      knowledgeBases.value = Array.from(existing.values());
+    } else {
+      knowledgeBases.value = response.data;
+    }
+    reconcileSelectedKnowledgeBases(knowledgeBases.value);
   } catch (error) {
     browserFeedback.value = readableError(error);
   } finally {
     browserBusy.loadingKnowledgeBases = false;
   }
+}
+
+async function loadMoreKnowledgeBases(): Promise<void> {
+  if (browserBusy.loadingKnowledgeBases || !hasMoreKnowledgeBases.value) {
+    return;
+  }
+  await refreshKnowledgeBases(true);
 }
 
 async function refreshConversations(selectFirst: boolean): Promise<void> {
@@ -447,11 +491,11 @@ async function refreshConversations(selectFirst: boolean): Promise<void> {
   browserFeedback.value = "";
   try {
     const response = await listQueryConversations(accessToken);
-    const existingMessages = new Map(
-      chatRecords.value.map((conversation) => [conversation.id, conversation.messages]),
+    const existingRecords = new Map(
+      chatRecords.value.map((conversation) => [conversation.id, conversation]),
     );
     chatRecords.value = response.data.map((item) =>
-      conversationFromData(item, existingMessages.get(item.id) ?? []),
+      conversationFromData(item, existingRecords.get(item.id)?.messages ?? [], existingRecords.get(item.id)),
     );
     if (activeRecordId.value && !chatRecords.value.some((item) => item.id === activeRecordId.value)) {
       activeRecordId.value = "";
@@ -497,8 +541,10 @@ async function openCitationSource(citation: CitationData): Promise<void> {
   sourceFeedback.value = "";
   highlightedSourceId.value = citation.source_id;
   sourceTitle.value = citation.title;
+  sourceDocumentId.value = citation.doc_id;
   sourceDetail.value = null;
   sourceChunks.value = [];
+  clearSourceChunkPagination();
   try {
     const response = await getCitationSource(citation.doc_id, citation.source_id, accessToken);
     sourceDetail.value = response.data;
@@ -523,16 +569,63 @@ async function openDocumentSource(
   sourceFeedback.value = "";
   highlightedSourceId.value = sourceId;
   sourceTitle.value = title;
+  sourceDocumentId.value = documentId;
   sourceDetail.value = null;
+  sourceChunks.value = [];
+  clearSourceChunkPagination();
   try {
-    const response = await listDocumentChunks(documentId, accessToken);
-    sourceChunks.value = response.data;
+    await loadDocumentChunksPage(documentId, accessToken, false);
   } catch (error) {
     sourceChunks.value = [];
     sourceFeedback.value = readableError(error);
   } finally {
     browserBusy.loadingSource = false;
   }
+}
+
+async function loadMoreSourceChunks(): Promise<void> {
+  const accessToken = await ensureAccessToken();
+  if (!accessToken || !sourceDocumentId.value || browserBusy.loadingSource || !hasMoreSourceChunks.value) {
+    return;
+  }
+  browserBusy.loadingSource = true;
+  sourceFeedback.value = "";
+  try {
+    await loadDocumentChunksPage(sourceDocumentId.value, accessToken, true);
+  } catch (error) {
+    sourceFeedback.value = readableError(error);
+  } finally {
+    browserBusy.loadingSource = false;
+  }
+}
+
+async function loadDocumentChunksPage(
+  documentId: string,
+  accessToken: string,
+  append: boolean,
+): Promise<void> {
+  const nextPage = append ? sourceChunkPagination.page + 1 : 1;
+  const response = await listDocumentChunks(documentId, accessToken, {
+    page: nextPage,
+    page_size: sourceChunkPagination.pageSize,
+  });
+  sourceChunkPagination.page = response.pagination.page;
+  sourceChunkPagination.pageSize = response.pagination.page_size;
+  sourceChunkPagination.total = response.pagination.total;
+  if (append) {
+    const existing = new Map(sourceChunks.value.map((chunk) => [chunk.id, chunk]));
+    for (const chunk of response.data) {
+      existing.set(chunk.id, chunk);
+    }
+    sourceChunks.value = Array.from(existing.values());
+    return;
+  }
+  sourceChunks.value = response.data;
+}
+
+function clearSourceChunkPagination(): void {
+  sourceChunkPagination.page = 1;
+  sourceChunkPagination.total = 0;
 }
 
 function cancelQuery(): void {
@@ -552,8 +645,10 @@ function resetResult(): void {
 function resetSourceState(): void {
   sourceDetail.value = null;
   sourceChunks.value = [];
+  clearSourceChunkPagination();
   highlightedSourceId.value = "";
   sourceTitle.value = "";
+  sourceDocumentId.value = "";
   sourceFeedback.value = "";
 }
 
@@ -636,10 +731,14 @@ function clearAuthSession(): void {
   authTokens.value = null;
   currentUser.value = null;
   knowledgeBases.value = [];
+  knowledgeBasePagination.page = 1;
+  knowledgeBasePagination.total = 0;
   sourceDetail.value = null;
   sourceChunks.value = [];
+  clearSourceChunkPagination();
   highlightedSourceId.value = "";
   sourceTitle.value = "";
+  sourceDocumentId.value = "";
   browserFeedback.value = "";
   sourceFeedback.value = "";
   chatRecords.value = [];
@@ -669,11 +768,15 @@ async function selectChatRecord(record: ChatConversation): Promise<void> {
   browserBusy.loadingConversations = true;
   browserFeedback.value = "";
   try {
-    const response = await getQueryConversation(record.id, accessToken);
+    const response = await getQueryConversation(record.id, accessToken, {
+      page: 1,
+      page_size: CONVERSATION_MESSAGE_PAGE_SIZE,
+    });
     upsertConversation(
       conversationFromData(
         response.data,
         response.messages.map(messageFromData),
+        response.messages_pagination,
       ),
     );
     status.value = conversationStatus(activeRecord.value);
@@ -681,6 +784,41 @@ async function selectChatRecord(record: ChatConversation): Promise<void> {
     browserFeedback.value = readableError(error);
   } finally {
     browserBusy.loadingConversations = false;
+  }
+}
+
+async function loadOlderConversationMessages(): Promise<void> {
+  const record = activeRecord.value;
+  if (
+    !record ||
+    !isServerConversationId(record.id) ||
+    browserBusy.loadingOlderMessages ||
+    !hasMoreConversationMessages.value
+  ) {
+    return;
+  }
+  const accessToken = await ensureAccessToken();
+  if (!accessToken) {
+    return;
+  }
+  browserBusy.loadingOlderMessages = true;
+  browserFeedback.value = "";
+  try {
+    const response = await getQueryConversation(record.id, accessToken, {
+      page: record.messagePage + 1,
+      page_size: record.messagePageSize,
+    });
+    const olderMessages = response.messages.map(messageFromData);
+    const existingIds = new Set(record.messages.map((message) => message.id));
+    const mergedMessages = [
+      ...olderMessages.filter((message) => !existingIds.has(message.id)),
+      ...record.messages,
+    ];
+    upsertConversation(conversationFromData(response.data, mergedMessages, response.messages_pagination));
+  } catch (error) {
+    browserFeedback.value = readableError(error);
+  } finally {
+    browserBusy.loadingOlderMessages = false;
   }
 }
 
@@ -721,6 +859,9 @@ function createLocalConversation(query: string, kbIds: string[]): ChatConversati
     status: "active",
     kbIds,
     messages: [],
+    messagePage: 1,
+    messagePageSize: CONVERSATION_MESSAGE_PAGE_SIZE,
+    messageTotal: 0,
     createdAt: now,
     updatedAt: now,
     lastMessageAt: null,
@@ -742,8 +883,7 @@ function createLocalMessage(
     confidence: null,
     degraded: false,
     degradeReason: null,
-    requestId: "",
-    traceId: "",
+    debugId: "",
     createdAt: now,
   };
 }
@@ -756,6 +896,7 @@ function appendMessages(conversationId: string, messages: ChatMessage[], kbIds: 
           ...conversation,
           kbIds,
           messages: [...conversation.messages, ...messages],
+          messageTotal: conversation.messageTotal + messages.length,
           updatedAt: now,
           lastMessageAt: now,
         }
@@ -805,13 +946,20 @@ function upsertConversation(conversation: ChatConversation): void {
 function conversationFromData(
   data: QueryConversationData,
   messages: ChatMessage[] = [],
+  messageState?: { page: number; page_size: number; total: number } | ChatConversation,
 ): ChatConversation {
+  const existingState = messageState && "messagePage" in messageState ? messageState : null;
+  const paginationState = messageState && "page" in messageState ? messageState : null;
   return {
     id: data.id,
     title: data.title,
     status: data.status,
     kbIds: data.kb_ids,
     messages,
+    messagePage: existingState?.messagePage ?? paginationState?.page ?? 1,
+    messagePageSize:
+      existingState?.messagePageSize ?? paginationState?.page_size ?? CONVERSATION_MESSAGE_PAGE_SIZE,
+    messageTotal: existingState?.messageTotal ?? paginationState?.total ?? messages.length,
     createdAt: parseDateMs(data.created_at),
     updatedAt: parseDateMs(data.updated_at),
     lastMessageAt: data.last_message_at ? parseDateMs(data.last_message_at) : null,
@@ -828,8 +976,7 @@ function messageFromData(data: QueryMessageData): ChatMessage {
     confidence: data.confidence,
     degraded: data.degraded,
     degradeReason: data.degrade_reason,
-    requestId: data.request_id ?? "",
-    traceId: data.trace_id ?? "",
+    debugId: data.debug_id ?? "",
     createdAt: parseDateMs(data.created_at),
   };
 }
@@ -880,12 +1027,11 @@ function formatConfidence(value: QueryConfidence): string {
   return labels[value] ?? value;
 }
 
-function formatVisibility(value: string): string {
-  const labels: Record<string, string> = {
-    department: "部门可见",
-    enterprise: "企业可见",
-    department_acl: "指定部门可见",
-    private: "私密可见",
+function formatKnowledgeBaseStatus(value: KnowledgeBaseData["status"]): string {
+  const labels: Record<KnowledgeBaseData["status"], string> = {
+    active: "可查询",
+    disabled: "不可用",
+    archived: "已归档",
   };
   return labels[value] ?? value;
 }
@@ -987,7 +1133,7 @@ function formatSourceTextStatus(value: CitationSourceData["text_status"]): strin
               class="text-button"
               type="button"
               :disabled="browserBusy.loadingKnowledgeBases"
-              @click="refreshKnowledgeBases"
+              @click="refreshKnowledgeBases()"
             >
               刷新
             </button>
@@ -1018,7 +1164,7 @@ function formatSourceTextStatus(value: CitationSourceData["text_status"]): strin
               />
               <span>
                 <strong>{{ kb.name }}</strong>
-                <small>{{ formatVisibility(kb.kb_visibility) }}</small>
+                <small>{{ formatKnowledgeBaseStatus(kb.status) }}</small>
               </span>
             </label>
             <div v-if="!knowledgeBases.length" class="empty-state compact warning">
@@ -1026,6 +1172,15 @@ function formatSourceTextStatus(value: CitationSourceData["text_status"]): strin
               <p>当前账号没有可访问的知识库，无法发起查询。</p>
             </div>
           </div>
+          <button
+            v-if="hasMoreKnowledgeBases"
+            class="text-button kb-load-more"
+            type="button"
+            :disabled="browserBusy.loadingKnowledgeBases"
+            @click="loadMoreKnowledgeBases"
+          >
+            {{ browserBusy.loadingKnowledgeBases ? "加载中" : "加载更多知识库" }}
+          </button>
           <p v-if="browserFeedback" class="inline-error">{{ browserFeedback }}</p>
         </template>
       </section>
@@ -1104,6 +1259,20 @@ function formatSourceTextStatus(value: CitationSourceData["text_status"]): strin
 
       <template v-else>
         <div class="message-scroll">
+          <button
+            v-if="activeMessages.length && hasMoreConversationMessages"
+            class="conversation-load-more"
+            type="button"
+            :disabled="browserBusy.loadingOlderMessages"
+            @click="loadOlderConversationMessages"
+          >
+            {{
+              browserBusy.loadingOlderMessages
+                ? "加载中"
+                : `加载更早消息（${activeMessages.length}/${activeRecord?.messageTotal ?? 0}）`
+            }}
+          </button>
+
           <section v-if="!activeMessages.length" class="welcome">
             <h2>今天想查询什么？</h2>
             <p v-if="knowledgeBases.length">
@@ -1192,11 +1361,20 @@ function formatSourceTextStatus(value: CitationSourceData["text_status"]): strin
               :class="['source-chunk', { active: chunk.id === highlightedSourceId }]"
             >
               <header>
-                <strong>片段 {{ index + 1 }}</strong>
+                <strong>片段 {{ chunk.ordinal || index + 1 }}</strong>
                 <span>页 {{ chunk.page_start ?? 0 }}-{{ chunk.page_end ?? chunk.page_start ?? 0 }}</span>
               </header>
               <p>{{ chunk.text_preview }}</p>
             </article>
+            <button
+              v-if="sourceChunks.length && hasMoreSourceChunks"
+              class="text-button kb-load-more"
+              type="button"
+              :disabled="browserBusy.loadingSource"
+              @click="loadMoreSourceChunks"
+            >
+              {{ browserBusy.loadingSource ? "加载中" : `加载更多片段（${sourceChunks.length}/${sourceChunkPagination.total}）` }}
+            </button>
           </section>
         </div>
 
@@ -1450,6 +1628,11 @@ h1 {
   opacity: 0.45;
 }
 
+.kb-load-more {
+  margin: 6px;
+  text-align: left;
+}
+
 .kb-item {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1631,6 +1814,26 @@ h1 {
 .message-scroll {
   min-height: 0;
   overflow: auto;
+}
+
+.conversation-load-more {
+  display: block;
+  width: fit-content;
+  margin: 18px auto 8px;
+  border: 1px solid #d4d4d4;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #525252;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 14px;
+}
+
+.conversation-load-more:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .login-view {

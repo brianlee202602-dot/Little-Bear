@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import replace
@@ -39,6 +40,7 @@ from app.modules.query.service import QueryService, QueryStreamPlan
 from app.shared.context import get_request_context
 
 router = APIRouter(prefix="/internal/v1", tags=["query"])
+DEFAULT_CONVERSATION_MESSAGE_PAGE_SIZE = 50
 
 
 @router.get("/query-conversations", response_model=QueryConversationListResponse)
@@ -97,6 +99,11 @@ async def create_query_conversation(
         request_id=_request_id(),
         data=_conversation_data(conversation),
         messages=[],
+        messages_pagination={
+            "page": 1,
+            "page_size": DEFAULT_CONVERSATION_MESSAGE_PAGE_SIZE,
+            "total": 0,
+        },
     )
 
 
@@ -106,6 +113,8 @@ async def create_query_conversation(
 )
 async def get_query_conversation(
     conversation_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_CONVERSATION_MESSAGE_PAGE_SIZE, ge=1, le=100),
     authorization: str | None = Header(default=None),
 ) -> QueryConversationResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
@@ -117,6 +126,8 @@ async def get_query_conversation(
                 enterprise_id=auth_context.user.enterprise_id,
                 user_id=auth_context.user.id,
                 conversation_id=conversation_id,
+                page=page,
+                page_size=page_size,
             )
     except AuthServiceError as exc:
         return _auth_error_response(exc, stage="query_conversation_get_auth")
@@ -354,7 +365,7 @@ def _execute_query(
 
 def _query_response(result: QueryResult) -> QueryResponse:
     return QueryResponse(
-        request_id=result.request_id,
+        debug_id=_public_debug_id(result.request_id, result.trace_id) or "dbg_unknown",
         conversation_id=result.conversation_id,
         message_id=result.message_id,
         answer=result.answer,
@@ -362,7 +373,6 @@ def _query_response(result: QueryResult) -> QueryResponse:
         confidence=result.confidence,
         degraded=result.degraded,
         degrade_reason=result.degrade_reason,
-        trace_id=result.trace_id,
     )
 
 
@@ -370,10 +380,9 @@ def _query_sse_events(result: QueryResult) -> Iterable[str]:
     yield _sse_event(
         "metadata",
         {
-            "request_id": result.request_id,
+            "debug_id": _public_debug_id(result.request_id, result.trace_id) or "dbg_unknown",
             "conversation_id": result.conversation_id,
             "message_id": result.message_id,
-            "trace_id": result.trace_id,
             "confidence": result.confidence,
             "degraded": result.degraded,
             "degrade_reason": result.degrade_reason,
@@ -386,11 +395,10 @@ def _query_sse_events(result: QueryResult) -> Iterable[str]:
     yield _sse_event(
         "done",
         {
-            "request_id": result.request_id,
+            "debug_id": _public_debug_id(result.request_id, result.trace_id) or "dbg_unknown",
             "conversation_id": result.conversation_id,
             "message_id": result.message_id,
             "answer": result.answer,
-            "trace_id": result.trace_id,
             "citations": [
                 _citation_data(citation).model_dump() for citation in result.citations
             ],
@@ -405,10 +413,9 @@ def _query_stream_sse_events(service: QueryService, plan: QueryStreamPlan) -> It
     yield _sse_event(
         "metadata",
         {
-            "request_id": plan.request_id,
+            "debug_id": _public_debug_id(plan.request_id, plan.trace_id) or "dbg_unknown",
             "conversation_id": plan.conversation_id,
             "message_id": plan.message_id,
-            "trace_id": plan.trace_id,
             "confidence": plan.confidence,
             "degraded": bool(plan.pre_degrade_reasons),
             "degrade_reason": ";".join(plan.pre_degrade_reasons)
@@ -466,8 +473,7 @@ def _query_stream_sse_events(service: QueryService, plan: QueryStreamPlan) -> It
         yield _sse_event(
             "error",
             {
-                "request_id": plan.request_id,
-                "trace_id": plan.trace_id,
+                "debug_id": _public_debug_id(plan.request_id, plan.trace_id) or "dbg_unknown",
                 "error_code": getattr(exc, "error_code", "QUERY_STREAM_FINALIZE_FAILED"),
                 "message": getattr(exc, "message", "query stream finalization failed"),
             },
@@ -479,11 +485,10 @@ def _query_stream_sse_events(service: QueryService, plan: QueryStreamPlan) -> It
     yield _sse_event(
         "done",
         {
-            "request_id": result.request_id,
+            "debug_id": _public_debug_id(result.request_id, result.trace_id) or "dbg_unknown",
             "conversation_id": result.conversation_id,
             "message_id": result.message_id,
             "answer": result.answer,
-            "trace_id": result.trace_id,
             "citations": [
                 _citation_data(citation).model_dump() for citation in result.citations
             ],
@@ -565,6 +570,11 @@ def _conversation_response(detail: QueryConversationDetail) -> QueryConversation
         request_id=_request_id(),
         data=_conversation_data(detail.conversation),
         messages=[_message_data(message) for message in detail.messages],
+        messages_pagination={
+            "page": detail.message_page,
+            "page_size": detail.message_page_size,
+            "total": detail.message_total,
+        },
     )
 
 
@@ -591,8 +601,7 @@ def _message_data(message: QueryMessage) -> QueryMessageData:
         confidence=message.confidence,
         degraded=message.degraded,
         degrade_reason=message.degrade_reason,
-        request_id=message.request_id,
-        trace_id=message.trace_id,
+        debug_id=_public_debug_id(message.request_id, message.trace_id),
         created_at=message.created_at,
         updated_at=message.updated_at,
     )
@@ -615,6 +624,14 @@ def _request_id() -> str:
 def _trace_id() -> str:
     request_context = get_request_context()
     return request_context.trace_id if request_context else "trace_unknown"
+
+
+def _public_debug_id(*values: str | None) -> str | None:
+    seed = "|".join(value for value in values if value)
+    if not seed:
+        return None
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+    return f"dbg_{digest}"
 
 
 def _auth_error_response(exc: AuthServiceError, *, stage: str) -> JSONResponse:

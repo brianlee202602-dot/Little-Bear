@@ -175,9 +175,10 @@ class ImportService:
             session,
             enterprise_id=enterprise_id,
             requested_owner_department_id=owner_department_id,
-            knowledge_base_owner_department_id=knowledge_base[
+            default_document_owner_department_id=knowledge_base[
                 "default_document_owner_department_id"
             ],
+            knowledge_base=knowledge_base,
             actor_context=actor_context,
         )
         resolved_visibility = visibility or knowledge_base["default_document_visibility"]
@@ -1399,7 +1400,8 @@ class ImportService:
         *,
         enterprise_id: str,
         requested_owner_department_id: str | None,
-        knowledge_base_owner_department_id: str,
+        default_document_owner_department_id: str,
+        knowledge_base: dict[str, Any],
         actor_context: ImportActorContext | None,
     ) -> str:
         actor_department_id = (
@@ -1410,7 +1412,7 @@ class ImportService:
         owner_department_id = (
             requested_owner_department_id
             or actor_department_id
-            or knowledge_base_owner_department_id
+            or default_document_owner_department_id
         )
         row = session.execute(
             text(
@@ -1445,6 +1447,12 @@ class ImportService:
             actor_context
             and owner_department_id not in actor_context.department_ids
             and not actor_context.can_import_all_knowledge_bases
+            and not _actor_can_import_for_default_document_owner(
+                actor_context,
+                knowledge_base=knowledge_base,
+                owner_department_id=owner_department_id,
+                default_document_owner_department_id=default_document_owner_department_id,
+            )
         ):
             raise ImportServiceError(
                 "IMPORT_OWNER_DEPARTMENT_DENIED",
@@ -2131,18 +2139,41 @@ def _ensure_actor_can_import_to_kb(
 ) -> None:
     if actor_context is None:
         return
-    if actor_context.can_import_all_knowledge_bases:
-        return
-    kb_id = str(knowledge_base["kb_id"])
-    if kb_id in actor_context.knowledge_base_ids:
-        return
-    if _actor_has_kb_manage_access(actor_context, knowledge_base):
+    if _actor_can_import_to_kb(actor_context, knowledge_base=knowledge_base):
         return
     raise ImportServiceError(
         "IMPORT_KB_DENIED",
         "current user cannot import to the requested knowledge base",
         status_code=403,
-        details={"kb_id": kb_id},
+        details={"kb_id": str(knowledge_base["kb_id"])},
+    )
+
+
+def _actor_can_import_to_kb(
+    actor_context: ImportActorContext,
+    *,
+    knowledge_base: dict[str, Any],
+) -> bool:
+    if actor_context.can_import_all_knowledge_bases:
+        return True
+    kb_id = str(knowledge_base["kb_id"])
+    if kb_id in actor_context.knowledge_base_ids:
+        return True
+    if _actor_has_kb_manage_access(actor_context, knowledge_base):
+        return True
+    return False
+
+
+def _actor_can_import_for_default_document_owner(
+    actor_context: ImportActorContext,
+    *,
+    knowledge_base: dict[str, Any],
+    owner_department_id: str,
+    default_document_owner_department_id: str,
+) -> bool:
+    return (
+        owner_department_id == default_document_owner_department_id
+        and _actor_can_import_to_kb(actor_context, knowledge_base=knowledge_base)
     )
 
 

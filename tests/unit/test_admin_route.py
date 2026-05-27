@@ -6,22 +6,37 @@ from app.main import create_app
 from app.modules.admin.errors import AdminServiceError
 from app.modules.admin.schemas import (
     AdminAcceptedResult,
+    AdminAssignableRoleOption,
+    AdminAssignableRoleOptionList,
     AdminChunk,
+    AdminChunkList,
     AdminDepartment,
     AdminDepartmentList,
+    AdminDepartmentListItem,
+    AdminDepartmentOption,
+    AdminDepartmentOptionList,
     AdminDocument,
     AdminDocumentList,
     AdminDocumentPreview,
     AdminDocumentPreviewChunk,
     AdminDocumentVersion,
+    AdminDocumentVersionList,
     AdminFolder,
+    AdminFolderOption,
+    AdminFolderOptionList,
     AdminIndexVersion,
     AdminKnowledgeBase,
     AdminKnowledgeBaseList,
+    AdminKnowledgeBaseListItem,
+    AdminKnowledgeBaseOption,
+    AdminKnowledgeBaseOptionList,
     AdminRole,
     AdminRoleBinding,
+    AdminRoleList,
+    AdminRoleListItem,
     AdminUser,
     AdminUserList,
+    AdminUserListItem,
 )
 from app.modules.auth.schemas import AuthContext, AuthDepartment, AuthRole, AuthUser
 from app.modules.indexing.schemas import (
@@ -149,6 +164,17 @@ def _admin_user() -> AdminUser:
     )
 
 
+def _admin_user_list_item() -> AdminUserListItem:
+    return AdminUserListItem(
+        id="user_2",
+        username="alice",
+        name="Alice",
+        status="active",
+        department_names=("默认部门",),
+        role_names=("System Admin",),
+    )
+
+
 def _binding() -> AdminRoleBinding:
     return AdminRoleBinding(
         id="binding_1",
@@ -216,7 +242,7 @@ def test_admin_user_list_route_requires_user_read_scope(monkeypatch) -> None:
     monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
     def list_users(_self, _session, **kwargs):
         seen.update(kwargs)
-        return AdminUserList(items=[_admin_user()], total=1)
+        return AdminUserList(items=[_admin_user_list_item()], total=1)
 
     monkeypatch.setattr("app.api.routes.admin.AdminService.list_users", list_users)
 
@@ -233,6 +259,11 @@ def test_admin_user_list_route_requires_user_read_scope(monkeypatch) -> None:
     payload = response.json()
     assert payload["request_id"] == "req_users"
     assert payload["data"][0]["username"] == "alice"
+    assert payload["data"][0]["department_names"] == ["默认部门"]
+    assert payload["data"][0]["role_names"] == ["System Admin"]
+    assert "departments" not in payload["data"][0]
+    assert "roles" not in payload["data"][0]
+    assert "scopes" not in payload["data"][0]
     assert payload["pagination"]["total"] == 1
 
 
@@ -283,7 +314,17 @@ def test_department_list_route_requires_org_read_scope(monkeypatch) -> None:
 
     def list_departments(_self, _session, **kwargs):
         seen.update(kwargs)
-        return AdminDepartmentList(items=[_admin_department()], total=1)
+        return AdminDepartmentList(
+            items=[
+                AdminDepartmentListItem(
+                    id="department_1",
+                    name="默认部门",
+                    status="active",
+                    is_default=True,
+                )
+            ],
+            total=1,
+        )
 
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
@@ -301,8 +342,61 @@ def test_department_list_route_requires_org_read_scope(monkeypatch) -> None:
     assert seen["enterprise_id"] == "ent_1"
     payload = response.json()
     assert payload["request_id"] == "req_departments"
-    assert payload["data"][0]["code"] == "default"
+    assert "code" not in payload["data"][0]
+    assert payload["data"][0]["name"] == "默认部门"
     assert payload["data"][0]["is_default"] is True
+    assert payload["pagination"]["total"] == 1
+
+
+def test_department_options_route_returns_minimal_selector_fields(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_department_options(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminDepartmentOptionList(
+            items=[
+                AdminDepartmentOption(
+                    id="department_1",
+                    name="默认部门",
+                    status="active",
+                    is_default=True,
+                )
+            ],
+            total=1,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.list_department_options",
+        list_department_options,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/department-options?status=active",
+        headers={"authorization": "Bearer access.jwt", "x-request-id": "req_department_options"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "org:read"
+    assert seen["enterprise_id"] == "ent_1"
+    assert seen["status"] == "active"
+    payload = response.json()
+    assert payload["request_id"] == "req_department_options"
+    assert payload["data"] == [
+        {
+            "id": "department_1",
+            "name": "默认部门",
+            "status": "active",
+            "is_default": True,
+        }
+    ]
     assert payload["pagination"]["total"] == 1
 
 
@@ -351,7 +445,22 @@ def test_knowledge_base_list_route_requires_manage_scope(monkeypatch) -> None:
 
     def list_knowledge_bases(_self, _session, **kwargs):
         seen.update(kwargs)
-        return AdminKnowledgeBaseList(items=[_knowledge_base()], total=1)
+        return AdminKnowledgeBaseList(
+            items=[
+                AdminKnowledgeBaseListItem(
+                    id="kb_1",
+                    name="制度知识库",
+                    status="active",
+                    owner_department_id="department_1",
+                    owner_department_name="研发部",
+                    kb_visibility="department_acl",
+                    default_document_visibility="department",
+                    default_document_owner_department_id="department_1",
+                    default_document_owner_department_name="研发部",
+                )
+            ],
+            total=1,
+        )
 
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
@@ -374,6 +483,55 @@ def test_knowledge_base_list_route_requires_manage_scope(monkeypatch) -> None:
     payload = response.json()
     assert payload["request_id"] == "req_kbs"
     assert payload["data"][0]["name"] == "制度知识库"
+    assert payload["data"][0]["owner_department_name"] == "研发部"
+    assert "access_rules" not in payload["data"][0]
+    assert "config_scope_id" not in payload["data"][0]
+    assert "policy_version" not in payload["data"][0]
+    assert payload["pagination"]["total"] == 1
+
+
+def test_knowledge_base_options_route_returns_minimal_selector_fields(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_knowledge_base_options(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminKnowledgeBaseOptionList(
+            items=[
+                AdminKnowledgeBaseOption(
+                    id="kb_1",
+                    name="制度知识库",
+                    status="active",
+                )
+            ],
+            total=1,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.list_knowledge_base_options",
+        list_knowledge_base_options,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/knowledge-base-options?status=active",
+        headers={"authorization": "Bearer access.jwt", "x-request-id": "req_kb_options"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "knowledge_base:manage"
+    assert seen["enterprise_id"] == "ent_1"
+    assert seen["actor_context"].user_id == "user_1"
+    assert seen["status"] == "active"
+    payload = response.json()
+    assert payload["request_id"] == "req_kb_options"
+    assert payload["data"] == [{"id": "kb_1", "name": "制度知识库", "status": "active"}]
     assert payload["pagination"]["total"] == 1
 
 
@@ -577,6 +735,51 @@ def test_folder_list_route_requires_folder_manage_scope(monkeypatch) -> None:
     assert response.json()["data"][0]["name"] == "制度"
 
 
+def test_folder_options_route_returns_minimal_selector_fields(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_folder_options(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminFolderOptionList(
+            items=[
+                AdminFolderOption(
+                    id="folder_1",
+                    name="制度",
+                    status="active",
+                )
+            ],
+            total=1,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.list_folder_options",
+        list_folder_options,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/knowledge-bases/kb_1/folder-options?status=active",
+        headers={"authorization": "Bearer access.jwt", "x-request-id": "req_folder_options"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "folder:manage"
+    assert seen["kb_id"] == "kb_1"
+    assert seen["status"] == "active"
+    assert seen["actor_context"].user_id == "user_1"
+    payload = response.json()
+    assert payload["request_id"] == "req_folder_options"
+    assert payload["data"] == [{"id": "folder_1", "name": "制度", "status": "active"}]
+    assert payload["pagination"]["total"] == 1
+
+
 def test_folder_create_route_passes_parent_id(monkeypatch) -> None:
     seen: dict[str, object] = {}
 
@@ -774,13 +977,16 @@ def test_document_versions_route_requires_document_manage_scope(monkeypatch) -> 
 
     def list_document_versions(_self, _session, **kwargs):
         seen.update(kwargs)
-        return (
-            AdminDocumentVersion(
-                id="version_1",
-                document_id=kwargs["doc_id"],
-                version_no=1,
-                status="active",
-            ),
+        return AdminDocumentVersionList(
+            items=[
+                AdminDocumentVersion(
+                    id="version_1",
+                    document_id=kwargs["doc_id"],
+                    version_no=1,
+                    status="active",
+                ),
+            ],
+            total=1,
         )
 
     _open_business_api(monkeypatch)
@@ -800,7 +1006,10 @@ def test_document_versions_route_requires_document_manage_scope(monkeypatch) -> 
     assert response.status_code == 200
     assert seen["required_scope"] == "document:manage"
     assert seen["doc_id"] == "doc_1"
+    assert seen["page"] == 1
+    assert seen["page_size"] == 50
     assert response.json()["data"][0]["version_no"] == 1
+    assert response.json()["pagination"] == {"page": 1, "page_size": 50, "total": 1}
 
 
 def test_document_chunks_route_requires_document_manage_scope(monkeypatch) -> None:
@@ -812,16 +1021,20 @@ def test_document_chunks_route_requires_document_manage_scope(monkeypatch) -> No
 
     def list_document_chunks(_self, _session, **kwargs):
         seen.update(kwargs)
-        return (
-            AdminChunk(
-                id="chunk_1",
-                document_id=kwargs["doc_id"],
-                document_version_id="version_1",
-                text_preview="制度正文",
-                page_start=1,
-                page_end=1,
-                status="active",
-            ),
+        return AdminChunkList(
+            items=[
+                AdminChunk(
+                    id="chunk_1",
+                    document_id=kwargs["doc_id"],
+                    document_version_id="version_1",
+                    text_preview="制度正文",
+                    page_start=1,
+                    page_end=1,
+                    status="active",
+                    ordinal=1,
+                ),
+            ],
+            total=1,
         )
 
     _open_business_api(monkeypatch)
@@ -834,14 +1047,18 @@ def test_document_chunks_route_requires_document_manage_scope(monkeypatch) -> No
 
     client = TestClient(_create_test_app())
     response = client.get(
-        "/internal/v1/admin/documents/doc_1/chunks",
+        "/internal/v1/admin/documents/doc_1/chunks?page=2&page_size=10",
         headers={"authorization": "Bearer access.jwt"},
     )
 
     assert response.status_code == 200
     assert seen["required_scope"] == "document:manage"
     assert seen["doc_id"] == "doc_1"
+    assert seen["page"] == 2
+    assert seen["page_size"] == 10
     assert response.json()["data"][0]["text_preview"] == "制度正文"
+    assert response.json()["data"][0]["ordinal"] == 1
+    assert response.json()["pagination"]["total"] == 1
 
 
 def test_document_preview_route_requires_document_manage_scope(monkeypatch) -> None:
@@ -872,6 +1089,7 @@ def test_document_preview_route_requires_document_manage_scope(monkeypatch) -> N
                     text_status="object",
                 ),
             ),
+            total=1,
         )
 
     _open_business_api(monkeypatch)
@@ -896,6 +1114,7 @@ def test_document_preview_route_requires_document_manage_scope(monkeypatch) -> N
     assert payload["data"]["title"] == "员工手册"
     assert payload["data"]["chunks"][0]["text"] == "完整制度正文"
     assert payload["data"]["chunks"][0]["text_status"] == "object"
+    assert payload["pagination"]["total"] == 1
 
 
 def test_document_index_versions_route_requires_document_index_scope(monkeypatch) -> None:
@@ -1490,18 +1709,87 @@ def test_role_list_route_requires_role_read_scope(monkeypatch) -> None:
     monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
     monkeypatch.setattr(
         "app.api.routes.admin.AdminService.list_roles",
-        lambda _self, _session, **_kwargs: [_admin_role()],
+        lambda _self, _session, **_kwargs: AdminRoleList(
+            items=[
+                AdminRoleListItem(
+                    id="role_1",
+                    code="system_admin",
+                    name="System Admin",
+                    scope_type="enterprise",
+                    is_builtin=True,
+                    status="active",
+                )
+            ],
+            total=1,
+        ),
     )
 
     client = TestClient(_create_test_app())
     response = client.get(
-        "/internal/v1/admin/roles",
+        "/internal/v1/admin/roles?page=1&page_size=20",
         headers={"authorization": "Bearer access.jwt"},
     )
 
     assert response.status_code == 200
     assert seen["required_scope"] == "role:read"
-    assert response.json()["data"][0]["code"] == "system_admin"
+    payload = response.json()
+    assert payload["data"][0]["code"] == "system_admin"
+    assert "scopes" not in payload["data"][0]
+    assert payload["pagination"]["total"] == 1
+
+
+def test_assignable_role_options_route_returns_risk_level(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_assignable_role_options(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AdminAssignableRoleOptionList(
+            items=[
+                AdminAssignableRoleOption(
+                    id="role_1",
+                    code="system_admin",
+                    name="System Admin",
+                    scope_type="enterprise",
+                    status="active",
+                    risk_level="high",
+                )
+            ],
+            total=1,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.admin.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.admin.AdminService.list_assignable_role_options",
+        list_assignable_role_options,
+    )
+
+    client = TestClient(_create_test_app())
+    response = client.get(
+        "/internal/v1/admin/assignable-role-options?status=active",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "role:read"
+    assert seen["status"] == "active"
+    payload = response.json()
+    assert payload["data"] == [
+        {
+            "id": "role_1",
+            "code": "system_admin",
+            "name": "System Admin",
+            "scope_type": "enterprise",
+            "status": "active",
+            "risk_level": "high",
+        }
+    ]
+    assert payload["pagination"]["total"] == 1
 
 
 def test_role_binding_replace_passes_confirmation_header(monkeypatch) -> None:

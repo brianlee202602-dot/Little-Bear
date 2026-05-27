@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -23,12 +24,6 @@ class KnowledgeBaseData(BaseModel):
     id: str
     name: str
     status: Literal["active", "disabled", "archived"]
-    owner_department_id: str
-    kb_visibility: Literal["enterprise", "department_acl", "private"]
-    default_document_visibility: Literal["department", "enterprise"]
-    default_document_owner_department_id: str
-    config_scope_id: str | None = None
-    policy_version: int = 1
 
 
 class KnowledgeBaseListResponse(BaseModel):
@@ -53,11 +48,23 @@ class DocumentData(BaseModel):
     current_version_id: str | None = None
 
 
+class DocumentListItemData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    lifecycle_status: str
+    index_status: str
+    updated_at: datetime | None = None
+    can_view: bool = True
+    can_cite: bool = True
+
+
 class DocumentListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[DocumentData]
+    data: list[DocumentListItemData]
     pagination: PaginationData
 
 
@@ -82,6 +89,7 @@ class DocumentVersionListResponse(BaseModel):
 
     request_id: str
     data: list[DocumentVersionData]
+    pagination: PaginationData
 
 
 class ChunkData(BaseModel):
@@ -94,6 +102,7 @@ class ChunkData(BaseModel):
     page_start: int | None = None
     page_end: int | None = None
     status: str
+    ordinal: int
 
 
 class ChunkListResponse(BaseModel):
@@ -101,6 +110,7 @@ class ChunkListResponse(BaseModel):
 
     request_id: str
     data: list[ChunkData]
+    pagination: PaginationData
 
 
 class CitationSourceData(BaseModel):
