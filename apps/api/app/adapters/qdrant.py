@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from app.modules.models import EmbeddingClient, ModelClientError
-from app.modules.permissions.schemas import PermissionFilter
-from app.modules.retrieval import RetrievalCandidate, VectorSearchResult
-
-if TYPE_CHECKING:
-    from app.modules.indexing.schemas import DraftVectorPoint, VectorPayloadUpdate
+from app.adapters.vector_store import (
+    VectorStoreCandidate,
+    VectorStoreDraftPoint,
+    VectorStoreEmbeddingClient,
+    VectorStoreEmbeddingError,
+    VectorStorePayloadUpdate,
+    VectorStoreSearchFilter,
+    VectorStoreSearchResult,
+)
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,7 @@ class QdrantVectorRetriever:
         self,
         *,
         base_url: str,
-        embedding_client: EmbeddingClient,
+        embedding_client: VectorStoreEmbeddingClient,
         api_key: str | None = None,
         timeout_seconds: float = 3.0,
     ) -> None:
@@ -55,12 +58,12 @@ class QdrantVectorRetriever:
         self,
         *,
         query_text: str,
-        permission_filter: PermissionFilter,
+        permission_filter: VectorStoreSearchFilter,
         collection_names: tuple[str, ...],
         top_k: int,
-    ) -> VectorSearchResult:
+    ) -> VectorStoreSearchResult:
         if not collection_names:
-            return VectorSearchResult(
+            return VectorStoreSearchResult(
                 candidates=(),
                 degraded=True,
                 degrade_reason="vector_collection_unavailable",
@@ -73,33 +76,33 @@ class QdrantVectorRetriever:
                 collection_names=_unique(collection_names),
                 top_k=top_k,
             )
-        except ModelClientError:
-            return VectorSearchResult(
+        except VectorStoreEmbeddingError:
+            return VectorStoreSearchResult(
                 candidates=(),
                 degraded=True,
                 degrade_reason="query_embedding_failed",
             )
         except QdrantClientError:
-            return VectorSearchResult(
+            return VectorStoreSearchResult(
                 candidates=(),
                 degraded=True,
                 degrade_reason="vector_search_failed",
             )
-        return VectorSearchResult(candidates=candidates)
+        return VectorStoreSearchResult(candidates=candidates)
 
     def _search_collections(
         self,
         *,
         vector: list[float],
-        permission_filter: PermissionFilter,
+        permission_filter: VectorStoreSearchFilter,
         collection_names: tuple[str, ...],
         top_k: int,
-    ) -> tuple[RetrievalCandidate, ...]:
-        candidates: list[RetrievalCandidate] = []
+    ) -> tuple[VectorStoreCandidate, ...]:
+        candidates: list[VectorStoreCandidate] = []
         for collection_name in collection_names:
             payload = {
                 "vector": vector,
-                "filter": permission_filter.qdrant_filter,
+                "filter": permission_filter.payload_filter,
                 "limit": top_k,
                 "with_payload": True,
                 "with_vector": False,
@@ -130,7 +133,7 @@ class QdrantVectorIndexWriter:
         self,
         *,
         base_url: str,
-        embedding_client: EmbeddingClient,
+        embedding_client: VectorStoreEmbeddingClient,
         api_key: str | None = None,
         timeout_seconds: float = 3.0,
         vector_distance: str = "Cosine",
@@ -141,12 +144,12 @@ class QdrantVectorIndexWriter:
         self.timeout_seconds = timeout_seconds
         self.vector_distance = vector_distance
 
-    def upsert_draft_points(self, points: tuple[DraftVectorPoint, ...]) -> None:
+    def upsert_draft_points(self, points: tuple[VectorStoreDraftPoint, ...]) -> None:
         if not points:
             return
         try:
             vectors = self.embedding_client.embed_texts([point.text for point in points])
-        except ModelClientError as exc:
+        except VectorStoreEmbeddingError as exc:
             raise QdrantClientError("embedding provider failed while indexing") from exc
         if len(vectors) != len(points):
             raise QdrantClientError("embedding count does not match vector point count")
@@ -258,7 +261,7 @@ class QdrantVectorIndexWriter:
             api_key=self.api_key,
         )
 
-    def update_payloads(self, updates: tuple[VectorPayloadUpdate, ...]) -> None:
+    def update_payloads(self, updates: tuple[VectorStorePayloadUpdate, ...]) -> None:
         for update in updates:
             if not update.collection_name:
                 raise QdrantClientError("qdrant collection name is empty")
@@ -451,7 +454,7 @@ def _points(response: Any) -> list[dict[str, Any]]:
     raise QdrantClientError("qdrant response does not contain result points")
 
 
-def _candidate_from_point(point: dict[str, Any], *, rank: int) -> RetrievalCandidate | None:
+def _candidate_from_point(point: dict[str, Any], *, rank: int) -> VectorStoreCandidate | None:
     payload = point.get("payload")
     if not isinstance(payload, dict):
         return None
@@ -474,7 +477,7 @@ def _candidate_from_point(point: dict[str, Any], *, rank: int) -> RetrievalCandi
         )
     ):
         return None
-    return RetrievalCandidate(
+    return VectorStoreCandidate(
         source="vector",
         enterprise_id=enterprise_id,
         kb_id=kb_id,
@@ -499,8 +502,8 @@ def _candidate_from_point(point: dict[str, Any], *, rank: int) -> RetrievalCandi
     )
 
 
-def _replace_rank(candidate: RetrievalCandidate, rank: int) -> RetrievalCandidate:
-    return RetrievalCandidate(
+def _replace_rank(candidate: VectorStoreCandidate, rank: int) -> VectorStoreCandidate:
+    return VectorStoreCandidate(
         source=candidate.source,
         enterprise_id=candidate.enterprise_id,
         kb_id=candidate.kb_id,

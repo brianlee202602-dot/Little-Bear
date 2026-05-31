@@ -8,6 +8,7 @@ import {
   type AdminDepartmentListItemData,
   type AdminDepartmentOptionData,
   type AdminDocumentData,
+  type AdminDocumentListItemData,
   type AdminFolderData,
   type AdminFolderOptionData,
   type AdminKnowledgeBaseData,
@@ -39,6 +40,7 @@ import {
   deleteAdminUser,
   deleteCurrentSession,
   getAdminCurrentUserCapabilities,
+  getAdminDocument,
   getAdminUser,
   getAdminKnowledgeBase,
   getAdminIndexHealth,
@@ -267,6 +269,7 @@ const importAdminBusy = reactive({
   loadingFolders: false,
   loadingDocuments: false,
   loadingDocumentDetails: false,
+  loadingDocumentVersions: false,
   creating: false,
   updating: false,
   deleting: false,
@@ -336,15 +339,31 @@ const modelCallSearchForm = reactive({
 const documentSearchForm = reactive({
   status: "",
 });
+const optionSearchForm = reactive({
+  departmentKeyword: "",
+  roleKeyword: "",
+  knowledgeBaseKeyword: "",
+  folderKeyword: "",
+});
 const pageSizeOptions = [10, 20, 50, 100, 200];
+const selectorPageSize = 20;
 const configVersionPagination = reactive<PaginationState>({ page: 1, pageSize: 10, total: 0 });
 const departmentPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
 const userPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
+const selectedUserDepartmentPagination = reactive<PaginationState>({ page: 1, pageSize: 10, total: 0 });
+const selectedUserRoleBindingPagination = reactive<PaginationState>({ page: 1, pageSize: 10, total: 0 });
 const knowledgeBasePagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
+const folderPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
 const importJobPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
+const failedIndexJobPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
 const queryLogPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
 const modelCallLogPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
 const auditLogPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
+const indexHealthPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
+const indexSnapshotPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
+const documentPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
+const documentVersionPagination = reactive<PaginationState>({ page: 1, pageSize: 10, total: 0 });
+const documentIndexVersionPagination = reactive<PaginationState>({ page: 1, pageSize: 10, total: 0 });
 const documentChunkPagination = reactive<PaginationState>({ page: 1, pageSize: 20, total: 0 });
 const importUploadForm = reactive({
   kbId: "",
@@ -516,7 +535,8 @@ const adminKnowledgeBaseOptions = ref<AdminKnowledgeBaseOptionData[]>([]);
 const selectedKnowledgeBaseDetail = ref<AdminKnowledgeBaseData | null>(null);
 const adminFolders = ref<AdminFolderData[]>([]);
 const adminFolderOptions = ref<AdminFolderOptionData[]>([]);
-const adminDocuments = ref<AdminDocumentData[]>([]);
+const adminDocuments = ref<AdminDocumentListItemData[]>([]);
+const selectedAdminDocumentDetail = ref<AdminDocumentData | null>(null);
 const selectedDocumentVersions = ref<DocumentVersionData[]>([]);
 const selectedDocumentIndexVersions = ref<IndexVersionData[]>([]);
 const selectedDocumentChunks = ref<ChunkData[]>([]);
@@ -1375,8 +1395,16 @@ const selectedKnowledgeBase = computed(
 const selectedFolder = computed(
   () => adminFolders.value.find((folder) => folder.id === selectedFolderId.value) ?? null,
 );
-const selectedAdminDocument = computed(
+const selectedAdminDocumentListItem = computed(
   () => adminDocuments.value.find((document) => document.id === selectedDocumentId.value) ?? null,
+);
+const selectedAdminDocument = computed(() =>
+  selectedAdminDocumentDetail.value?.id === selectedDocumentId.value
+    ? selectedAdminDocumentDetail.value
+    : null,
+);
+const selectedDocumentForDisplay = computed(
+  () => selectedAdminDocument.value ?? selectedAdminDocumentListItem.value,
 );
 const selectedDocumentParentKnowledgeBase = computed(() => {
   const document = selectedAdminDocument.value;
@@ -1406,6 +1434,9 @@ const selectedUserDepartmentsForDisplay = computed(() => {
   }
   return selectedAdminUser.value?.departments ?? [];
 });
+const selectedUserDepartmentsForForm = computed(
+  () => selectedAdminUser.value?.departments ?? selectedUserDepartments.value,
+);
 const initialAssignableRoles = computed(() =>
   adminRoles.value.filter((role) => role.status === "active" && role.scope_type === "enterprise"),
 );
@@ -1678,7 +1709,7 @@ const selectedUserRoleBindingKeys = computed(() =>
 );
 const selectedUserDepartmentIds = computed(() => new Set(userDepartmentForm.departmentIds));
 const currentSelectedUserPrimaryDepartmentId = computed(() => {
-  const departments = selectedUserDepartmentsForDisplay.value;
+  const departments = selectedUserDepartmentsForForm.value;
   return departments.find((department) => department.is_primary)?.id ?? departments[0]?.id ?? "";
 });
 const nextSelectedUserPrimaryDepartmentId = computed(() => userDepartmentForm.departmentIds[0] ?? "");
@@ -2266,6 +2297,197 @@ async function refreshConfigAdminState(): Promise<void> {
   }
 }
 
+async function refreshDepartmentOptions(existingAccessToken?: string): Promise<void> {
+  if (!canReadDepartments.value) {
+    adminDepartmentOptions.value = [];
+    ensureDefaultCreateDepartmentSelection();
+    syncKnowledgeBaseCreateOwnerDefault();
+    syncRoleBindingScopeDefault();
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+  const response = await listAdminDepartmentOptions(accessToken, {
+    keyword: optionSearchForm.departmentKeyword.trim() || undefined,
+    status: "active",
+    page_size: selectorPageSize,
+  });
+  adminDepartmentOptions.value = mergeDepartmentOptions(response.data);
+  ensureDefaultCreateDepartmentSelection();
+  syncKnowledgeBaseCreateOwnerDefault();
+  syncRoleBindingScopeDefault();
+}
+
+async function refreshAssignableRoleOptions(existingAccessToken?: string): Promise<void> {
+  if (!canReadRoles.value) {
+    adminRoles.value = [];
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+  const response = await listAdminAssignableRoleOptions(accessToken, {
+    keyword: optionSearchForm.roleKeyword.trim() || undefined,
+    status: "active",
+    page_size: selectorPageSize,
+  });
+  adminRoles.value = mergeAssignableRoleOptions(response.data);
+  if (!roleBindingForm.roleId && assignableRoles.value.length > 0) {
+    roleBindingForm.roleId = assignableRoles.value[0].id;
+  }
+  syncRoleBindingScopeDefault();
+}
+
+async function refreshKnowledgeBaseOptions(existingAccessToken?: string): Promise<void> {
+  if (!canManageKnowledgeBases.value) {
+    adminKnowledgeBaseOptions.value = [];
+    syncRoleBindingScopeDefault();
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+  const response = await listAdminKnowledgeBaseOptions(accessToken, {
+    keyword: optionSearchForm.knowledgeBaseKeyword.trim() || undefined,
+    status: "active",
+    page_size: selectorPageSize,
+  });
+  adminKnowledgeBaseOptions.value = mergeKnowledgeBaseOptions(response.data);
+  syncRoleBindingScopeDefault();
+}
+
+async function refreshFolderOptions(existingAccessToken?: string): Promise<void> {
+  const knowledgeBase = selectedKnowledgeBase.value;
+  if (!knowledgeBase || !canManageFolders.value) {
+    adminFolderOptions.value = [];
+    importUploadForm.folderId = "";
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+  const response = await listAdminFolderOptions(knowledgeBase.id, accessToken, {
+    keyword: optionSearchForm.folderKeyword.trim() || undefined,
+    status: "active",
+    page_size: selectorPageSize,
+  });
+  adminFolderOptions.value = mergeFolderOptions(response.data);
+}
+
+function refreshDepartmentOptionsFromSearch(): void {
+  void refreshDepartmentOptions();
+}
+
+function refreshAssignableRoleOptionsFromSearch(): void {
+  void refreshAssignableRoleOptions();
+}
+
+function refreshKnowledgeBaseOptionsFromSearch(): void {
+  void refreshKnowledgeBaseOptions();
+}
+
+function refreshFolderOptionsFromSearch(): void {
+  void refreshFolderOptions();
+}
+
+function uniqueById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const item of items) {
+    if (seen.has(item.id)) {
+      continue;
+    }
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
+}
+
+function departmentOptionFromDepartment(
+  department: { id: string; name: string; status: string; is_default?: boolean | null } | null | undefined,
+): AdminDepartmentOptionData | null {
+  if (!department) {
+    return null;
+  }
+  return {
+    id: department.id,
+    name: department.name,
+    status: department.status,
+    is_default: "is_default" in department ? Boolean(department.is_default) : false,
+  };
+}
+
+function mergeDepartmentOptions(
+  options: AdminDepartmentOptionData[],
+): AdminDepartmentOptionData[] {
+  const pinned = [
+    ...(currentUser.value?.departments ?? []),
+    ...(selectedAdminUser.value?.departments ?? []),
+    ...selectedUserDepartments.value,
+    ...adminDepartments.value,
+    ...(selectedKnowledgeBaseDetail.value?.owner_department
+      ? [selectedKnowledgeBaseDetail.value.owner_department]
+      : []),
+    ...(selectedKnowledgeBaseDetail.value?.default_document_owner_department
+      ? [selectedKnowledgeBaseDetail.value.default_document_owner_department]
+      : []),
+  ]
+    .map(departmentOptionFromDepartment)
+    .filter((department): department is AdminDepartmentOptionData => Boolean(department));
+  return uniqueById([...options, ...pinned]);
+}
+
+function mergeAssignableRoleOptions(
+  options: AdminAssignableRoleOptionData[],
+): AdminAssignableRoleOptionData[] {
+  const pinned =
+    selectedAdminUser.value?.roles.map((role) => ({
+      id: role.id,
+      code: role.code,
+      name: role.name,
+      scope_type: role.scope_type,
+      status: role.status,
+      risk_level: isHighRiskAdminRole(role) ? "high" as const : "low" as const,
+    })) ?? [];
+  return uniqueById([...options, ...pinned]);
+}
+
+function mergeKnowledgeBaseOptions(
+  options: AdminKnowledgeBaseOptionData[],
+): AdminKnowledgeBaseOptionData[] {
+  const pinned = [
+    ...adminKnowledgeBases.value.map((knowledgeBase) => ({
+      id: knowledgeBase.id,
+      name: knowledgeBase.name,
+      status: knowledgeBase.status,
+    })),
+    ...(selectedKnowledgeBaseDetail.value
+      ? [
+          {
+            id: selectedKnowledgeBaseDetail.value.id,
+            name: selectedKnowledgeBaseDetail.value.name,
+            status: selectedKnowledgeBaseDetail.value.status,
+          },
+        ]
+      : []),
+  ];
+  return uniqueById([...options, ...pinned]);
+}
+
+function mergeFolderOptions(options: AdminFolderOptionData[]): AdminFolderOptionData[] {
+  const pinned = adminFolders.value.map((folder) => ({
+    id: folder.id,
+    name: folder.name,
+    status: folder.status,
+  }));
+  return uniqueById([...options, ...pinned]);
+}
+
 async function refreshUserRoleAdminState(): Promise<void> {
   if (!canLoadUserAdmin.value) {
     adminUsers.value = [];
@@ -2277,6 +2499,8 @@ async function refreshUserRoleAdminState(): Promise<void> {
     selectedAdminUserDetail.value = null;
     selectedUserDepartments.value = [];
     selectedUserRoleBindings.value = [];
+    clearPaginationState(selectedUserDepartmentPagination);
+    clearPaginationState(selectedUserRoleBindingPagination);
     return;
   }
   const accessToken = await ensureAccessToken();
@@ -2287,32 +2511,18 @@ async function refreshUserRoleAdminState(): Promise<void> {
     userAdminBusy.loading = true;
   try {
     if (canReadRoles.value) {
-      const rolesResponse = await listAdminAssignableRoleOptions(accessToken, {
-        status: "active",
-      });
-      adminRoles.value = rolesResponse.data;
-      if (!roleBindingForm.roleId && assignableRoles.value.length > 0) {
-        roleBindingForm.roleId = assignableRoles.value[0].id;
-      }
-      syncRoleBindingScopeDefault();
+      await refreshAssignableRoleOptions(accessToken);
     } else {
       adminRoles.value = [];
     }
     if (canReadDepartments.value) {
-      const departmentsResponse = await listAdminDepartmentOptions(accessToken, { status: "active" });
-      adminDepartmentOptions.value = departmentsResponse.data;
-      ensureDefaultCreateDepartmentSelection();
-      syncRoleBindingScopeDefault();
+      await refreshDepartmentOptions(accessToken);
     } else {
       adminDepartmentOptions.value = [];
       ensureDefaultCreateDepartmentSelection();
     }
     if (canManageKnowledgeBases.value) {
-      const knowledgeBasesResponse = await listAdminKnowledgeBaseOptions(accessToken, {
-        status: "active",
-      });
-      adminKnowledgeBaseOptions.value = knowledgeBasesResponse.data;
-      syncRoleBindingScopeDefault();
+      await refreshKnowledgeBaseOptions(accessToken);
     } else {
       adminKnowledgeBaseOptions.value = [];
     }
@@ -2331,15 +2541,19 @@ async function refreshUserRoleAdminState(): Promise<void> {
       ) {
         selectedAdminUserId.value = adminUsers.value[0]?.id ?? "";
         selectedAdminUserDetail.value = null;
+        clearPaginationState(selectedUserDepartmentPagination);
+        clearPaginationState(selectedUserRoleBindingPagination);
       } else if (selectedAdminUserDetail.value?.id !== selectedAdminUserId.value) {
         selectedAdminUserDetail.value = null;
       }
     } else {
       adminUsers.value = [];
       clearPaginationState(userPagination);
-      selectedAdminUserId.value = "";
-      selectedAdminUserDetail.value = null;
-    }
+    selectedAdminUserId.value = "";
+    selectedAdminUserDetail.value = null;
+    clearPaginationState(selectedUserDepartmentPagination);
+    clearPaginationState(selectedUserRoleBindingPagination);
+  }
     if (selectedAdminUserId.value && selectedAdminUserDetail.value) {
       await refreshSelectedAdminUserDetail(accessToken);
     }
@@ -2429,6 +2643,12 @@ async function refreshImportJobList(
   syncPaginationState(importJobPagination, jobsResponse.pagination);
 }
 
+function refreshImportTaskFilters(): void {
+  importJobPagination.page = 1;
+  failedIndexJobPagination.page = 1;
+  void refreshKnowledgeBaseAdminState();
+}
+
 async function refreshKnowledgeBaseAdminState(): Promise<void> {
   if (!canLoadImportAdmin.value) {
     adminKnowledgeBases.value = [];
@@ -2437,10 +2657,16 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
     clearPaginationState(knowledgeBasePagination);
     adminFolders.value = [];
     adminFolderOptions.value = [];
+    clearPaginationState(folderPagination);
     adminDocuments.value = [];
+    clearPaginationState(documentPagination);
     clearSelectedDocumentDetails();
+    clearSelectedDocumentMetadata();
     adminImportJobs.value = [];
     clearPaginationState(importJobPagination);
+    failedIndexJobs.value = [];
+    selectedFailedIndexJobIds.value = [];
+    clearPaginationState(failedIndexJobPagination);
     selectedKnowledgeBaseId.value = "";
     selectedFolderId.value = "";
     selectedDocumentId.value = "";
@@ -2459,17 +2685,13 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
   let failedIndexJobsLoaded = true;
   try {
     if (canReadDepartments.value) {
-      const departmentsResponse = await listAdminDepartmentOptions(accessToken, { status: "active" });
-      adminDepartmentOptions.value = departmentsResponse.data;
-      syncKnowledgeBaseCreateOwnerDefault();
+      await refreshDepartmentOptions(accessToken);
     } else {
       adminDepartmentOptions.value = [];
     }
     if (canManageKnowledgeBases.value) {
-      const knowledgeBaseOptionsResponse = await listAdminKnowledgeBaseOptions(accessToken, {
-        status: "active",
-      });
-      adminKnowledgeBaseOptions.value = knowledgeBaseOptionsResponse.data;
+      await refreshKnowledgeBaseOptions(accessToken);
+      const previousSelectedKnowledgeBaseId = selectedKnowledgeBaseId.value;
       const knowledgeBasesResponse = await listAdminKnowledgeBases(accessToken, {
         keyword: knowledgeBaseSearchForm.keyword.trim() || undefined,
         status: knowledgeBaseSearchForm.status || undefined,
@@ -2485,6 +2707,14 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
         selectedKnowledgeBaseId.value = adminKnowledgeBases.value[0]?.id ?? "";
         selectedKnowledgeBaseDetail.value = null;
       }
+      if (selectedKnowledgeBaseId.value !== previousSelectedKnowledgeBaseId) {
+        selectedFolderId.value = "";
+        selectedDocumentId.value = "";
+        clearPaginationState(folderPagination);
+        clearPaginationState(documentPagination);
+        clearSelectedDocumentDetails();
+        clearSelectedDocumentMetadata();
+      }
       ensureImportKnowledgeBaseSelection();
       if (selectedKnowledgeBaseId.value) {
         await refreshSelectedKnowledgeBaseDetail(accessToken);
@@ -2496,14 +2726,17 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
       } else {
         adminFolders.value = [];
         adminFolderOptions.value = [];
+        clearPaginationState(folderPagination);
         selectedFolderId.value = "";
       }
       if (canManageDocuments.value) {
         await refreshSelectedKnowledgeBaseDocuments(accessToken);
       } else {
         adminDocuments.value = [];
+        clearPaginationState(documentPagination);
         selectedDocumentId.value = "";
         clearSelectedDocumentDetails();
+        clearSelectedDocumentMetadata();
       }
     } else {
       clearPaginationState(knowledgeBasePagination);
@@ -2511,10 +2744,13 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
       selectedKnowledgeBaseDetail.value = null;
       adminFolders.value = [];
       adminFolderOptions.value = [];
+      clearPaginationState(folderPagination);
       adminDocuments.value = [];
+      clearPaginationState(documentPagination);
       selectedFolderId.value = "";
       selectedDocumentId.value = "";
       clearSelectedDocumentDetails();
+      clearSelectedDocumentMetadata();
     }
     if (canReadImportJobs.value) {
       await refreshImportJobList(accessToken);
@@ -2524,6 +2760,7 @@ async function refreshKnowledgeBaseAdminState(): Promise<void> {
       clearPaginationState(importJobPagination);
       failedIndexJobs.value = [];
       selectedFailedIndexJobIds.value = [];
+      clearPaginationState(failedIndexJobPagination);
     }
     if (failedIndexJobsLoaded) {
       importAdminFeedback.value = {
@@ -2545,6 +2782,7 @@ async function refreshFailedIndexJobs(existingAccessToken?: string): Promise<boo
   if (!canReadImportJobs.value) {
     failedIndexJobs.value = [];
     selectedFailedIndexJobIds.value = [];
+    clearPaginationState(failedIndexJobPagination);
     return true;
   }
   const accessToken = existingAccessToken ?? (await ensureAccessToken());
@@ -2558,9 +2796,19 @@ async function refreshFailedIndexJobs(existingAccessToken?: string): Promise<boo
       kb_id: importSearchForm.kbId || undefined,
       status: "failed",
       job_type: "index_rebuild",
-      page_size: 100,
+      page: failedIndexJobPagination.page,
+      page_size: failedIndexJobPagination.pageSize,
     });
     failedIndexJobs.value = response.data;
+    syncPaginationState(failedIndexJobPagination, response.pagination);
+    if (
+      failedIndexJobs.value.length === 0 &&
+      failedIndexJobPagination.total > 0 &&
+      failedIndexJobPagination.page > 1
+    ) {
+      failedIndexJobPagination.page = paginationTotalPages(failedIndexJobPagination);
+      return refreshFailedIndexJobs(accessToken);
+    }
     const availableIds = new Set(response.data.map((job) => job.id));
     selectedFailedIndexJobIds.value = selectedFailedIndexJobIds.value.filter((id) =>
       availableIds.has(id),
@@ -2572,6 +2820,7 @@ async function refreshFailedIndexJobs(existingAccessToken?: string): Promise<boo
   } catch (error) {
     failedIndexJobs.value = [];
     selectedFailedIndexJobIds.value = [];
+    clearPaginationState(failedIndexJobPagination);
     importAdminFeedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "读取失败索引任务失败"),
@@ -2580,6 +2829,10 @@ async function refreshFailedIndexJobs(existingAccessToken?: string): Promise<boo
   } finally {
     importAdminBusy.loadingFailedIndexJobs = false;
   }
+}
+
+async function refreshFailedIndexJobsPage(): Promise<void> {
+  await refreshFailedIndexJobs();
 }
 
 function toggleFailedIndexJob(jobId: string, checked: boolean): void {
@@ -2650,25 +2903,46 @@ async function retrySelectedFailedIndexJobs(): Promise<void> {
 async function refreshSelectedUserRoleBindings(existingAccessToken?: string): Promise<void> {
   if (!selectedAdminUserId.value || !canReadRoles.value) {
     selectedUserRoleBindings.value = [];
+    clearPaginationState(selectedUserRoleBindingPagination);
     return;
   }
   const accessToken = existingAccessToken ?? (await ensureAccessToken());
   if (!accessToken) {
     return;
   }
-  const response = await listAdminUserRoleBindings(selectedAdminUserId.value, accessToken);
+  const response = await listAdminUserRoleBindings(selectedAdminUserId.value, accessToken, {
+    page: selectedUserRoleBindingPagination.page,
+    page_size: selectedUserRoleBindingPagination.pageSize,
+  });
   selectedUserRoleBindings.value = response.data;
+  syncPaginationState(selectedUserRoleBindingPagination, response.pagination);
+  if (
+    selectedUserRoleBindings.value.length === 0 &&
+    selectedUserRoleBindingPagination.total > 0 &&
+    selectedUserRoleBindingPagination.page > 1
+  ) {
+    selectedUserRoleBindingPagination.page = paginationTotalPages(selectedUserRoleBindingPagination);
+    await refreshSelectedUserRoleBindings(accessToken);
+    return;
+  }
   syncRoleBindingScopeDefault();
+}
+
+async function refreshSelectedUserRoleBindingsPage(): Promise<void> {
+  await refreshSelectedUserRoleBindings();
 }
 
 async function refreshSelectedUserDepartments(existingAccessToken?: string): Promise<void> {
   if (!selectedAdminUserId.value) {
     selectedUserDepartments.value = [];
+    clearPaginationState(selectedUserDepartmentPagination);
     syncSelectedUserDepartmentForm();
     return;
   }
   if (!canReadDepartments.value) {
     selectedUserDepartments.value = selectedAdminUser.value?.departments ?? [];
+    selectedUserDepartmentPagination.page = 1;
+    selectedUserDepartmentPagination.total = selectedUserDepartments.value.length;
     syncSelectedUserDepartmentForm();
     return;
   }
@@ -2676,10 +2950,26 @@ async function refreshSelectedUserDepartments(existingAccessToken?: string): Pro
   if (!accessToken) {
     return;
   }
-  const response = await listAdminUserDepartments(selectedAdminUserId.value, accessToken);
+  const response = await listAdminUserDepartments(selectedAdminUserId.value, accessToken, {
+    page: selectedUserDepartmentPagination.page,
+    page_size: selectedUserDepartmentPagination.pageSize,
+  });
   selectedUserDepartments.value = response.data;
-  updateSelectedAdminUserDepartments(response.data);
+  syncPaginationState(selectedUserDepartmentPagination, response.pagination);
+  if (
+    selectedUserDepartments.value.length === 0 &&
+    selectedUserDepartmentPagination.total > 0 &&
+    selectedUserDepartmentPagination.page > 1
+  ) {
+    selectedUserDepartmentPagination.page = paginationTotalPages(selectedUserDepartmentPagination);
+    await refreshSelectedUserDepartments(accessToken);
+    return;
+  }
   syncSelectedUserDepartmentForm();
+}
+
+async function refreshSelectedUserDepartmentsPage(): Promise<void> {
+  await refreshSelectedUserDepartments();
 }
 
 async function refreshSelectedKnowledgeBaseDetail(existingAccessToken?: string): Promise<void> {
@@ -2705,6 +2995,7 @@ async function refreshSelectedKnowledgeBaseFolders(existingAccessToken?: string)
   if (!knowledgeBase || !canManageFolders.value) {
     adminFolders.value = [];
     adminFolderOptions.value = [];
+    clearPaginationState(folderPagination);
     selectedFolderId.value = "";
     importUploadForm.folderId = "";
     return;
@@ -2716,31 +3007,29 @@ async function refreshSelectedKnowledgeBaseFolders(existingAccessToken?: string)
 
   importAdminBusy.loadingFolders = true;
   try {
-    const [foldersResponse, folderOptionsResponse] = await Promise.all([
-      listAdminFolders(knowledgeBase.id, accessToken, { page_size: 100 }),
-      listAdminFolderOptions(knowledgeBase.id, accessToken, {
-        page_size: 200,
-        status: "active",
-      }),
-    ]);
+    const foldersResponse = await listAdminFolders(knowledgeBase.id, accessToken, {
+      page: folderPagination.page,
+      page_size: folderPagination.pageSize,
+    });
     adminFolders.value = foldersResponse.data;
-    adminFolderOptions.value = folderOptionsResponse.data;
+    syncPaginationState(folderPagination, foldersResponse.pagination);
+    if (adminFolders.value.length === 0 && folderPagination.total > 0 && folderPagination.page > 1) {
+      folderPagination.page = paginationTotalPages(folderPagination);
+      await refreshSelectedKnowledgeBaseFolders(accessToken);
+      return;
+    }
+    await refreshFolderOptions(accessToken);
     if (
       selectedFolderId.value &&
       !adminFolders.value.some((folder) => folder.id === selectedFolderId.value)
     ) {
       selectedFolderId.value = "";
     }
-    if (
-      importUploadForm.folderId &&
-      !adminFolderOptions.value.some((folder) => folder.id === importUploadForm.folderId)
-    ) {
-      importUploadForm.folderId = "";
-    }
     syncFolderEditForm();
   } catch (error) {
     adminFolders.value = [];
     adminFolderOptions.value = [];
+    clearPaginationState(folderPagination);
     selectedFolderId.value = "";
     importUploadForm.folderId = "";
     importAdminFeedback.value = {
@@ -2757,9 +3046,16 @@ function clearSelectedDocumentDetails(): void {
   selectedDocumentIndexVersions.value = [];
   selectedDocumentChunks.value = [];
   highlightedDocumentChunkId.value = "";
+  clearPaginationState(documentVersionPagination);
+  clearPaginationState(documentIndexVersionPagination);
   clearPaginationState(documentChunkPagination);
   documentIndexForm.confirmedRebuild = false;
   clearIndexVersionCleanupSelection();
+}
+
+function clearSelectedDocumentMetadata(): void {
+  selectedAdminDocumentDetail.value = null;
+  syncDocumentPermissionForm();
 }
 
 function clearBatchDocumentSelection(): void {
@@ -2777,7 +3073,9 @@ async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: strin
   if (!knowledgeBase || !canManageDocuments.value) {
     adminDocuments.value = [];
     selectedDocumentId.value = "";
+    clearPaginationState(documentPagination);
     clearSelectedDocumentDetails();
+    clearSelectedDocumentMetadata();
     clearBatchDocumentSelection();
     return;
   }
@@ -2790,9 +3088,16 @@ async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: strin
   try {
     const response = await listAdminDocuments(knowledgeBase.id, accessToken, {
       status: documentSearchForm.status || undefined,
-      page_size: 100,
+      page: documentPagination.page,
+      page_size: documentPagination.pageSize,
     });
     adminDocuments.value = response.data;
+    syncPaginationState(documentPagination, response.pagination);
+    if (adminDocuments.value.length === 0 && documentPagination.total > 0 && documentPagination.page > 1) {
+      documentPagination.page = paginationTotalPages(documentPagination);
+      await refreshSelectedKnowledgeBaseDocuments(accessToken);
+      return;
+    }
     pruneSelectedBatchDocuments();
     if (
       selectedDocumentId.value &&
@@ -2800,12 +3105,21 @@ async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: strin
     ) {
       selectedDocumentId.value = "";
       clearSelectedDocumentDetails();
+      clearSelectedDocumentMetadata();
     }
     syncDocumentPermissionForm();
-    if (selectedDocumentId.value && documentModalMode.value) {
+    if (selectedDocumentId.value && documentModalMode.value === "details") {
       await refreshSelectedDocumentDetails(accessToken);
+    } else if (selectedDocumentId.value && documentModalMode.value === "permissions") {
+      await refreshSelectedDocumentMetadata(accessToken);
     }
   } catch (error) {
+    adminDocuments.value = [];
+    selectedDocumentId.value = "";
+    clearPaginationState(documentPagination);
+    clearBatchDocumentSelection();
+    clearSelectedDocumentDetails();
+    clearSelectedDocumentMetadata();
     importAdminFeedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "读取知识库文档失败"),
@@ -2816,9 +3130,10 @@ async function refreshSelectedKnowledgeBaseDocuments(existingAccessToken?: strin
 }
 
 async function refreshSelectedDocumentDetails(existingAccessToken?: string): Promise<void> {
-  const document = selectedAdminDocument.value;
-  if (!document || !canManageDocuments.value) {
+  const documentId = selectedDocumentId.value;
+  if (!documentId || !canManageDocuments.value) {
     clearSelectedDocumentDetails();
+    clearSelectedDocumentMetadata();
     return;
   }
   const accessToken = existingAccessToken ?? (await ensureAccessToken());
@@ -2827,42 +3142,119 @@ async function refreshSelectedDocumentDetails(existingAccessToken?: string): Pro
   }
 
   importAdminBusy.loadingDocumentDetails = true;
+  importAdminBusy.loadingDocumentVersions = true;
   importAdminBusy.loadingIndexVersions = canIndexDocuments.value;
   try {
-    const [versionsResponse, chunksResponse, indexVersionsResponse] = await Promise.all([
-      listAdminDocumentVersions(document.id, accessToken),
-      listAdminDocumentChunks(document.id, accessToken, {
+    const [documentResponse, versionsResponse, chunksResponse, indexVersionsResponse] = await Promise.all([
+      getAdminDocument(documentId, accessToken),
+      listAdminDocumentVersions(documentId, accessToken, {
+        page: documentVersionPagination.page,
+        page_size: documentVersionPagination.pageSize,
+      }),
+      listAdminDocumentChunks(documentId, accessToken, {
         page: documentChunkPagination.page,
         page_size: documentChunkPagination.pageSize,
       }),
       canIndexDocuments.value
-        ? listAdminDocumentIndexVersions(document.id, accessToken)
-        : Promise.resolve({ request_id: "", data: [] as IndexVersionData[] }),
+        ? listAdminDocumentIndexVersions(documentId, accessToken, {
+            page: documentIndexVersionPagination.page,
+            page_size: documentIndexVersionPagination.pageSize,
+          })
+        : Promise.resolve({
+            request_id: "",
+            data: [] as IndexVersionData[],
+            pagination: { page: 1, page_size: documentIndexVersionPagination.pageSize, total: 0 },
+          }),
     ]);
+    selectedAdminDocumentDetail.value = documentResponse.data;
     selectedDocumentVersions.value = versionsResponse.data;
+    syncPaginationState(documentVersionPagination, versionsResponse.pagination);
     selectedDocumentChunks.value = chunksResponse.data;
     syncPaginationState(documentChunkPagination, chunksResponse.pagination);
     selectedDocumentIndexVersions.value = indexVersionsResponse.data;
+    syncPaginationState(documentIndexVersionPagination, indexVersionsResponse.pagination);
     highlightedDocumentChunkId.value = chunksResponse.data[0]?.id ?? "";
     documentIndexForm.confirmedRebuild = false;
     pruneSelectedIndexVersionsForCleanup();
     syncDocumentPermissionForm();
   } catch (error) {
     clearSelectedDocumentDetails();
+    clearSelectedDocumentMetadata();
     importAdminFeedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "读取文档版本、chunk 或索引版本失败"),
     };
   } finally {
     importAdminBusy.loadingDocumentDetails = false;
+    importAdminBusy.loadingDocumentVersions = false;
     importAdminBusy.loadingIndexVersions = false;
   }
 }
 
+async function refreshSelectedDocumentMetadata(existingAccessToken?: string): Promise<void> {
+  const documentId = selectedDocumentId.value;
+  if (!documentId || !canManageDocuments.value) {
+    clearSelectedDocumentMetadata();
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.loadingDocumentDetails = true;
+  try {
+    const response = await getAdminDocument(documentId, accessToken);
+    selectedAdminDocumentDetail.value = response.data;
+    syncDocumentPermissionForm();
+  } catch (error) {
+    clearSelectedDocumentMetadata();
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取文档详情失败"),
+    };
+  } finally {
+    importAdminBusy.loadingDocumentDetails = false;
+  }
+}
+
+async function refreshSelectedDocumentVersions(existingAccessToken?: string): Promise<void> {
+  const documentId = selectedDocumentId.value;
+  if (!documentId || !canManageDocuments.value) {
+    selectedDocumentVersions.value = [];
+    clearPaginationState(documentVersionPagination);
+    return;
+  }
+  const accessToken = existingAccessToken ?? (await ensureAccessToken());
+  if (!accessToken) {
+    return;
+  }
+
+  importAdminBusy.loadingDocumentVersions = true;
+  try {
+    const response = await listAdminDocumentVersions(documentId, accessToken, {
+      page: documentVersionPagination.page,
+      page_size: documentVersionPagination.pageSize,
+    });
+    selectedDocumentVersions.value = response.data;
+    syncPaginationState(documentVersionPagination, response.pagination);
+  } catch (error) {
+    selectedDocumentVersions.value = [];
+    clearPaginationState(documentVersionPagination);
+    importAdminFeedback.value = {
+      tone: "error",
+      message: normalizeErrorMessage(error, "读取文档版本失败"),
+    };
+  } finally {
+    importAdminBusy.loadingDocumentVersions = false;
+  }
+}
+
 async function refreshSelectedDocumentIndexVersions(existingAccessToken?: string): Promise<void> {
-  const document = selectedAdminDocument.value;
-  if (!document || !canIndexDocuments.value) {
+  const documentId = selectedDocumentId.value;
+  if (!documentId || !canIndexDocuments.value) {
     selectedDocumentIndexVersions.value = [];
+    clearPaginationState(documentIndexVersionPagination);
     clearIndexVersionCleanupSelection();
     return;
   }
@@ -2873,10 +3265,17 @@ async function refreshSelectedDocumentIndexVersions(existingAccessToken?: string
 
   importAdminBusy.loadingIndexVersions = true;
   try {
-    const response = await listAdminDocumentIndexVersions(document.id, accessToken);
+    const response = await listAdminDocumentIndexVersions(documentId, accessToken, {
+      page: documentIndexVersionPagination.page,
+      page_size: documentIndexVersionPagination.pageSize,
+    });
     selectedDocumentIndexVersions.value = response.data;
+    syncPaginationState(documentIndexVersionPagination, response.pagination);
     pruneSelectedIndexVersionsForCleanup();
   } catch (error) {
+    selectedDocumentIndexVersions.value = [];
+    clearPaginationState(documentIndexVersionPagination);
+    clearIndexVersionCleanupSelection();
     importAdminFeedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "读取文档索引版本失败"),
@@ -2886,7 +3285,10 @@ async function refreshSelectedDocumentIndexVersions(existingAccessToken?: string
   }
 }
 
-function isDocumentBatchRebuildEligible(document: AdminDocumentData): boolean {
+function isDocumentBatchRebuildEligible(document: AdminDocumentData | AdminDocumentListItemData): boolean {
+  if ("can_rebuild_index" in document) {
+    return document.can_rebuild_index;
+  }
   return document.lifecycle_status === "active" && Boolean(document.current_version_id);
 }
 
@@ -2983,7 +3385,9 @@ async function refreshDiagnosticsState(): Promise<void> {
     queryLogs.value = [];
     modelCallLogs.value = [];
     indexHealth.value = [];
+    clearPaginationState(indexHealthPagination);
     indexCollectionSnapshots.value = [];
+    clearPaginationState(indexSnapshotPagination);
     selectedQueryLog.value = null;
     diagnosticsFeedback.value = {
       tone: "error",
@@ -3011,7 +3415,9 @@ async function refreshDiagnosticsState(): Promise<void> {
     tasks.push(refreshIndexHealth(accessToken));
   } else {
     indexHealth.value = [];
+    clearPaginationState(indexHealthPagination);
     indexCollectionSnapshots.value = [];
+    clearPaginationState(indexSnapshotPagination);
   }
   await Promise.all(tasks);
 }
@@ -3022,6 +3428,7 @@ function syncIndexCollectionSelection(): void {
     return;
   }
   indexCollectionOpsForm.selectedCollectionName = indexHealth.value[0]?.collection_name ?? "";
+  clearPaginationState(indexSnapshotPagination);
   indexCollectionOpsForm.confirmedSnapshot = false;
   indexCollectionOpsForm.confirmedRestore = false;
   indexCollectionOpsForm.confirmedRebuild = false;
@@ -3030,6 +3437,7 @@ function syncIndexCollectionSelection(): void {
 async function refreshIndexHealth(existingAccessToken?: string): Promise<void> {
   if (!canLoadIndexOps.value) {
     indexHealth.value = [];
+    clearPaginationState(indexHealthPagination);
     return;
   }
   const accessToken = existingAccessToken ?? (await ensureAccessToken());
@@ -3039,18 +3447,30 @@ async function refreshIndexHealth(existingAccessToken?: string): Promise<void> {
 
   diagnosticsBusy.loadingIndexHealth = true;
   try {
-    const response = await getAdminIndexHealth(accessToken);
+    const response = await getAdminIndexHealth(accessToken, {
+      page: indexHealthPagination.page,
+      page_size: indexHealthPagination.pageSize,
+    });
     indexHealth.value = response.data;
+    syncPaginationState(indexHealthPagination, response.pagination);
+    if (indexHealth.value.length === 0 && indexHealthPagination.total > 0 && indexHealthPagination.page > 1) {
+      indexHealthPagination.page = paginationTotalPages(indexHealthPagination);
+      await refreshIndexHealth(accessToken);
+      return;
+    }
     diagnosticsFeedback.value = null;
     syncIndexCollectionSelection();
     if (indexCollectionOpsForm.selectedCollectionName) {
       await refreshIndexCollectionSnapshots(accessToken);
     } else {
       indexCollectionSnapshots.value = [];
+      clearPaginationState(indexSnapshotPagination);
     }
   } catch (error) {
     indexHealth.value = [];
+    clearPaginationState(indexHealthPagination);
     indexCollectionSnapshots.value = [];
+    clearPaginationState(indexSnapshotPagination);
     diagnosticsFeedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "读取索引运维诊断失败"),
@@ -3063,6 +3483,7 @@ async function refreshIndexHealth(existingAccessToken?: string): Promise<void> {
 async function refreshIndexCollectionSnapshots(existingAccessToken?: string): Promise<void> {
   if (!canLoadIndexOps.value || !indexCollectionOpsForm.selectedCollectionName) {
     indexCollectionSnapshots.value = [];
+    clearPaginationState(indexSnapshotPagination);
     return;
   }
   const accessToken = existingAccessToken ?? (await ensureAccessToken());
@@ -3075,11 +3496,26 @@ async function refreshIndexCollectionSnapshots(existingAccessToken?: string): Pr
     const response = await listAdminIndexCollectionSnapshots(
       indexCollectionOpsForm.selectedCollectionName,
       accessToken,
+      {
+        page: indexSnapshotPagination.page,
+        page_size: indexSnapshotPagination.pageSize,
+      },
     );
     indexCollectionSnapshots.value = response.data;
+    syncPaginationState(indexSnapshotPagination, response.pagination);
+    if (
+      indexCollectionSnapshots.value.length === 0 &&
+      indexSnapshotPagination.total > 0 &&
+      indexSnapshotPagination.page > 1
+    ) {
+      indexSnapshotPagination.page = paginationTotalPages(indexSnapshotPagination);
+      await refreshIndexCollectionSnapshots(accessToken);
+      return;
+    }
     diagnosticsFeedback.value = null;
   } catch (error) {
     indexCollectionSnapshots.value = [];
+    clearPaginationState(indexSnapshotPagination);
     diagnosticsFeedback.value = {
       tone: "error",
       message: normalizeErrorMessage(error, "读取 collection 快照失败"),
@@ -3093,6 +3529,7 @@ async function onIndexCollectionSelectionChange(): Promise<void> {
   indexCollectionOpsForm.confirmedSnapshot = false;
   indexCollectionOpsForm.confirmedRestore = false;
   indexCollectionOpsForm.confirmedRebuild = false;
+  clearPaginationState(indexSnapshotPagination);
   await refreshIndexCollectionSnapshots();
 }
 
@@ -3117,6 +3554,7 @@ async function createSelectedIndexCollectionSnapshot(): Promise<void> {
       true,
     );
     indexCollectionOpsForm.confirmedSnapshot = false;
+    indexSnapshotPagination.page = 1;
     await refreshIndexCollectionSnapshots(accessToken);
     diagnosticsFeedback.value = {
       tone: "success",
@@ -3377,6 +3815,8 @@ function closeModelCallLogDetailModal(): void {
 async function selectAdminUser(userId: string): Promise<void> {
   selectedAdminUserId.value = userId;
   selectedAdminUserDetail.value = null;
+  clearPaginationState(selectedUserDepartmentPagination);
+  clearPaginationState(selectedUserRoleBindingPagination);
   userDangerForm.confirmedDelete = false;
   passwordResetForm.newPassword = "";
   passwordResetForm.passwordConfirm = "";
@@ -3834,6 +4274,7 @@ async function submitCreateFolder(): Promise<void> {
       accessToken,
     );
     selectedFolderId.value = response.data.id;
+    folderPagination.page = 1;
     await refreshSelectedKnowledgeBaseFolders(accessToken);
     importAdminFeedback.value = {
       tone: "success",
@@ -3933,7 +4374,10 @@ async function selectKnowledgeBase(kbId: string): Promise<void> {
   selectedKnowledgeBaseDetail.value = null;
   selectedFolderId.value = "";
   selectedDocumentId.value = "";
+  clearPaginationState(folderPagination);
+  clearPaginationState(documentPagination);
   clearSelectedDocumentDetails();
+  clearSelectedDocumentMetadata();
   clearBatchDocumentSelection();
   knowledgeBaseDangerForm.confirmedDelete = false;
   folderDangerForm.confirmedDelete = false;
@@ -4180,20 +4624,27 @@ function upsertKnowledgeBase(knowledgeBase: AdminKnowledgeBaseData): void {
   }
 }
 
-async function openDocumentDetailsModal(document: AdminDocumentData): Promise<void> {
+async function openDocumentDetailsModal(document: AdminDocumentListItemData): Promise<void> {
   selectedDocumentId.value = document.id;
+  selectedAdminDocumentDetail.value = null;
+  clearPaginationState(documentVersionPagination);
+  clearPaginationState(documentIndexVersionPagination);
   clearPaginationState(documentChunkPagination);
   syncDocumentPermissionForm();
   documentModalMode.value = "details";
   await refreshSelectedDocumentDetails();
 }
 
-async function openDocumentPermissionsModal(document: AdminDocumentData): Promise<void> {
+async function openDocumentPermissionsModal(document: AdminDocumentListItemData): Promise<void> {
   selectedDocumentId.value = document.id;
+  selectedAdminDocumentDetail.value = null;
+  clearPaginationState(documentVersionPagination);
+  clearPaginationState(documentIndexVersionPagination);
   clearPaginationState(documentChunkPagination);
+  clearSelectedDocumentDetails();
   syncDocumentPermissionForm();
   documentModalMode.value = "permissions";
-  await refreshSelectedDocumentDetails();
+  await refreshSelectedDocumentMetadata();
 }
 
 function closeDocumentModal(): void {
@@ -4620,7 +5071,7 @@ function preferredDepartmentScopeForRole(
 }
 
 function selectedUserPreferredDepartmentIds(): string[] {
-  const departments = selectedUserDepartmentsForDisplay.value;
+  const departments = selectedUserDepartmentsForForm.value;
   const preferredIds: string[] = [];
   const primaryDepartment = departments.find((department) => department.is_primary);
   if (primaryDepartment) {
@@ -5010,6 +5461,7 @@ async function saveSelectedUserDepartments(): Promise<void> {
       userDepartmentForm.confirmedReplacePrimary,
     );
     selectedUserDepartments.value = response.data;
+    syncPaginationState(selectedUserDepartmentPagination, response.pagination);
     updateSelectedAdminUserDepartments(response.data);
     await refreshSelectedAdminUserDetail(accessToken);
     syncSelectedUserDepartmentForm();
@@ -5114,6 +5566,7 @@ async function addSelectedUserRoleBinding(): Promise<void> {
       roleBindingForm.confirmedHighRisk,
     );
     selectedUserRoleBindings.value = response.data;
+    syncPaginationState(selectedUserRoleBindingPagination, response.pagination);
     roleBindingForm.confirmedHighRisk = false;
     await refreshUserRoleAdminState();
     selectNextAvailableRoleBindingTarget();
@@ -5188,7 +5641,7 @@ function resetCreateUserForm(): void {
 }
 
 function syncSelectedUserDepartmentForm(): void {
-  userDepartmentForm.departmentIds = selectedUserDepartmentsForDisplay.value.map(
+  userDepartmentForm.departmentIds = selectedUserDepartmentsForForm.value.map(
     (department) => department.id,
   );
   userDepartmentForm.confirmedReplacePrimary = false;
@@ -5584,11 +6037,15 @@ function clearAuthSession(): void {
   queryLogs.value = [];
   modelCallLogs.value = [];
   indexHealth.value = [];
+  clearPaginationState(indexHealthPagination);
   indexCollectionSnapshots.value = [];
+  clearPaginationState(indexSnapshotPagination);
   selectedQueryLog.value = null;
   selectedModelCallLog.value = null;
   adminUsers.value = [];
   selectedAdminUserDetail.value = null;
+  selectedUserDepartments.value = [];
+  selectedUserRoleBindings.value = [];
   adminDepartments.value = [];
   adminDepartmentOptions.value = [];
   adminKnowledgeBases.value = [];
@@ -5596,12 +6053,16 @@ function clearAuthSession(): void {
   selectedKnowledgeBaseDetail.value = null;
   adminFolders.value = [];
   adminFolderOptions.value = [];
+  clearPaginationState(folderPagination);
   adminDocuments.value = [];
+  clearPaginationState(documentPagination);
   clearSelectedDocumentDetails();
+  clearSelectedDocumentMetadata();
   adminRoles.value = [];
   adminImportJobs.value = [];
   failedIndexJobs.value = [];
   selectedFailedIndexJobIds.value = [];
+  clearPaginationState(failedIndexJobPagination);
   selectedBatchDocumentIds.value = [];
   selectedKnowledgeBaseId.value = "";
   selectedFolderId.value = "";
@@ -5611,10 +6072,15 @@ function clearAuthSession(): void {
   clearPaginationState(auditLogPagination);
   clearPaginationState(departmentPagination);
   clearPaginationState(userPagination);
+  clearPaginationState(selectedUserDepartmentPagination);
+  clearPaginationState(selectedUserRoleBindingPagination);
   clearPaginationState(knowledgeBasePagination);
   clearPaginationState(importJobPagination);
+  clearPaginationState(failedIndexJobPagination);
   clearPaginationState(queryLogPagination);
   clearPaginationState(modelCallLogPagination);
+  clearPaginationState(indexHealthPagination);
+  clearPaginationState(indexSnapshotPagination);
   knowledgeBaseSearchForm.keyword = "";
   knowledgeBaseSearchForm.status = "";
   resetDiagnosticsFilters();
@@ -6154,21 +6620,20 @@ function formatDocumentVersionById(versionId: string | null | undefined): string
   return version ? formatDocumentVersion(version) : "-";
 }
 
-function formatDocumentCurrentVersion(document: AdminDocumentData): string {
-  if (!document.current_version_id) {
-    return "-";
-  }
+function formatDocumentCurrentVersion(
+  document: AdminDocumentData | AdminDocumentListItemData,
+): string {
   if (typeof document.current_version_no === "number") {
     return `v${document.current_version_no}`;
   }
-  if (document.id === selectedDocumentId.value) {
+  if ("current_version_id" in document && document.current_version_id && document.id === selectedDocumentId.value) {
     return formatDocumentVersionById(document.current_version_id);
   }
   return "-";
 }
 
 function formatIndexVersionLabel(index: number): string {
-  return `索引版本 ${index + 1}`;
+  return `索引版本 ${(documentIndexVersionPagination.page - 1) * documentIndexVersionPagination.pageSize + index + 1}`;
 }
 
 function formatChunkOrdinal(chunk: ChunkData, index: number): string {
@@ -8093,6 +8558,44 @@ function isComposeDemoProvider(value: string): boolean {
                   </article>
                 </div>
                 <p v-else class="empty-state empty-state--plain">当前知识库尚未创建文件夹。</p>
+                <div v-if="folderPagination.total > 0" class="pagination-bar" aria-label="文件夹列表分页">
+                  <span>
+                    第 {{ folderPagination.page }} / {{ paginationTotalPages(folderPagination) }} 页，
+                    {{ paginationStart(folderPagination) }}-{{ paginationEnd(folderPagination) }} /
+                    {{ folderPagination.total }} 个文件夹
+                  </span>
+                  <label>
+                    每页
+                    <select
+                      v-model.number="folderPagination.pageSize"
+                      class="control control--compact"
+                      :disabled="importAdminBusy.loadingFolders"
+                      @change="changePaginationPageSize(folderPagination, () => refreshSelectedKnowledgeBaseFolders())"
+                    >
+                      <option v-for="size in pageSizeOptions" :key="`folder-page-size-${size}`" :value="size">
+                        {{ size }}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="pagination-bar__actions">
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      :disabled="importAdminBusy.loadingFolders || folderPagination.page <= 1"
+                      @click="changePaginationPage(folderPagination, () => refreshSelectedKnowledgeBaseFolders(), folderPagination.page - 1)"
+                    >
+                      上一页
+                    </button>
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      :disabled="importAdminBusy.loadingFolders || folderPagination.page >= paginationTotalPages(folderPagination)"
+                      @click="changePaginationPage(folderPagination, () => refreshSelectedKnowledgeBaseFolders(), folderPagination.page + 1)"
+                    >
+                      下一页
+                    </button>
+                  </div>
+                </div>
               </section>
 
               <p v-else class="empty-state empty-state--plain">
@@ -8120,7 +8623,10 @@ function isComposeDemoProvider(value: string): boolean {
                   </div>
                 </header>
 
-                <form class="list-filter list-filter--documents" @submit.prevent="refreshSelectedKnowledgeBaseDocuments()">
+                <form
+                  class="list-filter list-filter--documents"
+                  @submit.prevent="refreshFirstPage(documentPagination, refreshSelectedKnowledgeBaseDocuments)"
+                >
                   <label class="field">
                     <span class="field__label">文档状态</span>
                     <p class="field__hint">留空时显示当前知识库下全部未删除文档。</p>
@@ -8196,7 +8702,7 @@ function isComposeDemoProvider(value: string): boolean {
                     <div class="entity-main">
                       <strong>{{ document.title || "未命名文档" }}</strong>
                     </div>
-                    <div class="entity-cell">{{ formatFolderById(document.folder_id) }}</div>
+                    <div class="entity-cell">{{ document.folder_name ?? "-" }}</div>
                     <div class="entity-cell">
                       <span :class="toneClass(documentLifecycleStatusTone(document.lifecycle_status))">
                         {{ formatStatusText(document.lifecycle_status) }}
@@ -8209,7 +8715,7 @@ function isComposeDemoProvider(value: string): boolean {
                     </div>
                     <div class="entity-cell">
                       {{ documentVisibilityLabel(document.visibility) }} /
-                      {{ formatDepartmentById(document.owner_department_id) }}
+                      {{ document.owner_department_name ?? "-" }}
                     </div>
                     <div class="entity-cell">{{ formatDocumentCurrentVersion(document) }}</div>
                     <div class="row-actions row-actions--dense">
@@ -8233,6 +8739,44 @@ function isComposeDemoProvider(value: string): boolean {
                   </article>
                 </div>
                 <p v-else class="empty-state empty-state--plain">当前知识库尚未读取到文档。</p>
+                <div v-if="documentPagination.total > 0" class="pagination-bar" aria-label="文档列表分页">
+                  <span>
+                    第 {{ documentPagination.page }} / {{ paginationTotalPages(documentPagination) }} 页，
+                    {{ paginationStart(documentPagination) }}-{{ paginationEnd(documentPagination) }} /
+                    {{ documentPagination.total }} 个文档
+                  </span>
+                  <label>
+                    每页
+                    <select
+                      v-model.number="documentPagination.pageSize"
+                      class="control control--compact"
+                      :disabled="importAdminBusy.loadingDocuments"
+                      @change="changePaginationPageSize(documentPagination, () => refreshSelectedKnowledgeBaseDocuments())"
+                    >
+                      <option v-for="size in pageSizeOptions" :key="`document-page-size-${size}`" :value="size">
+                        {{ size }}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="pagination-bar__actions">
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      :disabled="importAdminBusy.loadingDocuments || documentPagination.page <= 1"
+                      @click="changePaginationPage(documentPagination, () => refreshSelectedKnowledgeBaseDocuments(), documentPagination.page - 1)"
+                    >
+                      上一页
+                    </button>
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      :disabled="importAdminBusy.loadingDocuments || documentPagination.page >= paginationTotalPages(documentPagination)"
+                      @click="changePaginationPage(documentPagination, () => refreshSelectedKnowledgeBaseDocuments(), documentPagination.page + 1)"
+                    >
+                      下一页
+                    </button>
+                  </div>
+                </div>
 
               </section>
 
@@ -8256,11 +8800,22 @@ function isComposeDemoProvider(value: string): boolean {
             <form
               v-if="canReadImportJobs"
               class="list-filter list-filter--imports"
-              @submit.prevent="refreshFirstPage(importJobPagination, refreshKnowledgeBaseAdminState)"
+              @submit.prevent="refreshImportTaskFilters"
             >
               <label class="field">
                 <span class="field__label">任务所属知识库</span>
                 <p class="field__hint">过滤导入、索引重建和权限刷新任务；这不是查询日志。</p>
+                <div class="selector-search">
+                  <input
+                    v-model.trim="optionSearchForm.knowledgeBaseKeyword"
+                    class="control control--compact"
+                    type="search"
+                    placeholder="搜索知识库"
+                  />
+                  <button class="button button--secondary button--small" type="button" @click="refreshKnowledgeBaseOptionsFromSearch">
+                    查询知识库
+                  </button>
+                </div>
                 <select v-if="activeKnowledgeBases.length" v-model="importSearchForm.kbId" class="control">
                   <option value="">全部</option>
                   <option
@@ -8325,8 +8880,9 @@ function isComposeDemoProvider(value: string): boolean {
                 <div>
                   <h4>失败索引任务</h4>
                   <p>
-                    {{ failedIndexJobs.length }} 个失败任务 /
-                    {{ failedIndexJobDocumentCount }} 个文档 /
+                    {{ paginationStart(failedIndexJobPagination) }}-{{ paginationEnd(failedIndexJobPagination) }} /
+                    {{ failedIndexJobPagination.total }} 个失败任务，
+                    当前页 {{ failedIndexJobDocumentCount }} 个文档 /
                     {{ failedIndexJobStageSummary.length ? failedIndexJobStageSummary.join("，") : "无失败阶段" }}
                   </p>
                 </div>
@@ -8391,6 +8947,48 @@ function isComposeDemoProvider(value: string): boolean {
                 </article>
               </div>
               <p v-else class="empty-state empty-state--plain">当前没有失败的索引重建任务。</p>
+              <div
+                v-if="failedIndexJobPagination.total > 0"
+                class="pagination-bar"
+                aria-label="失败索引任务分页"
+              >
+                <span>
+                  第 {{ failedIndexJobPagination.page }} / {{ paginationTotalPages(failedIndexJobPagination) }} 页，
+                  {{ paginationStart(failedIndexJobPagination) }}-{{ paginationEnd(failedIndexJobPagination) }} /
+                  {{ failedIndexJobPagination.total }} 个失败任务
+                </span>
+                <label>
+                  每页
+                  <select
+                    v-model.number="failedIndexJobPagination.pageSize"
+                    class="control control--compact"
+                    :disabled="importAdminBusy.loadingFailedIndexJobs"
+                    @change="changePaginationPageSize(failedIndexJobPagination, refreshFailedIndexJobsPage)"
+                  >
+                    <option v-for="size in pageSizeOptions" :key="`failed-index-job-page-size-${size}`" :value="size">
+                      {{ size }}
+                    </option>
+                  </select>
+                </label>
+                <div class="pagination-bar__actions">
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    :disabled="importAdminBusy.loadingFailedIndexJobs || failedIndexJobPagination.page <= 1"
+                    @click="changePaginationPage(failedIndexJobPagination, refreshFailedIndexJobsPage, failedIndexJobPagination.page - 1)"
+                  >
+                    上一页
+                  </button>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    :disabled="importAdminBusy.loadingFailedIndexJobs || failedIndexJobPagination.page >= paginationTotalPages(failedIndexJobPagination)"
+                    @click="changePaginationPage(failedIndexJobPagination, refreshFailedIndexJobsPage, failedIndexJobPagination.page + 1)"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
             </section>
 
             <div v-if="canReadImportJobs && adminImportJobs.length" class="entity-table entity-table--imports">
@@ -8506,7 +9104,7 @@ function isComposeDemoProvider(value: string): boolean {
                   <p>对比 PostgreSQL 索引账本与 Qdrant collection 状态，暴露 pending_delete、维度和引用数量异常。</p>
                 </div>
                 <div class="panel__actions">
-                  <span>{{ diagnosticsBusy.loadingIndexHealth ? "读取中" : `${indexHealth.length} 个集合` }}</span>
+                  <span>{{ diagnosticsBusy.loadingIndexHealth ? "读取中" : `${indexHealthPagination.total} 个集合` }}</span>
                   <button
                     class="button button--secondary button--small"
                     type="button"
@@ -8562,6 +9160,44 @@ function isComposeDemoProvider(value: string): boolean {
                     </dl>
                   </article>
                 </div>
+                <div v-if="indexHealthPagination.total > 0" class="pagination-bar" aria-label="索引集合分页">
+                  <span>
+                    第 {{ indexHealthPagination.page }} / {{ paginationTotalPages(indexHealthPagination) }} 页，
+                    {{ paginationStart(indexHealthPagination) }}-{{ paginationEnd(indexHealthPagination) }} /
+                    {{ indexHealthPagination.total }} 个集合
+                  </span>
+                  <label>
+                    每页
+                    <select
+                      v-model.number="indexHealthPagination.pageSize"
+                      class="control control--compact"
+                      :disabled="diagnosticsBusy.loadingIndexHealth"
+                      @change="changePaginationPageSize(indexHealthPagination, () => refreshIndexHealth())"
+                    >
+                      <option v-for="size in pageSizeOptions" :key="`index-health-page-size-${size}`" :value="size">
+                        {{ size }}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="pagination-bar__actions">
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      :disabled="diagnosticsBusy.loadingIndexHealth || indexHealthPagination.page <= 1"
+                      @click="changePaginationPage(indexHealthPagination, () => refreshIndexHealth(), indexHealthPagination.page - 1)"
+                    >
+                      上一页
+                    </button>
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      :disabled="diagnosticsBusy.loadingIndexHealth || indexHealthPagination.page >= paginationTotalPages(indexHealthPagination)"
+                      @click="changePaginationPage(indexHealthPagination, () => refreshIndexHealth(), indexHealthPagination.page + 1)"
+                    >
+                      下一页
+                    </button>
+                  </div>
+                </div>
 
                 <section class="resource-block index-ops-panel">
                   <header class="resource-section__header">
@@ -8569,7 +9205,7 @@ function isComposeDemoProvider(value: string): boolean {
                       <h4>Qdrant 恢复入口</h4>
                       <p>对选中的 collection 创建快照、从快照恢复，或把该 collection 的 active 文档重新排入索引重建任务。</p>
                     </div>
-                    <span>{{ diagnosticsBusy.loadingIndexSnapshots ? "读取快照中" : `${indexCollectionSnapshots.length} 个快照` }}</span>
+                    <span>{{ diagnosticsBusy.loadingIndexSnapshots ? "读取快照中" : `${indexSnapshotPagination.total} 个快照` }}</span>
                   </header>
 
 	                  <div class="index-ops-layout">
@@ -8732,6 +9368,44 @@ function isComposeDemoProvider(value: string): boolean {
                     </article>
                   </div>
                   <p v-else class="empty-state empty-state--plain">当前 collection 尚未读取到 Qdrant 快照。</p>
+                  <div v-if="indexSnapshotPagination.total > 0" class="pagination-bar" aria-label="Qdrant 快照分页">
+                    <span>
+                      第 {{ indexSnapshotPagination.page }} / {{ paginationTotalPages(indexSnapshotPagination) }} 页，
+                      {{ paginationStart(indexSnapshotPagination) }}-{{ paginationEnd(indexSnapshotPagination) }} /
+                      {{ indexSnapshotPagination.total }} 个快照
+                    </span>
+                    <label>
+                      每页
+                      <select
+                        v-model.number="indexSnapshotPagination.pageSize"
+                        class="control control--compact"
+                        :disabled="diagnosticsBusy.loadingIndexSnapshots"
+                        @change="changePaginationPageSize(indexSnapshotPagination, () => refreshIndexCollectionSnapshots())"
+                      >
+                        <option v-for="size in pageSizeOptions" :key="`index-snapshot-page-size-${size}`" :value="size">
+                          {{ size }}
+                        </option>
+                      </select>
+                    </label>
+                    <div class="pagination-bar__actions">
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        :disabled="diagnosticsBusy.loadingIndexSnapshots || indexSnapshotPagination.page <= 1"
+                        @click="changePaginationPage(indexSnapshotPagination, () => refreshIndexCollectionSnapshots(), indexSnapshotPagination.page - 1)"
+                      >
+                        上一页
+                      </button>
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        :disabled="diagnosticsBusy.loadingIndexSnapshots || indexSnapshotPagination.page >= paginationTotalPages(indexSnapshotPagination)"
+                        @click="changePaginationPage(indexSnapshotPagination, () => refreshIndexCollectionSnapshots(), indexSnapshotPagination.page + 1)"
+                      >
+                        下一页
+                      </button>
+                    </div>
+                  </div>
                 </section>
               </template>
               <p v-else-if="canLoadIndexOps" class="empty-state empty-state--plain">当前尚未读取到索引 collection。</p>
@@ -9617,6 +10291,21 @@ function isComposeDemoProvider(value: string): boolean {
                 {{ importAdminFeedback.message }}
               </div>
               <div class="form-grid form-grid--compact form-grid--modal">
+                <div class="field field--full">
+                  <span class="field__label">部门选项</span>
+                  <p class="field__hint">按部门名称搜索，当前已选部门会保留在列表中。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.departmentKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索部门"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshDepartmentOptionsFromSearch">
+                      查询部门
+                    </button>
+                  </div>
+                </div>
                 <label class="field">
                   <span class="field__label">知识库名称</span>
                   <p class="field__hint">用于管理后台和用户查询入口展示。</p>
@@ -9737,6 +10426,21 @@ function isComposeDemoProvider(value: string): boolean {
                 {{ importAdminFeedback.message }}
               </div>
               <div class="form-grid form-grid--compact form-grid--modal">
+                <div class="field field--full">
+                  <span class="field__label">部门选项</span>
+                  <p class="field__hint">按部门名称搜索，当前已选部门会保留在列表中。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.departmentKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索部门"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshDepartmentOptionsFromSearch">
+                      查询部门
+                    </button>
+                  </div>
+                </div>
                 <label class="field">
                   <span class="field__label">知识库名称</span>
                   <p class="field__hint">修改不会影响已有文档内容和索引版本。</p>
@@ -9839,6 +10543,21 @@ function isComposeDemoProvider(value: string): boolean {
                 {{ importAdminFeedback.message }}
               </div>
               <div class="form-grid form-grid--compact form-grid--modal">
+                <div class="field field--full">
+                  <span class="field__label">部门选项</span>
+                  <p class="field__hint">按部门名称搜索，当前已选部门会保留在列表中。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.departmentKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索部门"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshDepartmentOptionsFromSearch">
+                      查询部门
+                    </button>
+                  </div>
+                </div>
                 <label class="field">
                   <span class="field__label">知识库可见性</span>
                   <p class="field__hint">控制知识库是否出现在用户列表中，以及是否可被选择查询。</p>
@@ -9986,6 +10705,23 @@ function isComposeDemoProvider(value: string): boolean {
                   <label class="field">
                     <span class="field__label">目标文件夹</span>
                     <p class="field__hint">留空表示导入到根目录；文件夹需要先在当前知识库中创建。</p>
+                    <div class="selector-search">
+                      <input
+                        v-model.trim="optionSearchForm.folderKeyword"
+                        class="control control--compact"
+                        type="search"
+                        placeholder="搜索文件夹"
+                        :disabled="!canImportDocuments || importAdminBusy.uploading"
+                      />
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        :disabled="!canImportDocuments || importAdminBusy.uploading"
+                        @click="refreshFolderOptionsFromSearch"
+                      >
+                        查询文件夹
+                      </button>
+                    </div>
                     <select
                       v-if="activeFolders.length"
                       v-model="importUploadForm.folderId"
@@ -10154,6 +10890,17 @@ function isComposeDemoProvider(value: string): boolean {
                 <label class="field">
                   <span class="field__label">上级文件夹</span>
                   <p class="field__hint">留空表示根目录。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.folderKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索文件夹"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshFolderOptionsFromSearch">
+                      查询文件夹
+                    </button>
+                  </div>
                   <select v-model="folderCreateForm.parentId" class="control">
                     <option value="">根目录</option>
                     <option v-for="folder in activeFolders" :key="folder.id" :value="folder.id">
@@ -10206,6 +10953,17 @@ function isComposeDemoProvider(value: string): boolean {
                 <label class="field field--full">
                   <span class="field__label">上级文件夹</span>
                   <p class="field__hint">不能移动到自身或自身的子目录；后端会再次校验。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.folderKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索文件夹"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshFolderOptionsFromSearch">
+                      查询文件夹
+                    </button>
+                  </div>
                   <select v-model="folderEditForm.parentId" class="control">
                     <option value="">根目录</option>
                     <option v-for="folder in folderParentOptions" :key="folder.id" :value="folder.id">
@@ -10276,7 +11034,7 @@ function isComposeDemoProvider(value: string): boolean {
               <h3 id="document-modal-title">
                 {{ documentModalMode === "details" ? "版本与片段" : "文档权限策略" }}
               </h3>
-              <p v-if="selectedAdminDocument">{{ selectedAdminDocument.title || "未命名文档" }}</p>
+              <p v-if="selectedDocumentForDisplay">{{ selectedDocumentForDisplay.title || "未命名文档" }}</p>
             </div>
             <button class="button button--secondary button--small" type="button" @click="closeDocumentModal">
               关闭
@@ -10324,6 +11082,17 @@ function isComposeDemoProvider(value: string): boolean {
                 <label class="field">
                   <span class="field__label">所属部门</span>
                   <p class="field__hint">部门可见时只有该部门成员可检索。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.departmentKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索部门"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshDepartmentOptionsFromSearch">
+                      查询部门
+                    </button>
+                  </div>
                   <select
                     v-if="activeDepartments.length"
                     v-model="documentPermissionForm.ownerDepartmentId"
@@ -10358,24 +11127,28 @@ function isComposeDemoProvider(value: string): boolean {
             </footer>
           </form>
 
-          <div v-else-if="documentModalMode === 'details' && selectedAdminDocument">
+          <p v-else-if="documentModalMode === 'permissions'" class="empty-state empty-state--plain">
+            正在读取文档权限详情。
+          </p>
+
+          <div v-else-if="documentModalMode === 'details' && selectedDocumentForDisplay">
             <div class="modal__body modal__body--document-details">
               <dl class="summary summary--compact modal-summary document-detail-summary">
                 <div class="summary__row">
                   <dt>文档</dt>
-                  <dd>{{ selectedAdminDocument.title || "未命名文档" }}</dd>
+                  <dd>{{ selectedDocumentForDisplay.title || "未命名文档" }}</dd>
                 </div>
                 <div class="summary__row">
                   <dt>当前版本</dt>
-                  <dd>{{ formatDocumentCurrentVersion(selectedAdminDocument) }}</dd>
+                  <dd>{{ formatDocumentCurrentVersion(selectedDocumentForDisplay) }}</dd>
                 </div>
                 <div class="summary__row">
                   <dt>生命周期</dt>
-                  <dd>{{ formatStatusText(selectedAdminDocument.lifecycle_status) }}</dd>
+                  <dd>{{ formatStatusText(selectedDocumentForDisplay.lifecycle_status) }}</dd>
                 </div>
                 <div class="summary__row">
                   <dt>索引状态</dt>
-                  <dd>{{ formatStatusText(selectedAdminDocument.index_status) }}</dd>
+                  <dd>{{ formatStatusText(selectedDocumentForDisplay.index_status) }}</dd>
                 </div>
               </dl>
 
@@ -10383,7 +11156,13 @@ function isComposeDemoProvider(value: string): boolean {
                 <div class="document-detail-pane document-detail-pane--versions">
                   <header class="document-detail-pane__header">
                     <h4>文档版本</h4>
-                    <span>{{ importAdminBusy.loadingDocumentDetails ? "读取中" : `${selectedDocumentVersions.length} 个版本` }}</span>
+                    <span>
+                      {{
+                        importAdminBusy.loadingDocumentVersions
+                          ? "读取中"
+                          : `${paginationStart(documentVersionPagination)}-${paginationEnd(documentVersionPagination)} / ${documentVersionPagination.total} 个版本`
+                      }}
+                    </span>
                   </header>
                   <div v-if="selectedDocumentVersions.length" class="document-version-list">
                     <article v-for="version in selectedDocumentVersions" :key="version.id" class="document-version-row">
@@ -10394,13 +11173,56 @@ function isComposeDemoProvider(value: string): boolean {
                     </article>
                   </div>
                   <p v-else class="empty-state empty-state--plain">当前文档尚未读取到版本。</p>
+                  <div v-if="documentVersionPagination.total > 0" class="pagination-bar pagination-bar--compact" aria-label="文档版本分页">
+                    <span>
+                      第 {{ documentVersionPagination.page }} / {{ paginationTotalPages(documentVersionPagination) }} 页，
+                      {{ paginationStart(documentVersionPagination) }}-{{ paginationEnd(documentVersionPagination) }} /
+                      {{ documentVersionPagination.total }} 个版本
+                    </span>
+                    <label>
+                      每页
+                      <select
+                        v-model.number="documentVersionPagination.pageSize"
+                        class="control control--small"
+                        @change="changePaginationPageSize(documentVersionPagination, () => refreshSelectedDocumentVersions())"
+                      >
+                        <option v-for="size in pageSizeOptions" :key="`document-version-page-size-${size}`" :value="size">
+                          {{ size }}
+                        </option>
+                      </select>
+                    </label>
+                    <div class="pagination-bar__actions">
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        :disabled="importAdminBusy.loadingDocumentVersions || documentVersionPagination.page <= 1"
+                        @click="changePaginationPage(documentVersionPagination, () => refreshSelectedDocumentVersions(), documentVersionPagination.page - 1)"
+                      >
+                        上一页
+                      </button>
+                      <button
+                        class="button button--secondary button--small"
+                        type="button"
+                        :disabled="importAdminBusy.loadingDocumentVersions || documentVersionPagination.page >= paginationTotalPages(documentVersionPagination)"
+                        @click="changePaginationPage(documentVersionPagination, () => refreshSelectedDocumentVersions(), documentVersionPagination.page + 1)"
+                      >
+                        下一页
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 <div class="document-detail-pane document-detail-pane--index">
                   <header class="document-detail-pane__header">
                     <div>
                       <h4>索引版本</h4>
-                      <p>用于确认当前检索生效版本和旧索引清理状态。</p>
+                      <p>
+                        {{
+                          importAdminBusy.loadingIndexVersions
+                            ? "读取中"
+                            : `${paginationStart(documentIndexVersionPagination)}-${paginationEnd(documentIndexVersionPagination)} / ${documentIndexVersionPagination.total} 个索引版本`
+                        }}
+                      </p>
                     </div>
                     <button
                       class="button button--secondary button--small"
@@ -10497,6 +11319,47 @@ function isComposeDemoProvider(value: string): boolean {
                       </article>
                     </div>
                     <p v-else class="empty-state empty-state--plain">当前文档尚未读取到索引版本。</p>
+                    <div
+                      v-if="documentIndexVersionPagination.total > 0"
+                      class="pagination-bar pagination-bar--compact"
+                      aria-label="索引版本分页"
+                    >
+                      <span>
+                        第 {{ documentIndexVersionPagination.page }} / {{ paginationTotalPages(documentIndexVersionPagination) }} 页，
+                        {{ paginationStart(documentIndexVersionPagination) }}-{{ paginationEnd(documentIndexVersionPagination) }} /
+                        {{ documentIndexVersionPagination.total }} 个索引版本
+                      </span>
+                      <label>
+                        每页
+                        <select
+                          v-model.number="documentIndexVersionPagination.pageSize"
+                          class="control control--small"
+                          @change="changePaginationPageSize(documentIndexVersionPagination, () => refreshSelectedDocumentIndexVersions())"
+                        >
+                          <option v-for="size in pageSizeOptions" :key="`document-index-version-page-size-${size}`" :value="size">
+                            {{ size }}
+                          </option>
+                        </select>
+                      </label>
+                      <div class="pagination-bar__actions">
+                        <button
+                          class="button button--secondary button--small"
+                          type="button"
+                          :disabled="importAdminBusy.loadingIndexVersions || documentIndexVersionPagination.page <= 1"
+                          @click="changePaginationPage(documentIndexVersionPagination, () => refreshSelectedDocumentIndexVersions(), documentIndexVersionPagination.page - 1)"
+                        >
+                          上一页
+                        </button>
+                        <button
+                          class="button button--secondary button--small"
+                          type="button"
+                          :disabled="importAdminBusy.loadingIndexVersions || documentIndexVersionPagination.page >= paginationTotalPages(documentIndexVersionPagination)"
+                          @click="changePaginationPage(documentIndexVersionPagination, () => refreshSelectedDocumentIndexVersions(), documentIndexVersionPagination.page + 1)"
+                        >
+                          下一页
+                        </button>
+                      </div>
+                    </div>
                     <div class="index-rebuild-panel">
                       <label class="confirm confirm--inline">
                         <input v-model="documentIndexForm.confirmedRebuild" type="checkbox" />
@@ -10790,6 +11653,17 @@ function isComposeDemoProvider(value: string): boolean {
                 <div class="option-picker">
                   <span class="field__label">归属部门</span>
                   <p class="field__hint">至少选择一个部门；第一个选中的部门会作为用户主部门。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.departmentKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索部门"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshDepartmentOptionsFromSearch">
+                      查询部门
+                    </button>
+                  </div>
                   <div class="option-picker__grid">
                     <label v-for="department in createUserDepartmentOptions" :key="department.id" class="option-card">
                       <input
@@ -10807,6 +11681,17 @@ function isComposeDemoProvider(value: string): boolean {
                 <div v-if="canReadRoles" class="role-picker">
                   <span class="field__label">初始角色</span>
                   <p class="field__hint">未选择时后端会尝试授予普通员工默认角色。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.roleKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索角色"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshAssignableRoleOptionsFromSearch">
+                      查询角色
+                    </button>
+                  </div>
                   <div class="option-picker__grid">
                     <label v-for="role in initialAssignableRoles" :key="role.id" class="option-card">
                       <input
@@ -10909,12 +11794,65 @@ function isComposeDemoProvider(value: string): boolean {
                   </dd>
                 </div>
               </dl>
+              <div
+                v-if="selectedUserDepartmentPagination.total > selectedUserDepartmentPagination.pageSize"
+                class="pagination-bar pagination-bar--compact"
+                aria-label="用户当前部门分页"
+              >
+                <span>
+                  当前显示 {{ paginationStart(selectedUserDepartmentPagination) }}-{{
+                    paginationEnd(selectedUserDepartmentPagination)
+                  }} / {{ selectedUserDepartmentPagination.total }} 个部门
+                </span>
+                <label>
+                  每页
+                  <select
+                    v-model.number="selectedUserDepartmentPagination.pageSize"
+                    class="control control--small"
+                    :disabled="userAdminBusy.loading"
+                    @change="changePaginationPageSize(selectedUserDepartmentPagination, refreshSelectedUserDepartmentsPage)"
+                  >
+                    <option v-for="size in pageSizeOptions" :key="`selected-user-department-page-size-${size}`" :value="size">
+                      {{ size }}
+                    </option>
+                  </select>
+                </label>
+                <div class="pagination-bar__actions">
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    :disabled="selectedUserDepartmentPagination.page <= 1 || userAdminBusy.loading"
+                    @click="changePaginationPage(selectedUserDepartmentPagination, refreshSelectedUserDepartmentsPage, selectedUserDepartmentPagination.page - 1)"
+                  >
+                    上一页
+                  </button>
+                  <button
+                    class="button button--secondary button--small"
+                    type="button"
+                    :disabled="selectedUserDepartmentPagination.page >= paginationTotalPages(selectedUserDepartmentPagination) || userAdminBusy.loading"
+                    @click="changePaginationPage(selectedUserDepartmentPagination, refreshSelectedUserDepartmentsPage, selectedUserDepartmentPagination.page + 1)"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
               <div v-if="userAdminFeedback" :class="['feedback feedback--wide', `feedback--${userAdminFeedback.tone}`]">
                 {{ userAdminFeedback.message }}
               </div>
               <div class="option-picker">
                 <span class="field__label">调整归属部门</span>
                 <p class="field__hint">至少选择一个部门；保存时第一个被选中的部门会作为主部门。</p>
+                <div class="selector-search">
+                  <input
+                    v-model.trim="optionSearchForm.departmentKeyword"
+                    class="control control--compact"
+                    type="search"
+                    placeholder="搜索部门"
+                  />
+                  <button class="button button--secondary button--small" type="button" @click="refreshDepartmentOptionsFromSearch">
+                    查询部门
+                  </button>
+                </div>
                 <div class="option-picker__grid">
                   <label v-for="department in activeDepartments" :key="department.id" class="option-card">
                     <input
@@ -10972,10 +11910,65 @@ function isComposeDemoProvider(value: string): boolean {
                   </article>
                 </div>
                 <p v-else class="empty-state empty-state--plain">当前用户尚无可展示的角色绑定。</p>
+                <div
+                  v-if="selectedUserRoleBindingPagination.total > 0"
+                  class="pagination-bar pagination-bar--compact"
+                  aria-label="用户角色绑定分页"
+                >
+                  <span>
+                    第 {{ selectedUserRoleBindingPagination.page }} /
+                    {{ paginationTotalPages(selectedUserRoleBindingPagination) }} 页，
+                    {{ paginationStart(selectedUserRoleBindingPagination) }}-{{
+                      paginationEnd(selectedUserRoleBindingPagination)
+                    }} / {{ selectedUserRoleBindingPagination.total }} 个绑定
+                  </span>
+                  <label>
+                    每页
+                    <select
+                      v-model.number="selectedUserRoleBindingPagination.pageSize"
+                      class="control control--small"
+                      :disabled="userAdminBusy.loading || userAdminBusy.updatingRoles"
+                      @change="changePaginationPageSize(selectedUserRoleBindingPagination, refreshSelectedUserRoleBindingsPage)"
+                    >
+                      <option v-for="size in pageSizeOptions" :key="`selected-user-role-binding-page-size-${size}`" :value="size">
+                        {{ size }}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="pagination-bar__actions">
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      :disabled="selectedUserRoleBindingPagination.page <= 1 || userAdminBusy.loading || userAdminBusy.updatingRoles"
+                      @click="changePaginationPage(selectedUserRoleBindingPagination, refreshSelectedUserRoleBindingsPage, selectedUserRoleBindingPagination.page - 1)"
+                    >
+                      上一页
+                    </button>
+                    <button
+                      class="button button--secondary button--small"
+                      type="button"
+                      :disabled="selectedUserRoleBindingPagination.page >= paginationTotalPages(selectedUserRoleBindingPagination) || userAdminBusy.loading || userAdminBusy.updatingRoles"
+                      @click="changePaginationPage(selectedUserRoleBindingPagination, refreshSelectedUserRoleBindingsPage, selectedUserRoleBindingPagination.page + 1)"
+                    >
+                      下一页
+                    </button>
+                  </div>
+                </div>
               </section>
 
               <section class="modal-pane">
                 <h4>授予角色</h4>
+                <div class="selector-search selector-search--stacked">
+                  <input
+                    v-model.trim="optionSearchForm.roleKeyword"
+                    class="control control--compact"
+                    type="search"
+                    placeholder="搜索角色"
+                  />
+                  <button class="button button--secondary button--small" type="button" @click="refreshAssignableRoleOptionsFromSearch">
+                    查询角色
+                  </button>
+                </div>
                 <label class="field field--full modal-field">
                   <span class="field__label">角色</span>
                   <p class="field__hint">企业级角色作用于全企业；部门管理员和知识库管理员必须选择具体作用域。</p>
@@ -10997,6 +11990,17 @@ function isComposeDemoProvider(value: string): boolean {
                 >
                   <span class="field__label">部门作用域</span>
                   <p class="field__hint">该用户只会在选定部门范围内获得部门管理员权限。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.departmentKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索部门"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshDepartmentOptionsFromSearch">
+                      查询部门
+                    </button>
+                  </div>
                   <select v-model="roleBindingForm.scopeId" class="control" :disabled="!canManageRoles">
                     <option value="">请选择部门</option>
                     <option v-for="department in activeDepartments" :key="department.id" :value="department.id">
@@ -11010,6 +12014,17 @@ function isComposeDemoProvider(value: string): boolean {
                 >
                   <span class="field__label">知识库作用域</span>
                   <p class="field__hint">该用户只会在选定知识库范围内获得知识库、文档和导入管理权限。</p>
+                  <div class="selector-search">
+                    <input
+                      v-model.trim="optionSearchForm.knowledgeBaseKeyword"
+                      class="control control--compact"
+                      type="search"
+                      placeholder="搜索知识库"
+                    />
+                    <button class="button button--secondary button--small" type="button" @click="refreshKnowledgeBaseOptionsFromSearch">
+                      查询知识库
+                    </button>
+                  </div>
                   <select v-model="roleBindingForm.scopeId" class="control" :disabled="!canManageRoles">
                     <option value="">请选择知识库</option>
                     <option
@@ -11902,6 +12917,12 @@ function isComposeDemoProvider(value: string): boolean {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.pagination-bar--compact {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  justify-content: flex-start;
 }
 
 .list-filter {
@@ -12801,6 +13822,19 @@ function isComposeDemoProvider(value: string): boolean {
   gap: 8px;
 }
 
+.selector-search {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  margin-top: 8px;
+}
+
+.selector-search--stacked {
+  margin: 0 0 8px;
+}
+
 .option-picker__grid {
   min-width: 0;
   display: grid;
@@ -13547,6 +14581,7 @@ function isComposeDemoProvider(value: string): boolean {
   .index-ops-row,
   .index-ops-action-row,
   .index-ops-card--restore .index-ops-row,
+  .selector-search,
   .modal__header,
   .modal__footer,
   .modal__body--split {

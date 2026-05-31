@@ -7,15 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from app.api.schemas.query import CitationData
-
-
-class PaginationData(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    page: int
-    page_size: int
-    total: int
+from app.api.schemas.common import PaginationData
 
 
 class KnowledgeBaseData(BaseModel):
@@ -38,14 +30,12 @@ class DocumentData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    kb_id: str
-    folder_id: str | None = None
     title: str
     lifecycle_status: str
     index_status: str
-    owner_department_id: str
-    visibility: Literal["department", "enterprise"]
-    current_version_id: str | None = None
+    updated_at: datetime | None = None
+    can_view: bool = True
+    can_cite: bool = True
 
 
 class DocumentListItemData(BaseModel):
@@ -135,19 +125,3 @@ class CitationSourceResponse(BaseModel):
 
     request_id: str
     data: CitationSourceData
-
-
-class DocumentPreviewData(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    doc_id: str
-    title: str
-    preview: str
-    citations: list[CitationData]
-
-
-class DocumentPreviewResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    data: DocumentPreviewData

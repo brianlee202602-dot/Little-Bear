@@ -11,15 +11,15 @@ from app.modules.knowledge import (
     AccessibleDocument,
     AccessibleDocumentList,
     AccessibleDocumentListItem,
-    AccessibleDocumentPreview,
     AccessibleDocumentVersion,
     AccessibleDocumentVersionList,
     AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
-    AccessiblePreviewCitation,
 )
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
+
+AUTH_TARGET = "app.api.dependencies.auth.AuthService.authenticate_access_token"
 
 
 class _FakeSession:
@@ -36,7 +36,7 @@ def _create_test_app():
 
 def _open_business_api(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.shared.middleware.SetupService.load_state",
+        "app.api.middleware.setup_guard.SetupService.load_state",
         lambda _self: SetupState(
             initialized=True,
             setup_status=SetupStatus.INITIALIZED,
@@ -99,7 +99,7 @@ def test_list_knowledge_bases_route_requires_read_scope(monkeypatch) -> None:
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         authenticate,
     )
     monkeypatch.setattr(
@@ -149,7 +149,7 @@ def test_list_documents_route_requires_document_read_scope(monkeypatch) -> None:
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         authenticate,
     )
     monkeypatch.setattr(
@@ -186,20 +186,16 @@ def test_get_document_route_requires_document_read_scope(monkeypatch) -> None:
         seen.update(kwargs)
         return AccessibleDocument(
             id=kwargs["document_id"],
-            kb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            folder_id=None,
             title="员工手册",
             lifecycle_status="active",
             index_status="indexed",
-            owner_department_id="22222222-2222-2222-2222-222222222222",
-            visibility="enterprise",
-            current_version_id="55555555-5555-5555-5555-555555555555",
+            updated_at=datetime(2026, 5, 1, tzinfo=UTC),
         )
 
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         authenticate,
     )
     monkeypatch.setattr("app.api.routes.knowledge.KnowledgeService.get_document", get_document)
@@ -212,7 +208,15 @@ def test_get_document_route_requires_document_read_scope(monkeypatch) -> None:
     assert response.status_code == 200
     assert seen["required_scope"] == "document:read"
     assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
-    assert response.json()["data"]["title"] == "员工手册"
+    payload = response.json()["data"]
+    assert payload["title"] == "员工手册"
+    assert payload["can_view"] is True
+    assert payload["can_cite"] is True
+    assert "kb_id" not in payload
+    assert "folder_id" not in payload
+    assert "owner_department_id" not in payload
+    assert "visibility" not in payload
+    assert "current_version_id" not in payload
 
 
 def test_list_document_versions_route_returns_versions(monkeypatch) -> None:
@@ -235,7 +239,7 @@ def test_list_document_versions_route_returns_versions(monkeypatch) -> None:
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
@@ -280,7 +284,7 @@ def test_list_document_chunks_route_returns_chunk_previews(monkeypatch) -> None:
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
@@ -300,49 +304,6 @@ def test_list_document_chunks_route_returns_chunk_previews(monkeypatch) -> None:
     assert response.json()["data"][0]["text_preview"] == "员工年假需要提前申请"
     assert response.json()["data"][0]["ordinal"] == 1
     assert response.json()["pagination"]["total"] == 1
-
-
-def test_get_document_preview_route_returns_preview(monkeypatch) -> None:
-    seen: dict[str, object] = {}
-
-    def get_document_preview(_self, _session, **kwargs):
-        seen.update(kwargs)
-        return AccessibleDocumentPreview(
-            doc_id=kwargs["document_id"],
-            title="员工手册",
-            preview="员工年假需要提前申请",
-            citations=(
-                AccessiblePreviewCitation(
-                    source_id="chunk_1",
-                    doc_id=kwargs["document_id"],
-                    document_version_id="55555555-5555-5555-5555-555555555555",
-                    title="员工手册",
-                    page_start=1,
-                    page_end=2,
-                    score=1.0,
-                ),
-            ),
-        )
-
-    _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
-    monkeypatch.setattr(
-        "app.api.routes.knowledge.AuthService.authenticate_access_token",
-        lambda *_args, **_kwargs: _auth_context(),
-    )
-    monkeypatch.setattr(
-        "app.api.routes.knowledge.KnowledgeService.get_document_preview",
-        get_document_preview,
-    )
-
-    response = TestClient(_create_test_app()).get(
-        "/internal/v1/documents/44444444-4444-4444-4444-444444444444/preview",
-        headers={"authorization": "Bearer access.jwt"},
-    )
-
-    assert response.status_code == 200
-    assert seen["document_id"] == "44444444-4444-4444-4444-444444444444"
-    assert response.json()["data"]["preview"] == "员工年假需要提前申请"
 
 
 def test_get_document_source_route_returns_verifiable_source(monkeypatch) -> None:
@@ -368,7 +329,7 @@ def test_get_document_source_route_returns_verifiable_source(monkeypatch) -> Non
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.knowledge.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(

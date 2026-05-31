@@ -6,11 +6,20 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from fastapi import APIRouter, Header, Request
 from sqlalchemy.exc import SQLAlchemyError
 from starlette import status
 from starlette.responses import JSONResponse, Response
 
+from app.api.dependencies.auth import (
+    current_request_id as _request_id,
+)
+from app.api.dependencies.auth import (
+    extract_bearer_token as _extract_bearer_token,
+)
+from app.api.errors import database_error_response, service_error_response
 from app.api.schemas.auth import (
     AdminCurrentUserCapabilitiesData,
     AdminCurrentUserCapabilitiesResponse,
@@ -26,7 +35,6 @@ from app.db.session import session_scope
 from app.modules.auth.errors import AuthServiceError
 from app.modules.auth.schemas import AuthContext
 from app.modules.auth.service import AuthService
-from app.shared.context import get_request_context
 
 router = APIRouter(prefix="/internal/v1", tags=["auth"])
 
@@ -47,6 +55,13 @@ ADMIN_PORTAL_SCOPES = (
     "folder:manage",
     "permission:manage",
     "import_job:read",
+)
+
+_auth_error_response = service_error_response
+_database_error_response = partial(
+    database_error_response,
+    error_code="AUTH_DATABASE_ERROR",
+    message="auth database operation failed",
 )
 
 
@@ -212,22 +227,8 @@ async def put_current_user_password(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _extract_bearer_token(authorization: str | None) -> str | None:
-    if not authorization:
-        return None
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        return None
-    return token.strip()
-
-
 def _client_host(request: Request) -> str | None:
     return request.client.host if request.client else None
-
-
-def _request_id() -> str:
-    request_context = get_request_context()
-    return request_context.request_id if request_context else "req_unknown"
 
 
 def _admin_current_user_capabilities_data(
@@ -272,41 +273,3 @@ def _scope_allowed(granted_scopes: tuple[str, ...], required_scope: str) -> bool
         return True
     prefix = required_scope.split(":", 1)[0]
     return f"{prefix}:*" in granted_scopes
-
-
-def _auth_error_response(exc: AuthServiceError, *, stage: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "request_id": _request_id(),
-            "error_code": exc.error_code,
-            "message": exc.message,
-            "stage": stage,
-            "retryable": exc.retryable,
-            "details": exc.details,
-        },
-    )
-
-
-def _database_error_response(exc: SQLAlchemyError, *, stage: str) -> JSONResponse:
-    original = getattr(exc, "orig", None) or exc.__cause__
-    return JSONResponse(
-        status_code=500,
-        content={
-            "request_id": _request_id(),
-            "error_code": "AUTH_DATABASE_ERROR",
-            "message": "auth database operation failed",
-            "stage": stage,
-            "retryable": True,
-            "details": {
-                "database_error": {
-                    "type": exc.__class__.__name__,
-                    "driver": _name(original),
-                }
-            },
-        },
-    )
-
-
-def _name(value: object) -> str | None:
-    return value.__class__.__name__ if value is not None else None

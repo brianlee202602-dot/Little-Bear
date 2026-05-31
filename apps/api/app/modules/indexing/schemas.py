@@ -86,12 +86,24 @@ class IndexCollectionHealth:
 
 
 @dataclass(frozen=True)
+class IndexCollectionHealthList:
+    items: tuple[IndexCollectionHealth, ...]
+    total: int
+
+
+@dataclass(frozen=True)
 class IndexCollectionSnapshot:
     collection_name: str
     name: str
     size: int | None = None
     creation_time: str | None = None
     checksum: str | None = None
+
+
+@dataclass(frozen=True)
+class IndexCollectionSnapshotList:
+    items: tuple[IndexCollectionSnapshot, ...]
+    total: int
 
 
 @dataclass(frozen=True)

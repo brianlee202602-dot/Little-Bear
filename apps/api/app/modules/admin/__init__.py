@@ -1,6 +1,9 @@
 """Admin management module."""
 
 from app.modules.admin.errors import AdminServiceError
+from app.modules.admin.index_target_reader import AdminIndexTargetReader
+from app.modules.admin.permission_version_reader import AdminPermissionVersionReader
+from app.modules.admin.role_binding_reader import AdminRoleBindingReader
 from app.modules.admin.schemas import (
     AdminAssignableRoleOption,
     AdminAssignableRoleOptionList,
@@ -36,11 +39,14 @@ __all__ = [
     "AdminFolderList",
     "AdminFolderOption",
     "AdminFolderOptionList",
+    "AdminIndexTargetReader",
     "AdminKnowledgeBaseListItem",
     "AdminKnowledgeBaseOption",
     "AdminKnowledgeBaseOptionList",
+    "AdminPermissionVersionReader",
     "AdminAssignableRoleOption",
     "AdminAssignableRoleOptionList",
+    "AdminRoleBindingReader",
     "AdminRole",
     "AdminRoleList",
     "AdminRoleListItem",

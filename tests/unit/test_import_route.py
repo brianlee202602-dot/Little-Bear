@@ -10,6 +10,8 @@ from app.modules.import_pipeline.service import ImportService
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
 
+AUTH_TARGET = "app.api.dependencies.auth.AuthService.authenticate_access_token"
+
 
 class _FakeSession:
     def __enter__(self) -> _FakeSession:
@@ -25,7 +27,7 @@ def _create_test_app():
 
 def _open_business_api(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.shared.middleware.SetupService.load_state",
+        "app.api.middleware.setup_guard.SetupService.load_state",
         lambda _self: SetupState(
             initialized=True,
             setup_status=SetupStatus.INITIALIZED,
@@ -34,6 +36,11 @@ def _open_business_api(monkeypatch) -> None:
             service_bootstrap_ready=True,
         ),
     )
+
+
+def _patch_import_session_scope(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.import_user.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.import_admin.session_scope", lambda: _FakeSession())
 
 
 def _auth_context() -> AuthContext:
@@ -99,13 +106,13 @@ def _job(status: str = "queued", stage: str = "validate") -> ImportJob:
 def test_create_document_import_route(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    _patch_import_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.build_import_service",
+        "app.api.routes.import_user.build_import_service",
         lambda _session: ImportService(),
     )
     captured: dict[str, object] = {}
@@ -115,7 +122,7 @@ def test_create_document_import_route(monkeypatch) -> None:
         return _job()
 
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.ImportService.create_document_import",
+        "app.api.routes.import_user.ImportService.create_document_import",
         _create_import,
     )
 
@@ -136,13 +143,13 @@ def test_create_document_import_route(monkeypatch) -> None:
 def test_create_upload_document_import_route(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    _patch_import_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.build_import_service",
+        "app.api.routes.import_user.build_import_service",
         lambda _session: ImportService(),
     )
     captured: dict[str, object] = {}
@@ -152,7 +159,7 @@ def test_create_upload_document_import_route(monkeypatch) -> None:
         return _job()
 
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.ImportService.create_document_import",
+        "app.api.routes.import_user.ImportService.create_document_import",
         _create_import,
     )
 
@@ -177,13 +184,13 @@ def test_create_upload_document_import_route_rejects_disallowed_file_type(
 ) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    _patch_import_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.build_import_service",
+        "app.api.routes.import_user.build_import_service",
         lambda _session: ImportService(allowed_file_types=("txt",)),
     )
 
@@ -203,13 +210,13 @@ def test_create_upload_document_import_route_rejects_oversized_file(
 ) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    _patch_import_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.build_import_service",
+        "app.api.routes.import_user.build_import_service",
         lambda _session: ImportService(max_upload_bytes=4, allowed_file_types=("txt",)),
     )
 
@@ -227,7 +234,7 @@ def test_create_upload_document_import_route_rejects_oversized_file(
 def test_import_job_get_route_requires_owner_scope(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    _patch_import_session_scope(monkeypatch)
     captured: dict[str, object] = {}
 
     def _authenticate(*_args, **kwargs):
@@ -235,11 +242,11 @@ def test_import_job_get_route_requires_owner_scope(monkeypatch) -> None:
         return _auth_context()
 
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         _authenticate,
     )
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.ImportService.get_import_job",
+        "app.api.routes.import_user.ImportService.get_import_job",
         lambda *_args, **_kwargs: _job(),
     )
 
@@ -255,13 +262,13 @@ def test_import_job_get_route_requires_owner_scope(monkeypatch) -> None:
 def test_import_job_patch_route_returns_cancelled_job(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    _patch_import_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.ImportService.request_cancel",
+        "app.api.routes.import_user.ImportService.request_cancel",
         lambda *_args, **_kwargs: _job(status="cancelled"),
     )
 
@@ -278,9 +285,9 @@ def test_import_job_patch_route_returns_cancelled_job(monkeypatch) -> None:
 def test_admin_import_job_list_route(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    _patch_import_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     captured: dict[str, object] = {}
@@ -290,7 +297,7 @@ def test_admin_import_job_list_route(monkeypatch) -> None:
         return ImportJobList(items=(_job(),), total=1)
 
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.ImportService.list_import_jobs",
+        "app.api.routes.import_admin.ImportService.list_import_jobs",
         _list_import_jobs,
     )
 
@@ -310,7 +317,7 @@ def test_admin_import_job_list_route(monkeypatch) -> None:
 def test_admin_index_job_retry_route_requires_document_index(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    _patch_import_session_scope(monkeypatch)
     captured: dict[str, object] = {}
 
     def _authenticate(*_args, **kwargs):
@@ -334,11 +341,11 @@ def test_admin_index_job_retry_route_requires_document_index(monkeypatch) -> Non
         )
 
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         _authenticate,
     )
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.ImportService.create_index_job_retries",
+        "app.api.routes.import_admin.ImportService.create_index_job_retries",
         _retry_index_jobs,
     )
 
@@ -360,13 +367,13 @@ def test_admin_index_job_retry_route_requires_document_index(monkeypatch) -> Non
 def test_import_route_returns_service_error(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.import_pipeline.session_scope", lambda: _FakeSession())
+    _patch_import_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.build_import_service",
+        "app.api.routes.import_user.build_import_service",
         lambda _session: ImportService(),
     )
 
@@ -374,7 +381,7 @@ def test_import_route_returns_service_error(monkeypatch) -> None:
         raise ImportServiceError("IMPORT_KB_DENIED", "denied", status_code=403)
 
     monkeypatch.setattr(
-        "app.api.routes.import_pipeline.ImportService.create_document_import",
+        "app.api.routes.import_user.ImportService.create_document_import",
         _raise_error,
     )
 

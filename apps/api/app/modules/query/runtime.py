@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.adapters import QdrantVectorRetriever
+from app.adapters import (
+    QdrantVectorRetriever,
+    VectorStoreCandidate,
+    VectorStoreEmbeddingError,
+    VectorStoreSearchFilter,
+)
 from app.modules.answer import AnswerService
 from app.modules.config.service import ConfigService
 from app.modules.context.service import (
@@ -13,15 +18,19 @@ from app.modules.context.service import (
     ContextBuilder,
 )
 from app.modules.models import (
+    ModelClientError,
     ModelGatewayChatClient,
     ModelGatewayEmbeddingClient,
     ModelGatewayRerankClient,
 )
+from app.modules.permissions.schemas import PermissionFilter
 from app.modules.query.service import DEFAULT_RERANK_MIN_SCORE, QueryService
 from app.modules.retrieval import (
     ModelCandidateReranker,
     NoopCandidateReranker,
+    RetrievalCandidate,
     UnavailableVectorRetriever,
+    VectorSearchResult,
 )
 from app.modules.secrets.service import SecretStoreError, SecretStoreService
 from app.shared.json_utils import as_dict, json_bool, json_int, json_str
@@ -32,6 +41,50 @@ DEFAULT_MODEL_PROVIDER_SECRET_REFS = {
     "rerank": "secret://rag/model/rerank-api-key",
     "llm": "secret://rag/model/llm-api-key",
 }
+
+
+class _VectorStoreEmbeddingClientAdapter:
+    def __init__(self, client: ModelGatewayEmbeddingClient) -> None:
+        self.client = client
+
+    def embed_query(self, query_text: str) -> list[float]:
+        try:
+            return self.client.embed_query(query_text)
+        except ModelClientError as exc:
+            raise VectorStoreEmbeddingError(exc.error_code) from exc
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        try:
+            return self.client.embed_texts(texts)
+        except ModelClientError as exc:
+            raise VectorStoreEmbeddingError(exc.error_code) from exc
+
+
+class _QdrantVectorRetrieverAdapter:
+    def __init__(self, retriever: QdrantVectorRetriever) -> None:
+        self.retriever = retriever
+
+    def search(
+        self,
+        *,
+        query_text: str,
+        permission_filter: PermissionFilter,
+        collection_names: tuple[str, ...],
+        top_k: int,
+    ) -> VectorSearchResult:
+        result = self.retriever.search(
+            query_text=query_text,
+            permission_filter=VectorStoreSearchFilter(
+                payload_filter=permission_filter.qdrant_filter,
+            ),
+            collection_names=collection_names,
+            top_k=top_k,
+        )
+        return VectorSearchResult(
+            candidates=tuple(_retrieval_candidate(candidate) for candidate in result.candidates),
+            degraded=result.degraded,
+            degrade_reason=result.degrade_reason,
+        )
 
 
 def build_query_service(session: Session) -> QueryService:
@@ -97,14 +150,16 @@ def _build_vector_retriever(session: Session, config: dict[str, Any]):
         expected_dimension=json_int(model_config, "embedding_dimension"),
         normalize=json_bool(model_config, "embedding_normalize", default=False),
     )
-    return QdrantVectorRetriever(
-        base_url=qdrant_base_url,
-        api_key=_secret_value(session, json_str(vector_store, "api_key_ref")),
-        embedding_client=embedding_client,
-        timeout_seconds=_timeout_seconds(
-            json_int(timeout_config, "vector_search_ms"),
-            default_ms=3000,
-        ),
+    return _QdrantVectorRetrieverAdapter(
+        QdrantVectorRetriever(
+            base_url=qdrant_base_url,
+            api_key=_secret_value(session, json_str(vector_store, "api_key_ref")),
+            embedding_client=_VectorStoreEmbeddingClientAdapter(embedding_client),
+            timeout_seconds=_timeout_seconds(
+                json_int(timeout_config, "vector_search_ms"),
+                default_ms=3000,
+            ),
+        )
     )
 
 
@@ -114,6 +169,30 @@ def _embedding_path(provider: dict[str, Any]) -> str:
         return configured
     provider_type = json_str(provider, "type", default="http")
     return "/embed" if provider_type == "tei" else "/v1/embeddings"
+
+
+def _retrieval_candidate(candidate: VectorStoreCandidate) -> RetrievalCandidate:
+    return RetrievalCandidate(
+        source="vector",
+        enterprise_id=candidate.enterprise_id,
+        kb_id=candidate.kb_id,
+        document_id=candidate.document_id,
+        document_version_id=candidate.document_version_id,
+        chunk_id=candidate.chunk_id,
+        title=candidate.title,
+        owner_department_id=candidate.owner_department_id,
+        visibility=candidate.visibility,
+        document_lifecycle_status=candidate.document_lifecycle_status,
+        document_index_status=candidate.document_index_status,
+        chunk_status=candidate.chunk_status,
+        visibility_state=candidate.visibility_state,
+        index_version_id=candidate.index_version_id,
+        indexed_permission_version=candidate.indexed_permission_version,
+        page_start=candidate.page_start,
+        page_end=candidate.page_end,
+        rank=candidate.rank,
+        score=candidate.score,
+    )
 
 
 def _build_answer_service(session: Session, config: dict[str, Any]) -> AnswerService:

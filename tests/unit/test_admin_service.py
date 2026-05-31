@@ -16,7 +16,9 @@ from app.modules.admin.schemas import (
     AdminKnowledgeBaseOption,
     AdminRole,
     AdminRoleBinding,
+    AdminRoleBindingList,
     AdminUser,
+    AdminUserDepartmentList,
 )
 from app.modules.admin.service import (
     AdminActorContext,
@@ -1058,12 +1060,15 @@ def test_list_documents_filters_by_knowledge_base_and_status(monkeypatch) -> Non
                         "doc_id": "doc_1",
                         "kb_id": "kb_1",
                         "folder_id": "folder_1",
+                        "folder_name": "制度文件夹",
                         "title": "员工手册",
                         "lifecycle_status": "active",
                         "index_status": "indexed",
                         "owner_department_id": "department_1",
+                        "owner_department_name": "默认部门",
                         "visibility": "department",
                         "current_version_id": "version_1",
+                        "current_version_no": 2,
                         "tags": ["制度"],
                         "permission_snapshot_id": "snapshot_1",
                         "content_hash": "hash_1",
@@ -1104,8 +1109,13 @@ def test_list_documents_filters_by_knowledge_base_and_status(monkeypatch) -> Non
 
     assert result.total == 1
     assert result.items[0].title == "员工手册"
+    assert result.items[0].folder_name == "制度文件夹"
+    assert result.items[0].owner_department_name == "默认部门"
+    assert result.items[0].current_version_no == 2
     sql, params = session.executed[0]
     assert "FROM documents d" in sql
+    assert "LEFT JOIN folders f" in sql
+    assert "LEFT JOIN departments od" in sql
     assert "d.kb_id = CAST(:kb_id AS uuid)" in sql
     assert "d.lifecycle_status = :lifecycle_status" in sql
     assert params["kb_id"] == "kb_1"
@@ -1294,7 +1304,8 @@ def test_list_document_index_versions_filters_by_document(monkeypatch) -> None:
                     }
                 )
             ]
-        )
+        ),
+        _Result(one=_Row({"total": 1})),
     ]
     monkeypatch.setattr(service, "_load_document", lambda *_args, **_kwargs: _document())
     monkeypatch.setattr(
@@ -1315,6 +1326,8 @@ def test_list_document_index_versions_filters_by_document(monkeypatch) -> None:
         session,
         enterprise_id=_ENTERPRISE_ID,
         doc_id="44444444-4444-4444-4444-444444444444",
+        page=2,
+        page_size=10,
         actor_context=AdminActorContext(
             user_id=_ACTOR_USER_ID,
             scopes=("document:index",),
@@ -1322,11 +1335,14 @@ def test_list_document_index_versions_filters_by_document(monkeypatch) -> None:
         ),
     )
 
-    assert versions[0].collection_name == "little_bear"
-    assert versions[0].chunk_count == 5
+    assert versions.items[0].collection_name == "little_bear"
+    assert versions.items[0].chunk_count == 5
+    assert versions.total == 1
     sql, params = session.executed[0]
     assert "FROM index_versions" in sql
     assert params["doc_id"] == "44444444-4444-4444-4444-444444444444"
+    assert params["limit"] == 10
+    assert params["offset"] == 10
 
 
 def test_create_document_index_rebuild_job_enqueues_embed_stage(monkeypatch) -> None:
@@ -2216,6 +2232,52 @@ def test_replace_user_departments_bumps_versions_and_audits(monkeypatch) -> None
     assert audits[0]["summary"]["permission_version"] == 9
 
 
+def test_list_user_departments_supports_pagination(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "department_id": "department_1",
+                        "code": "default",
+                        "name": "默认部门",
+                        "status": "active",
+                        "is_primary": True,
+                        "is_default": True,
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+    monkeypatch.setattr(service, "_load_user_row", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(service, "_ensure_actor_can_access_user", lambda *_args, **_kwargs: None)
+
+    result = service.list_user_departments(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        user_id="user_1",
+        page=2,
+        page_size=10,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("org:read",),
+        ),
+    )
+
+    assert isinstance(result, AdminUserDepartmentList)
+    assert result.total == 1
+    assert result.items[0].name == "默认部门"
+    assert result.items[0].is_primary is True
+    sql, params = session.executed[0]
+    assert "FROM user_department_memberships udm" in sql
+    assert "LIMIT :limit OFFSET :offset" in sql
+    assert params["limit"] == 10
+    assert params["offset"] == 10
+
+
 def test_create_role_binding_requires_confirmation_for_high_risk_role(monkeypatch) -> None:
     service = AdminService()
     monkeypatch.setattr(service, "_load_user_row", lambda *_args, **_kwargs: {})
@@ -2259,6 +2321,52 @@ def test_role_binding_write_requires_user_manage_and_role_manage_scope() -> None
 
     assert exc_info.value.error_code == "ADMIN_SCOPE_REQUIRED"
     assert exc_info.value.details["required_scopes"] == ["user:manage"]
+
+
+def test_list_role_bindings_supports_pagination(monkeypatch) -> None:
+    service = AdminService()
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "binding_id": "binding_1",
+                        "role_id": "role_1",
+                        "user_id": "user_1",
+                        "scope_type": "enterprise",
+                        "scope_id": None,
+                        "role_code": "employee",
+                        "role_name": "Employee",
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+    monkeypatch.setattr(service, "_load_user_row", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(service, "_ensure_actor_can_access_user", lambda *_args, **_kwargs: None)
+
+    result = service.list_role_bindings(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        user_id="user_1",
+        page=3,
+        page_size=5,
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("role:read",),
+        ),
+    )
+
+    assert isinstance(result, AdminRoleBindingList)
+    assert result.total == 1
+    assert result.items[0].role_code == "employee"
+    sql, params = session.executed[0]
+    assert "FROM role_bindings rb" in sql
+    assert "LIMIT :limit OFFSET :offset" in sql
+    assert params["limit"] == 5
+    assert params["offset"] == 10
 
 
 def test_insert_role_binding_rejects_scope_mismatch_before_database_write() -> None:

@@ -5,11 +5,16 @@ from io import BytesIO
 from urllib.error import HTTPError, URLError
 
 import pytest
-from app.adapters import QdrantOpsClient, QdrantVectorIndexWriter, QdrantVectorRetriever
+from app.adapters import (
+    QdrantOpsClient,
+    QdrantVectorIndexWriter,
+    QdrantVectorRetriever,
+    VectorStoreDraftPoint,
+    VectorStoreEmbeddingError,
+    VectorStorePayloadUpdate,
+    VectorStoreSearchFilter,
+)
 from app.adapters.qdrant import QdrantClientError
-from app.modules.indexing.schemas import DraftVectorPoint, VectorPayloadUpdate
-from app.modules.models import ModelClientError
-from app.modules.permissions.schemas import PermissionFilter
 
 ENTERPRISE_ID = "33333333-3333-3333-3333-333333333333"
 KB_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -31,10 +36,10 @@ class _EmbeddingClient:
 
 class _FailingEmbeddingClient:
     def embed_query(self, _query_text: str) -> list[float]:
-        raise ModelClientError("EMBEDDING_UNAVAILABLE", "embedding unavailable")
+        raise VectorStoreEmbeddingError("EMBEDDING_UNAVAILABLE")
 
     def embed_texts(self, _texts: list[str]) -> list[list[float]]:
-        raise ModelClientError("EMBEDDING_UNAVAILABLE", "embedding unavailable")
+        raise VectorStoreEmbeddingError("EMBEDDING_UNAVAILABLE")
 
 
 class _Response:
@@ -181,7 +186,7 @@ def test_qdrant_vector_index_writer_upserts_draft_points(monkeypatch) -> None:
         timeout_seconds=2.0,
     ).upsert_draft_points(
         (
-            DraftVectorPoint(
+            VectorStoreDraftPoint(
                 collection_name="little_bear_p0",
                 vector_id="11111111-1111-5111-8111-111111111111",
                 text="员工手册正文",
@@ -310,7 +315,7 @@ def test_qdrant_vector_index_writer_updates_permission_payload(monkeypatch) -> N
         timeout_seconds=2.0,
     ).update_payloads(
         (
-            VectorPayloadUpdate(
+            VectorStorePayloadUpdate(
                 collection_name="little_bear_p0",
                 vector_id="11111111-1111-5111-8111-111111111111",
                 payload={
@@ -514,8 +519,8 @@ def test_qdrant_ops_client_recovers_collection_snapshot(monkeypatch) -> None:
     }
 
 
-def _draft_point() -> DraftVectorPoint:
-    return DraftVectorPoint(
+def _draft_point() -> VectorStoreDraftPoint:
+    return VectorStoreDraftPoint(
         collection_name="little_bear_p0",
         vector_id="11111111-1111-5111-8111-111111111111",
         text="员工手册正文",
@@ -523,20 +528,11 @@ def _draft_point() -> DraftVectorPoint:
     )
 
 
-def _permission_filter() -> PermissionFilter:
-    return PermissionFilter(
-        enterprise_id=ENTERPRISE_ID,
-        department_ids=(DEPARTMENT_ID,),
-        kb_ids=(KB_ID,),
-        active_index_version_ids=(INDEX_VERSION_ID,),
-        permission_version=42,
-        permission_filter_hash="perm_hash",
-        qdrant_filter={
+def _permission_filter() -> VectorStoreSearchFilter:
+    return VectorStoreSearchFilter(
+        payload_filter={
             "must": [{"key": "enterprise_id", "match": {"value": ENTERPRISE_ID}}],
             "should": [],
             "must_not": [],
         },
-        keyword_where_sql="",
-        metadata_where_sql="",
-        params={},
     )

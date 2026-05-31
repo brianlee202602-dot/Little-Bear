@@ -120,6 +120,13 @@ export interface ConfigItemData {
   version: number;
 }
 
+export interface ConfigItemListItemData {
+  key: string;
+  scope_type: string;
+  status: ConfigStatus;
+  version: number;
+}
+
 export interface PaginationData {
   page: number;
   page_size: number;
@@ -133,7 +140,7 @@ export interface ConfigItemResponse {
 
 export interface ConfigItemListResponse {
   request_id: string;
-  data: ConfigItemData[];
+  data: ConfigItemListItemData[];
   pagination: PaginationData;
 }
 
@@ -367,6 +374,7 @@ export interface AdminDepartmentResponse {
 export interface AdminUserDepartmentsResponse {
   request_id: string;
   data: AdminDepartmentData[];
+  pagination: PaginationData;
 }
 
 export interface AdminUserDepartmentsPutRequest {
@@ -503,9 +511,21 @@ export interface AdminDocumentData {
   current_version_no: number | null;
 }
 
+export interface AdminDocumentListItemData {
+  id: string;
+  title: string;
+  folder_name: string | null;
+  lifecycle_status: "draft" | "active" | "archived" | "deleted";
+  index_status: "none" | "indexing" | "indexed" | "index_failed" | "blocked";
+  visibility: "department" | "enterprise";
+  owner_department_name: string | null;
+  current_version_no: number | null;
+  can_rebuild_index: boolean;
+}
+
 export interface AdminDocumentListResponse {
   request_id: string;
-  data: AdminDocumentData[];
+  data: AdminDocumentListItemData[];
   pagination: PaginationData;
 }
 
@@ -544,6 +564,7 @@ export interface IndexVersionData {
 export interface IndexVersionListResponse {
   request_id: string;
   data: IndexVersionData[];
+  pagination: PaginationData;
 }
 
 export interface IndexCollectionHealthData {
@@ -569,6 +590,7 @@ export interface IndexCollectionHealthData {
 export interface IndexHealthResponse {
   request_id: string;
   data: IndexCollectionHealthData[];
+  pagination: PaginationData;
 }
 
 export interface IndexCollectionSnapshotData {
@@ -587,6 +609,7 @@ export interface IndexCollectionSnapshotResponse {
 export interface IndexCollectionSnapshotListResponse {
   request_id: string;
   data: IndexCollectionSnapshotData[];
+  pagination: PaginationData;
 }
 
 export interface IndexCollectionSnapshotRecoverRequest {
@@ -863,6 +886,7 @@ export interface AdminRoleBindingData {
 export interface AdminRoleBindingListResponse {
   request_id: string;
   data: AdminRoleBindingData[];
+  pagination: PaginationData;
 }
 
 export interface AdminRoleBindingInputData {
@@ -990,9 +1014,16 @@ export async function changeCurrentUserPassword(
   );
 }
 
-export async function listConfigs(accessToken: string): Promise<ConfigItemListResponse> {
+export async function listConfigs(
+  accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
+): Promise<ConfigItemListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
   return requestJson<ConfigItemListResponse>(
-    "/internal/v1/admin/configs",
+    `/internal/v1/admin/configs?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1288,7 +1319,7 @@ export async function listAdminDepartmentOptions(
 ): Promise<AdminDepartmentOptionListResponse> {
   const params = new URLSearchParams({
     page: String(filters.page ?? 1),
-    page_size: String(filters.page_size ?? 100),
+    page_size: String(filters.page_size ?? 20),
   });
   if (filters.keyword) {
     params.set("keyword", filters.keyword);
@@ -1445,9 +1476,14 @@ export async function unlockAdminUser(userId: string, accessToken: string): Prom
 export async function listAdminUserDepartments(
   userId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<AdminUserDepartmentsResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
   return requestJson<AdminUserDepartmentsResponse>(
-    `/internal/v1/admin/users/${encodeURIComponent(userId)}/departments`,
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}/departments?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1514,7 +1550,7 @@ export async function listAdminAssignableRoleOptions(
 ): Promise<AdminAssignableRoleOptionListResponse> {
   const params = new URLSearchParams({
     page: String(filters.page ?? 1),
-    page_size: String(filters.page_size ?? 100),
+    page_size: String(filters.page_size ?? 20),
   });
   if (filters.keyword) {
     params.set("keyword", filters.keyword);
@@ -1559,7 +1595,7 @@ export async function listAdminKnowledgeBaseOptions(
 ): Promise<AdminKnowledgeBaseOptionListResponse> {
   const params = new URLSearchParams({
     page: String(filters.page ?? 1),
-    page_size: String(filters.page_size ?? 100),
+    page_size: String(filters.page_size ?? 20),
   });
   if (filters.keyword) {
     params.set("keyword", filters.keyword);
@@ -1660,7 +1696,7 @@ export async function listAdminFolderOptions(
 ): Promise<AdminFolderOptionListResponse> {
   const params = new URLSearchParams({
     page: String(filters.page ?? 1),
-    page_size: String(filters.page_size ?? 100),
+    page_size: String(filters.page_size ?? 20),
   });
   for (const [key, value] of Object.entries(filters)) {
     if (key === "page" || key === "page_size" || value === undefined || value === null || value === "") {
@@ -1727,7 +1763,7 @@ export async function listAdminDocuments(
 ): Promise<AdminDocumentListResponse> {
   const params = new URLSearchParams({
     page: String(filters.page ?? 1),
-    page_size: String(filters.page_size ?? 100),
+    page_size: String(filters.page_size ?? 20),
   });
   if (filters.status) {
     params.set("status", filters.status);
@@ -1807,9 +1843,14 @@ export async function getAdminDocumentPreview(
 export async function listAdminDocumentIndexVersions(
   documentId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<IndexVersionListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
   return requestJson<IndexVersionListResponse>(
-    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/index-versions`,
+    `/internal/v1/admin/documents/${encodeURIComponent(documentId)}/index-versions?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1862,9 +1903,16 @@ export async function createAdminIndexVersionCleanupJob(
   );
 }
 
-export async function getAdminIndexHealth(accessToken: string): Promise<IndexHealthResponse> {
+export async function getAdminIndexHealth(
+  accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
+): Promise<IndexHealthResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
   return requestJson<IndexHealthResponse>(
-    "/internal/v1/admin/index-health",
+    `/internal/v1/admin/index-health?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -1873,9 +1921,14 @@ export async function getAdminIndexHealth(accessToken: string): Promise<IndexHea
 export async function listAdminIndexCollectionSnapshots(
   collectionName: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<IndexCollectionSnapshotListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
   return requestJson<IndexCollectionSnapshotListResponse>(
-    `/internal/v1/admin/index-collections/${encodeURIComponent(collectionName)}/snapshots`,
+    `/internal/v1/admin/index-collections/${encodeURIComponent(collectionName)}/snapshots?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );
@@ -2012,7 +2065,7 @@ export async function listAdminImportJobs(
 ): Promise<ImportJobListResponse> {
   const params = new URLSearchParams({
     page: String(filters.page ?? 1),
-    page_size: String(filters.page_size ?? 100),
+    page_size: String(filters.page_size ?? 20),
   });
   if (filters.status) {
     params.set("status", filters.status);
@@ -2052,9 +2105,14 @@ export async function retryAdminIndexJobs(
 export async function listAdminUserRoleBindings(
   userId: string,
   accessToken: string,
+  filters: { page?: number; page_size?: number } = {},
 ): Promise<AdminRoleBindingListResponse> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.page_size ?? 20),
+  });
   return requestJson<AdminRoleBindingListResponse>(
-    `/internal/v1/admin/users/${encodeURIComponent(userId)}/role-bindings`,
+    `/internal/v1/admin/users/${encodeURIComponent(userId)}/role-bindings?${params.toString()}`,
     { method: "GET" },
     accessToken,
   );

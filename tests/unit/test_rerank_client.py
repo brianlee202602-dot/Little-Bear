@@ -54,6 +54,7 @@ def test_rerank_client_calls_tei_provider_and_sorts_scores(monkeypatch) -> None:
 
     assert captured["url"] == "https://model.example/rerank"
     assert captured["timeout"] == 0.8
+    assert captured["headers"]["Authorization"] == "Bearer token"
     assert captured["body"] == {
         "query": "员工手册",
         "texts": ["第一段", "第二段"],

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from app.shared.errors import ServiceError
 
-class AuthServiceError(Exception):
+
+class AuthServiceError(ServiceError):
     """认证失败或 token 校验失败时抛出，路由层转换为统一错误响应。"""
 
     def __init__(
@@ -15,9 +17,10 @@ class AuthServiceError(Exception):
         retryable: bool = False,
         details: dict[str, object] | None = None,
     ) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.message = message
-        self.status_code = status_code
-        self.retryable = retryable
-        self.details = details or {}
+        super().__init__(
+            error_code,
+            message,
+            status_code=status_code,
+            retryable=retryable,
+            details=details,
+        )

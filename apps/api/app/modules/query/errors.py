@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.shared.errors import ServiceError
 
-class QueryServiceError(Exception):
+
+class QueryServiceError(ServiceError):
     """查询请求校验、召回或日志写入失败。"""
 
     def __init__(
@@ -17,9 +19,10 @@ class QueryServiceError(Exception):
         retryable: bool = False,
         details: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.message = message
-        self.status_code = status_code
-        self.retryable = retryable
-        self.details = details or {}
+        super().__init__(
+            error_code,
+            message,
+            status_code=status_code,
+            retryable=retryable,
+            details=details,
+        )

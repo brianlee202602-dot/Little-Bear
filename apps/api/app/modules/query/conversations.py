@@ -1,76 +1,44 @@
 """普通用户查询会话持久化服务。
 
-该服务只负责用户查询工作区的会话窗口和消息落库。RAG 诊断事实仍在
-query_logs / model_call_logs 中，二者不要混用。
+该模块保留 route-facing facade 和旧导入路径；SQL、消息生命周期和映射逻辑分别下沉到
+conversation_repository、conversation_messages 和 conversation_mappers。
 """
 
 from __future__ import annotations
 
-import json
-import uuid
-from dataclasses import dataclass
-from datetime import datetime
 from typing import Literal
 
-from app.modules.query.errors import QueryServiceError
+from app.modules.query.conversation_mappers import (
+    _citations_from_json,
+    _citations_json,
+    _confidence_or_none,
+    _conversation_database_error,
+    _conversation_not_found,
+    _conversation_summary_from_mapping,
+    _datetime_or_none,
+    _message_from_mapping,
+    _message_status,
+    _normalize_title,
+)
+from app.modules.query.conversation_messages import QueryConversationMessageService
+from app.modules.query.conversation_models import (
+    QueryConversationDetail,
+    QueryConversationList,
+    QueryConversationSummary,
+    QueryConversationWriteContext,
+    QueryMessage,
+)
+from app.modules.query.conversation_repository import QueryConversationRepository
 from app.modules.query.schemas import QueryCitation
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-
-
-@dataclass(frozen=True)
-class QueryConversationSummary:
-    id: str
-    title: str
-    status: str
-    kb_ids: tuple[str, ...]
-    last_message_at: datetime | None
-    created_at: datetime | None
-    updated_at: datetime | None
-
-
-@dataclass(frozen=True)
-class QueryMessage:
-    id: str
-    conversation_id: str
-    role: Literal["user", "assistant"]
-    content: str
-    status: Literal["running", "done", "error", "cancelled"]
-    citations: tuple[QueryCitation, ...]
-    confidence: Literal["low", "medium", "high"] | None
-    degraded: bool
-    degrade_reason: str | None
-    request_id: str | None
-    trace_id: str | None
-    created_at: datetime | None
-    updated_at: datetime | None
-
-
-@dataclass(frozen=True)
-class QueryConversationDetail:
-    conversation: QueryConversationSummary
-    messages: tuple[QueryMessage, ...]
-    message_page: int
-    message_page_size: int
-    message_total: int
-
-
-@dataclass(frozen=True)
-class QueryConversationList:
-    items: tuple[QueryConversationSummary, ...]
-    total: int
-
-
-@dataclass(frozen=True)
-class QueryConversationWriteContext:
-    conversation_id: str
-    user_message_id: str
-    assistant_message_id: str
 
 
 class QueryConversationService:
     """提供当前登录用户自己的查询会话读写能力。"""
+
+    def __init__(self, repository: QueryConversationRepository | None = None) -> None:
+        self._repository = repository or QueryConversationRepository()
+        self._message_service = QueryConversationMessageService(self._repository)
 
     def list_conversations(
         self,
@@ -81,59 +49,14 @@ class QueryConversationService:
         page: int,
         page_size: int,
     ) -> QueryConversationList:
-        page = max(page, 1)
-        page_size = min(max(page_size, 1), 100)
-        params = {
-            "enterprise_id": enterprise_id,
-            "user_id": user_id,
-            "limit": page_size,
-            "offset": (page - 1) * page_size,
-        }
-        try:
-            rows = session.execute(
-                text(
-                    """
-                    SELECT
-                        id::text AS id,
-                        title,
-                        status,
-                        kb_ids,
-                        last_message_at,
-                        created_at,
-                        updated_at
-                    FROM query_conversations
-                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND user_id = CAST(:user_id AS uuid)
-                      AND status = 'active'
-                    ORDER BY COALESCE(last_message_at, updated_at, created_at) DESC
-                    LIMIT :limit OFFSET :offset
-                    """
-                ),
-                params,
-            ).all()
-            total_row = session.execute(
-                text(
-                    """
-                    SELECT count(*) AS total
-                    FROM query_conversations
-                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND user_id = CAST(:user_id AS uuid)
-                      AND status = 'active'
-                    """
-                ),
-                params,
-            ).one()
-        except SQLAlchemyError as exc:
-            raise _conversation_database_error(
-                "QUERY_CONVERSATION_LIST_FAILED",
-                "query conversations cannot be listed",
-                exc,
-            ) from exc
-
-        return QueryConversationList(
-            items=tuple(_conversation_summary_from_mapping(dict(row._mapping)) for row in rows),
-            total=int(total_row._mapping["total"]),
+        items, total = self._repository.list_conversations(
+            session,
+            enterprise_id=enterprise_id,
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
         )
+        return QueryConversationList(items=items, total=total)
 
     def create_conversation(
         self,
@@ -144,46 +67,13 @@ class QueryConversationService:
         title: str,
         kb_ids: tuple[str, ...],
     ) -> QueryConversationSummary:
-        conversation_id = str(uuid.uuid4())
-        normalized_title = _normalize_title(title)
-        try:
-            row = session.execute(
-                text(
-                    """
-                    INSERT INTO query_conversations(
-                        id, enterprise_id, user_id, title, status, kb_ids,
-                        last_message_at
-                    )
-                    VALUES (
-                        CAST(:id AS uuid), CAST(:enterprise_id AS uuid),
-                        CAST(:user_id AS uuid), :title, 'active',
-                        CAST(:kb_ids AS uuid[]), now()
-                    )
-                    RETURNING
-                        id::text AS id,
-                        title,
-                        status,
-                        kb_ids,
-                        last_message_at,
-                        created_at,
-                        updated_at
-                    """
-                ),
-                {
-                    "id": conversation_id,
-                    "enterprise_id": enterprise_id,
-                    "user_id": user_id,
-                    "title": normalized_title,
-                    "kb_ids": list(kb_ids),
-                },
-            ).one()
-        except SQLAlchemyError as exc:
-            raise _conversation_database_error(
-                "QUERY_CONVERSATION_CREATE_FAILED",
-                "query conversation cannot be created",
-                exc,
-            ) from exc
-        return _conversation_summary_from_mapping(dict(row._mapping))
+        return self._repository.create_conversation(
+            session,
+            enterprise_id=enterprise_id,
+            user_id=user_id,
+            title=title,
+            kb_ids=kb_ids,
+        )
 
     def get_conversation(
         self,
@@ -203,72 +93,20 @@ class QueryConversationService:
             user_id=user_id,
             conversation_id=conversation_id,
         )
-        try:
-            rows = session.execute(
-                text(
-                    """
-                    SELECT *
-                    FROM (
-                        SELECT
-                            id::text AS id,
-                            conversation_id::text AS conversation_id,
-                            role,
-                            content,
-                            status,
-                            citations_json,
-                            confidence,
-                            degraded,
-                            degrade_reason,
-                            request_id,
-                            trace_id,
-                            created_at,
-                            updated_at
-                        FROM query_messages
-                        WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                          AND user_id = CAST(:user_id AS uuid)
-                          AND conversation_id = CAST(:conversation_id AS uuid)
-                        ORDER BY created_at DESC, id DESC
-                        LIMIT :limit OFFSET :offset
-                    ) latest_messages
-                    ORDER BY created_at ASC, id ASC
-                    """
-                ),
-                {
-                    "enterprise_id": enterprise_id,
-                    "user_id": user_id,
-                    "conversation_id": conversation_id,
-                    "limit": page_size,
-                    "offset": (page - 1) * page_size,
-                },
-            ).all()
-            total_row = session.execute(
-                text(
-                    """
-                    SELECT count(*) AS total
-                    FROM query_messages
-                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND user_id = CAST(:user_id AS uuid)
-                      AND conversation_id = CAST(:conversation_id AS uuid)
-                    """
-                ),
-                {
-                    "enterprise_id": enterprise_id,
-                    "user_id": user_id,
-                    "conversation_id": conversation_id,
-                },
-            ).one()
-        except SQLAlchemyError as exc:
-            raise _conversation_database_error(
-                "QUERY_CONVERSATION_READ_FAILED",
-                "query conversation cannot be read",
-                exc,
-            ) from exc
+        messages, total = self._repository.list_messages(
+            session,
+            enterprise_id=enterprise_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            page=page,
+            page_size=page_size,
+        )
         return QueryConversationDetail(
             conversation=conversation,
-            messages=tuple(_message_from_mapping(dict(row._mapping)) for row in rows),
+            messages=messages,
             message_page=page,
             message_page_size=page_size,
-            message_total=int(total_row._mapping["total"]),
+            message_total=total,
         )
 
     def delete_conversation(
@@ -279,54 +117,14 @@ class QueryConversationService:
         user_id: str,
         conversation_id: str,
     ) -> None:
-        try:
-            row = session.execute(
-                text(
-                    """
-                    UPDATE query_conversations
-                    SET status = 'deleted', deleted_at = now(), updated_at = now()
-                    WHERE id = CAST(:conversation_id AS uuid)
-                      AND enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND user_id = CAST(:user_id AS uuid)
-                      AND status = 'active'
-                    RETURNING id::text AS id
-                    """
-                ),
-                {
-                    "conversation_id": conversation_id,
-                    "enterprise_id": enterprise_id,
-                    "user_id": user_id,
-                },
-            ).one_or_none()
-            if row is not None:
-                return
-            owned_deleted = session.execute(
-                text(
-                    """
-                    SELECT id
-                    FROM query_conversations
-                    WHERE id = CAST(:conversation_id AS uuid)
-                      AND enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND user_id = CAST(:user_id AS uuid)
-                      AND status = 'deleted'
-                    LIMIT 1
-                    """
-                ),
-                {
-                    "conversation_id": conversation_id,
-                    "enterprise_id": enterprise_id,
-                    "user_id": user_id,
-                },
-            ).one_or_none()
-        except SQLAlchemyError as exc:
-            raise _conversation_database_error(
-                "QUERY_CONVERSATION_DELETE_FAILED",
-                "query conversation cannot be deleted",
-                exc,
-            ) from exc
-        if owned_deleted is not None:
-            return
-        raise _conversation_not_found(conversation_id)
+        result = self._repository.delete_conversation(
+            session,
+            enterprise_id=enterprise_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if result == "not_found":
+            raise _conversation_not_found(conversation_id)
 
     def prepare_query_messages(
         self,
@@ -340,97 +138,15 @@ class QueryConversationService:
         request_id: str,
         trace_id: str,
     ) -> QueryConversationWriteContext:
-        if conversation_id:
-            conversation = self._load_owned_active_conversation(
-                session,
-                enterprise_id=enterprise_id,
-                user_id=user_id,
-                conversation_id=conversation_id,
-            )
-        else:
-            conversation = self.create_conversation(
-                session,
-                enterprise_id=enterprise_id,
-                user_id=user_id,
-                title=query_text,
-                kb_ids=kb_ids,
-            )
-        user_message_id = str(uuid.uuid4())
-        assistant_message_id = str(uuid.uuid4())
-        try:
-            session.execute(
-                text(
-                    """
-                    UPDATE query_conversations
-                    SET kb_ids = CAST(:kb_ids AS uuid[]),
-                        last_message_at = now(),
-                        updated_at = now()
-                    WHERE id = CAST(:conversation_id AS uuid)
-                    """
-                ),
-                {"conversation_id": conversation.id, "kb_ids": list(kb_ids)},
-            )
-            session.execute(
-                text(
-                    """
-                    INSERT INTO query_messages(
-                        id, conversation_id, enterprise_id, user_id, role, content,
-                        status, citations_json, confidence, degraded, degrade_reason,
-                        request_id, trace_id
-                    )
-                    VALUES (
-                        CAST(:id AS uuid), CAST(:conversation_id AS uuid),
-                        CAST(:enterprise_id AS uuid), CAST(:user_id AS uuid),
-                        'user', :content, 'done', '[]'::jsonb, NULL, false, NULL,
-                        :request_id, :trace_id
-                    )
-                    """
-                ),
-                {
-                    "id": user_message_id,
-                    "conversation_id": conversation.id,
-                    "enterprise_id": enterprise_id,
-                    "user_id": user_id,
-                    "content": query_text,
-                    "request_id": request_id,
-                    "trace_id": trace_id,
-                },
-            )
-            session.execute(
-                text(
-                    """
-                    INSERT INTO query_messages(
-                        id, conversation_id, enterprise_id, user_id, role, content,
-                        status, citations_json, confidence, degraded, degrade_reason,
-                        request_id, trace_id
-                    )
-                    VALUES (
-                        CAST(:id AS uuid), CAST(:conversation_id AS uuid),
-                        CAST(:enterprise_id AS uuid), CAST(:user_id AS uuid),
-                        'assistant', '', 'running', '[]'::jsonb, NULL, false, NULL,
-                        :request_id, :trace_id
-                    )
-                    """
-                ),
-                {
-                    "id": assistant_message_id,
-                    "conversation_id": conversation.id,
-                    "enterprise_id": enterprise_id,
-                    "user_id": user_id,
-                    "request_id": request_id,
-                    "trace_id": trace_id,
-                },
-            )
-        except SQLAlchemyError as exc:
-            raise _conversation_database_error(
-                "QUERY_MESSAGE_CREATE_FAILED",
-                "query conversation messages cannot be created",
-                exc,
-            ) from exc
-        return QueryConversationWriteContext(
-            conversation_id=conversation.id,
-            user_message_id=user_message_id,
-            assistant_message_id=assistant_message_id,
+        return self._message_service.prepare_query_messages(
+            session,
+            enterprise_id=enterprise_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            kb_ids=kb_ids,
+            query_text=query_text,
+            request_id=request_id,
+            trace_id=trace_id,
         )
 
     def complete_assistant_message(
@@ -446,11 +162,10 @@ class QueryConversationService:
         request_id: str,
         trace_id: str,
     ) -> None:
-        self._finish_assistant_message(
+        self._message_service.complete_assistant_message(
             session,
             message_id=message_id,
-            content=answer,
-            status="done",
+            answer=answer,
             citations=citations,
             confidence=confidence,
             degraded=degraded,
@@ -470,17 +185,14 @@ class QueryConversationService:
         trace_id: str,
         degrade_reason: str | None = None,
     ) -> None:
-        self._finish_assistant_message(
+        self._message_service.fail_assistant_message(
             session,
             message_id=message_id,
-            content=message,
+            message=message,
             status=status,
-            citations=(),
-            confidence=None,
-            degraded=True,
-            degrade_reason=degrade_reason or message,
             request_id=request_id,
             trace_id=trace_id,
+            degrade_reason=degrade_reason,
         )
 
     def _load_owned_active_conversation(
@@ -491,226 +203,33 @@ class QueryConversationService:
         user_id: str,
         conversation_id: str,
     ) -> QueryConversationSummary:
-        try:
-            row = session.execute(
-                text(
-                    """
-                    SELECT
-                        id::text AS id,
-                        title,
-                        status,
-                        kb_ids,
-                        last_message_at,
-                        created_at,
-                        updated_at
-                    FROM query_conversations
-                    WHERE id = CAST(:conversation_id AS uuid)
-                      AND enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND user_id = CAST(:user_id AS uuid)
-                      AND status = 'active'
-                    LIMIT 1
-                    """
-                ),
-                {
-                    "conversation_id": conversation_id,
-                    "enterprise_id": enterprise_id,
-                    "user_id": user_id,
-                },
-            ).one_or_none()
-        except SQLAlchemyError as exc:
-            raise _conversation_database_error(
-                "QUERY_CONVERSATION_READ_FAILED",
-                "query conversation cannot be read",
-                exc,
-            ) from exc
-        if row is None:
+        conversation = self._repository.load_owned_active_conversation(
+            session,
+            enterprise_id=enterprise_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if conversation is None:
             raise _conversation_not_found(conversation_id)
-        return _conversation_summary_from_mapping(dict(row._mapping))
-
-    def _finish_assistant_message(
-        self,
-        session: Session,
-        *,
-        message_id: str,
-        content: str,
-        status: Literal["done", "error", "cancelled"],
-        citations: tuple[QueryCitation, ...],
-        confidence: Literal["low", "medium", "high"] | None,
-        degraded: bool,
-        degrade_reason: str | None,
-        request_id: str,
-        trace_id: str,
-    ) -> None:
-        try:
-            row = session.execute(
-                text(
-                    """
-                    UPDATE query_messages
-                    SET content = :content,
-                        status = :status,
-                        citations_json = CAST(:citations_json AS jsonb),
-                        confidence = :confidence,
-                        degraded = :degraded,
-                        degrade_reason = :degrade_reason,
-                        request_id = :request_id,
-                        trace_id = :trace_id,
-                        updated_at = now()
-                    WHERE id = CAST(:message_id AS uuid)
-                      AND role = 'assistant'
-                    RETURNING conversation_id::text AS conversation_id
-                    """
-                ),
-                {
-                    "message_id": message_id,
-                    "content": content,
-                    "status": status,
-                    "citations_json": _citations_json(citations),
-                    "confidence": confidence,
-                    "degraded": degraded,
-                    "degrade_reason": degrade_reason,
-                    "request_id": request_id,
-                    "trace_id": trace_id,
-                },
-            ).one_or_none()
-            if row is None:
-                raise QueryServiceError(
-                    "QUERY_MESSAGE_NOT_FOUND",
-                    "query assistant message does not exist",
-                    status_code=404,
-                    details={"message_id": message_id},
-                )
-            conversation_id = str(row._mapping["conversation_id"])
-            session.execute(
-                text(
-                    """
-                    UPDATE query_conversations
-                    SET last_message_at = now(), updated_at = now()
-                    WHERE id = CAST(:conversation_id AS uuid)
-                    """
-                ),
-                {"conversation_id": conversation_id},
-            )
-        except SQLAlchemyError as exc:
-            raise _conversation_database_error(
-                "QUERY_MESSAGE_UPDATE_FAILED",
-                "query assistant message cannot be updated",
-                exc,
-            ) from exc
+        return conversation
 
 
-def _conversation_summary_from_mapping(row: dict[str, object]) -> QueryConversationSummary:
-    return QueryConversationSummary(
-        id=str(row["id"]),
-        title=str(row["title"]),
-        status=str(row["status"]),
-        kb_ids=tuple(str(item) for item in row.get("kb_ids") or ()),
-        last_message_at=_datetime_or_none(row.get("last_message_at")),
-        created_at=_datetime_or_none(row.get("created_at")),
-        updated_at=_datetime_or_none(row.get("updated_at")),
-    )
+__all__ = [
+    "QueryConversationDetail",
+    "QueryConversationList",
+    "QueryConversationService",
+    "QueryConversationSummary",
+    "QueryConversationWriteContext",
+    "QueryMessage",
+    "_citations_from_json",
+    "_citations_json",
+    "_confidence_or_none",
+    "_conversation_database_error",
+    "_conversation_not_found",
+    "_conversation_summary_from_mapping",
+    "_datetime_or_none",
+    "_message_from_mapping",
+    "_message_status",
+    "_normalize_title",
+]
 
-
-def _message_from_mapping(row: dict[str, object]) -> QueryMessage:
-    return QueryMessage(
-        id=str(row["id"]),
-        conversation_id=str(row["conversation_id"]),
-        role="user" if row["role"] == "user" else "assistant",
-        content=str(row["content"]),
-        status=_message_status(row["status"]),
-        citations=_citations_from_json(row.get("citations_json")),
-        confidence=_confidence_or_none(row.get("confidence")),
-        degraded=bool(row["degraded"]),
-        degrade_reason=row["degrade_reason"] if isinstance(row["degrade_reason"], str) else None,
-        request_id=row["request_id"] if isinstance(row["request_id"], str) else None,
-        trace_id=row["trace_id"] if isinstance(row["trace_id"], str) else None,
-        created_at=_datetime_or_none(row.get("created_at")),
-        updated_at=_datetime_or_none(row.get("updated_at")),
-    )
-
-
-def _citations_json(citations: tuple[QueryCitation, ...]) -> str:
-    return json.dumps(
-        [
-            {
-                "source_id": citation.source_id,
-                "doc_id": citation.doc_id,
-                "document_version_id": citation.document_version_id,
-                "title": citation.title,
-                "page_start": citation.page_start,
-                "page_end": citation.page_end,
-                "score": citation.score,
-            }
-            for citation in citations
-        ],
-        ensure_ascii=False,
-    )
-
-
-def _citations_from_json(value: object) -> tuple[QueryCitation, ...]:
-    if not isinstance(value, list):
-        return ()
-    citations: list[QueryCitation] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        try:
-            citations.append(
-                QueryCitation(
-                    source_id=str(item["source_id"]),
-                    doc_id=str(item["doc_id"]),
-                    document_version_id=str(item["document_version_id"]),
-                    title=str(item["title"]),
-                    page_start=int(item["page_start"]),
-                    page_end=int(item["page_end"]),
-                    score=float(item.get("score", 0)),
-                )
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-    return tuple(citations)
-
-
-def _normalize_title(value: str) -> str:
-    title = " ".join(value.strip().split())
-    if not title:
-        return "新对话"
-    return f"{title[:28]}..." if len(title) > 28 else title
-
-
-def _message_status(value: object) -> Literal["running", "done", "error", "cancelled"]:
-    if value in {"running", "done", "error", "cancelled"}:
-        return value  # type: ignore[return-value]
-    return "done"
-
-
-def _confidence_or_none(value: object) -> Literal["low", "medium", "high"] | None:
-    if value in {"low", "medium", "high"}:
-        return value  # type: ignore[return-value]
-    return None
-
-
-def _datetime_or_none(value: object) -> datetime | None:
-    return value if isinstance(value, datetime) else None
-
-
-def _conversation_not_found(conversation_id: str) -> QueryServiceError:
-    return QueryServiceError(
-        "QUERY_CONVERSATION_NOT_FOUND",
-        "query conversation does not exist",
-        status_code=404,
-        details={"conversation_id": conversation_id},
-    )
-
-
-def _conversation_database_error(
-    error_code: str,
-    message: str,
-    exc: SQLAlchemyError,
-) -> QueryServiceError:
-    return QueryServiceError(
-        error_code,
-        message,
-        status_code=500,
-        retryable=True,
-        details={"error_type": exc.__class__.__name__},
-    )

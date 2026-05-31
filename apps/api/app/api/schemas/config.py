@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.schemas.common import PaginationData
+
 
 class ConfigItemData(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -18,12 +20,13 @@ class ConfigItemData(BaseModel):
     version: int
 
 
-class PaginationData(BaseModel):
+class ConfigItemListItemData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    page: int
-    page_size: int
-    total: int
+    key: str
+    scope_type: str
+    status: Literal["draft", "validating", "active", "inactive", "archived", "failed"]
+    version: int
 
 
 class ConfigPutRequest(BaseModel):
@@ -43,7 +46,7 @@ class ConfigItemListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    data: list[ConfigItemData]
+    data: list[ConfigItemListItemData]
     pagination: PaginationData
 
 

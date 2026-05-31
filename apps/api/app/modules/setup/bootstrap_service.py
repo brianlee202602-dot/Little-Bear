@@ -10,10 +10,8 @@ from __future__ import annotations
 import ast
 import socket
 import time
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -21,10 +19,16 @@ from urllib.request import Request, urlopen
 from app.modules.config.errors import ConfigServiceError
 from app.modules.config.service import ConfigService
 from app.modules.config.validator import ConfigSchemaValidator
-from app.modules.secrets.service import SecretStoreError, SecretStoreService
-from app.shared.json_utils import as_dict, json_bool, json_dumps, json_int, json_str
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from app.modules.secrets.service import SecretStoreService
+from app.modules.setup.bootstrap_probe_service import BootstrapProbeError, BootstrapProbeService
+from app.modules.setup.bootstrap_state_repository import ServiceBootstrapStateRepository
+from app.modules.setup.bootstrap_types import (
+    BootstrapCheck,
+    ServiceBootstrapResult,
+    ServiceBootstrapState,
+)
+from app.modules.setup.provider_probe_service import ProviderProbeService
+from app.shared.json_utils import json_int
 from sqlalchemy.orm import Session
 
 
@@ -61,77 +65,38 @@ def _revision_from_file(path: Path) -> str | None:
 
 
 EXPECTED_SCHEMA_REVISION = _expected_schema_revision()
-CheckStatus = Literal["passed", "failed", "skipped"]
-
-
-@dataclass(frozen=True)
-class BootstrapCheck:
-    name: str
-    status: CheckStatus
-    message: str
-    required: bool = True
-    latency_ms: int | None = None
-
-    @property
-    def passed(self) -> bool:
-        return self.status == "passed" or (self.status == "skipped" and not self.required)
-
-    def to_dict(self) -> dict[str, object]:
-        data: dict[str, object] = {
-            "name": self.name,
-            "status": self.status,
-            "message": self.message,
-            "required": self.required,
-        }
-        if self.latency_ms is not None:
-            data["latency_ms"] = self.latency_ms
-        return data
-
-
-@dataclass(frozen=True)
-class ServiceBootstrapResult:
-    ready: bool
-    config_version: int | None
-    schema_revision: str | None
-    checks: tuple[BootstrapCheck, ...]
-
-    def to_state_value(self) -> dict[str, object]:
-        return {
-            "ready": self.ready,
-            "mode": "p0_dependency_checks",
-            "targets": [check.name for check in self.checks],
-            "config_version": self.config_version,
-            "schema_migration_version": self.schema_revision,
-            "checks": [check.to_dict() for check in self.checks],
-        }
-
-
-@dataclass(frozen=True)
-class ServiceBootstrapState:
-    ready: bool
-    config_version: int | None
-    schema_revision: str | None
-    checks: tuple[BootstrapCheck, ...]
-    updated_at: datetime | None
-
-    def fresh_for(self, active_config_version: int | None, *, ttl_seconds: float) -> bool:
-        if not self.ready or self.config_version != active_config_version:
-            return False
-        if self.updated_at is None:
-            return False
-        return datetime.now(UTC) - self.updated_at <= timedelta(seconds=max(ttl_seconds, 0.0))
-
-    def to_result(self) -> ServiceBootstrapResult:
-        return ServiceBootstrapResult(
-            ready=self.ready,
-            config_version=self.config_version,
-            schema_revision=self.schema_revision,
-            checks=self.checks,
-        )
 
 
 class ServiceBootstrapService:
     """校验 active_config 驱动的关键服务是否可用。"""
+
+    def __init__(
+        self,
+        *,
+        state_repository: ServiceBootstrapStateRepository | None = None,
+        probe_service: BootstrapProbeService | None = None,
+        provider_probe_service: ProviderProbeService | None = None,
+        config_service: ConfigService | None = None,
+        schema_validator: ConfigSchemaValidator | None = None,
+    ) -> None:
+        self.state_repository = state_repository or ServiceBootstrapStateRepository()
+        self.probe_service = probe_service or BootstrapProbeService(
+            redis_ping=_redis_ping,
+            http_get=_http_get,
+            join_url=_join_url,
+            elapsed_ms=_elapsed_ms,
+            timeout_seconds=_timeout_seconds,
+            secret_store_factory=SecretStoreService,
+        )
+        self.provider_probe_service = provider_probe_service or ProviderProbeService(
+            http_get=_http_get,
+            join_url=_join_url,
+            elapsed_ms=_elapsed_ms,
+            timeout_seconds=_timeout_seconds,
+            secret_store_factory=SecretStoreService,
+        )
+        self.config_service = config_service or ConfigService()
+        self.schema_validator = schema_validator or ConfigSchemaValidator()
 
     def bootstrap(
         self,
@@ -158,7 +123,7 @@ class ServiceBootstrapService:
         if active_config is None:
             started = time.monotonic()
             try:
-                snapshot = ConfigService().load_active_config(
+                snapshot = self.config_service.load_active_config(
                     session,
                     active_config_version=active_config_version,
                     validate_schema=False,
@@ -206,16 +171,7 @@ class ServiceBootstrapService:
         return _result(config_version, schema_revision, checks)
 
     def load_schema_revision(self, session: Session) -> str | None:
-        try:
-            row = session.execute(
-                text("SELECT version_num FROM alembic_version LIMIT 1")
-            ).one_or_none()
-        except SQLAlchemyError:
-            return None
-        if row is None:
-            return None
-        value = row._mapping["version_num"]
-        return value if isinstance(value, str) and value else None
+        return self.state_repository.load_schema_revision(session)
 
     def load_active_config(
         self, session: Session, active_config_version: int | None
@@ -223,7 +179,7 @@ class ServiceBootstrapService:
         if active_config_version is None:
             return None, None
         try:
-            snapshot = ConfigService().load_active_config(
+            snapshot = self.config_service.load_active_config(
                 session,
                 active_config_version=active_config_version,
                 validate_schema=False,
@@ -233,22 +189,12 @@ class ServiceBootstrapService:
         return snapshot.config, snapshot.version
 
     def persist_result(self, session: Session, result: ServiceBootstrapResult) -> None:
-        session.execute(
-            text(
-                """
-                INSERT INTO system_state(key, value_json)
-                VALUES ('service_bootstrap', CAST(:value_json AS jsonb))
-                ON CONFLICT (key) DO UPDATE
-                SET value_json = EXCLUDED.value_json, updated_at = now()
-                """
-            ),
-            {"value_json": json_dumps(result.to_state_value())},
-        )
+        self.state_repository.persist_result(session, result)
 
     def _check_active_config_schema(self, config: dict[str, Any]) -> list[BootstrapCheck]:
         started = time.monotonic()
         try:
-            issues = ConfigSchemaValidator().validate_active_config(config)
+            issues = self.schema_validator.validate_active_config(config)
         except ConfigServiceError as exc:
             return [
                 BootstrapCheck(
@@ -278,181 +224,26 @@ class ServiceBootstrapService:
         ]
 
     def _check_secret_refs(self, session: Session, config: dict[str, Any]) -> list[BootstrapCheck]:
-        refs = _collect_secret_refs(config)
-        if not refs:
-            return [BootstrapCheck("secret_store", "passed", "no required secret refs")]
-        checks: list[BootstrapCheck] = []
-        service = SecretStoreService()
-        for name, secret_ref, required in refs:
-            if not secret_ref:
-                checks.append(
-                    BootstrapCheck(
-                        name,
-                        "skipped",
-                        "secret ref is not configured",
-                        required,
-                    )
-                )
-                continue
-            started = time.monotonic()
-            try:
-                service.verify_secret(session, secret_ref=secret_ref)
-            except SecretStoreError as exc:
-                checks.append(
-                    BootstrapCheck(
-                        name,
-                        "failed",
-                        str(exc),
-                        required=required,
-                        latency_ms=_elapsed_ms(started),
-                    )
-                )
-            else:
-                checks.append(
-                    BootstrapCheck(
-                        name,
-                        "passed",
-                        f"{secret_ref} is readable",
-                        required=required,
-                        latency_ms=_elapsed_ms(started),
-                    )
-                )
-        return checks
+        return self.probe_service.check_secret_refs(session, config)
 
     def _check_redis(self, config: dict[str, Any]) -> BootstrapCheck:
-        redis_config = as_dict(config.get("redis"))
-        redis_url = str(redis_config.get("url") or "")
-        pool = as_dict(redis_config.get("pool"))
-        timeout = _timeout_seconds(pool.get("connect_timeout_ms"), default_ms=1000)
-        started = time.monotonic()
-        try:
-            _redis_ping(redis_url, timeout)
-        except (BootstrapProbeError, OSError) as exc:
-            return BootstrapCheck("redis", "failed", str(exc), latency_ms=_elapsed_ms(started))
-        return BootstrapCheck(
-            "redis",
-            "passed",
-            "redis ping succeeded",
-            latency_ms=_elapsed_ms(started),
-        )
+        return self.probe_service.check_redis(config)
 
     def _check_minio(self, config: dict[str, Any]) -> BootstrapCheck:
-        storage = as_dict(config.get("storage"))
-        endpoint = str(storage.get("minio_endpoint") or "")
-        started = time.monotonic()
-        try:
-            _http_get(_join_url(endpoint, "/minio/health/live"), timeout_seconds=2)
-        except BootstrapProbeError as exc:
-            return BootstrapCheck("minio", "failed", str(exc), latency_ms=_elapsed_ms(started))
-        return BootstrapCheck(
-            "minio",
-            "passed",
-            "minio health check succeeded",
-            latency_ms=_elapsed_ms(started),
-        )
+        return self.probe_service.check_minio(config)
 
     def _check_qdrant(self, session: Session, config: dict[str, Any]) -> BootstrapCheck:
-        vector_store = as_dict(config.get("vector_store"))
-        base_url = str(vector_store.get("qdrant_base_url") or "")
-        headers: dict[str, str] = {}
-        api_key_ref = vector_store.get("api_key_ref")
-        if isinstance(api_key_ref, str) and api_key_ref:
-            try:
-                headers["api-key"] = SecretStoreService().get_secret_value(
-                    session,
-                    secret_ref=api_key_ref,
-                )
-            except SecretStoreError as exc:
-                return BootstrapCheck("qdrant", "failed", str(exc))
-        started = time.monotonic()
-        try:
-            try:
-                _http_get(_join_url(base_url, "/readyz"), timeout_seconds=2, headers=headers)
-            except BootstrapProbeError:
-                _http_get(_join_url(base_url, "/"), timeout_seconds=2, headers=headers)
-        except BootstrapProbeError as exc:
-            return BootstrapCheck("qdrant", "failed", str(exc), latency_ms=_elapsed_ms(started))
-        return BootstrapCheck(
-            "qdrant",
-            "passed",
-            "qdrant health check succeeded",
-            latency_ms=_elapsed_ms(started),
-        )
+        return self.probe_service.check_qdrant(session, config)
 
     def _check_keyword_search(self, session: Session, config: dict[str, Any]) -> BootstrapCheck:
-        keyword_search = as_dict(config.get("keyword_search"))
-        analyzer = str(keyword_search.get("keyword_analyzer") or "little_bear_zh")
-        regconfig = "little_bear_zh" if analyzer == "zhparser" else analyzer
-        started = time.monotonic()
-        try:
-            session.execute(
-                text("SELECT to_tsvector(CAST(:regconfig AS regconfig), '初始化检查')"),
-                {"regconfig": regconfig},
-            ).one()
-        except SQLAlchemyError as exc:
-            return BootstrapCheck(
-                "keyword_search",
-                "failed",
-                f"keyword search check failed: {exc.__class__.__name__}",
-                latency_ms=_elapsed_ms(started),
-            )
-        return BootstrapCheck(
-            "keyword_search",
-            "passed",
-            f"{regconfig} text search configuration is usable",
-            latency_ms=_elapsed_ms(started),
-        )
+        return self.probe_service.check_keyword_search(session, config)
 
     def _check_model_providers(
         self,
         session: Session,
         config: dict[str, Any],
     ) -> list[BootstrapCheck]:
-        gateway = as_dict(config.get("model_gateway"))
-        providers = as_dict(gateway.get("providers"))
-        timeout_ms = json_int(as_dict(gateway.get("healthcheck")).get("timeout_ms")) or 2000
-        gateway_auth_token_ref = json_str(gateway.get("auth_token_ref"))
-
-        checks: list[BootstrapCheck] = []
-        for provider_name in ("embedding", "rerank", "llm"):
-            # provider 允许单独配置 auth_token_ref；没有时回退 model_gateway.auth_token_ref。
-            provider = as_dict(providers.get(provider_name))
-            base_url = str(provider.get("base_url") or "")
-            path = str(provider.get("healthcheck_path") or "/health")
-            auth_headers_result = _model_provider_auth_headers(
-                session,
-                provider_name,
-                json_str(provider.get("auth_token_ref")) or gateway_auth_token_ref,
-            )
-            if isinstance(auth_headers_result, BootstrapCheck):
-                checks.append(auth_headers_result)
-                continue
-            started = time.monotonic()
-            try:
-                _http_get(
-                    _join_url(base_url, path),
-                    timeout_seconds=_timeout_seconds(timeout_ms, default_ms=2000),
-                    headers=auth_headers_result,
-                )
-            except BootstrapProbeError as exc:
-                checks.append(
-                    BootstrapCheck(
-                        f"model_provider_{provider_name}",
-                        "failed",
-                        str(exc),
-                        latency_ms=_elapsed_ms(started),
-                    )
-                )
-            else:
-                checks.append(
-                    BootstrapCheck(
-                        f"model_provider_{provider_name}",
-                        "passed",
-                        f"{provider_name} provider health check succeeded",
-                        latency_ms=_elapsed_ms(started),
-                    )
-                )
-        return checks
+        return self.provider_probe_service.check_model_providers(session, config)
 
 
 class ServiceBootstrapStateService:
@@ -462,35 +253,15 @@ class ServiceBootstrapStateService:
         self,
         *,
         bootstrap_service: ServiceBootstrapService | None = None,
+        state_repository: ServiceBootstrapStateRepository | None = None,
         ttl_seconds: float = 30.0,
     ) -> None:
         self.bootstrap_service = bootstrap_service or ServiceBootstrapService()
+        self.state_repository = state_repository or ServiceBootstrapStateRepository()
         self.ttl_seconds = ttl_seconds
 
     def load_state(self, session: Session) -> ServiceBootstrapState | None:
-        try:
-            row = session.execute(
-                text(
-                    """
-                    SELECT value_json, updated_at
-                    FROM system_state
-                    WHERE key = 'service_bootstrap'
-                    LIMIT 1
-                    """
-                )
-            ).one_or_none()
-        except SQLAlchemyError:
-            return None
-        if row is None:
-            return None
-        value_json = as_dict(row._mapping["value_json"])
-        return ServiceBootstrapState(
-            ready=json_bool(value_json, "ready", default=False),
-            config_version=json_int(value_json, "config_version"),
-            schema_revision=json_str(value_json, "schema_migration_version"),
-            checks=_checks_from_state(value_json.get("checks")),
-            updated_at=_datetime_or_none(row._mapping.get("updated_at")),
-        )
+        return self.state_repository.load_state(session)
 
     def ensure_ready(
         self,
@@ -523,73 +294,6 @@ class ServiceBootstrapStateService:
         )
         self.bootstrap_service.persist_result(session, result)
         return result
-
-
-class BootstrapProbeError(Exception):
-    """外部依赖探测失败。"""
-
-
-def _collect_secret_refs(config: dict[str, Any]) -> list[tuple[str, str | None, bool]]:
-    storage = as_dict(config.get("storage"))
-    auth = as_dict(config.get("auth"))
-    vector_store = as_dict(config.get("vector_store"))
-    gateway = as_dict(config.get("model_gateway"))
-    providers = as_dict(gateway.get("providers"))
-    refs = [
-        ("secret_minio_access_key", json_str(storage.get("access_key_ref")), True),
-        ("secret_minio_secret_key", json_str(storage.get("secret_key_ref")), True),
-        ("secret_jwt_signing_key", json_str(auth.get("jwt_signing_key_ref")), True),
-        ("secret_qdrant_api_key", json_str(vector_store.get("api_key_ref")), False),
-        ("secret_model_gateway_auth", json_str(gateway.get("auth_token_ref")), False),
-    ]
-    for provider_name in ("embedding", "rerank", "llm"):
-        provider = as_dict(providers.get(provider_name))
-        refs.append(
-            (
-                f"secret_model_provider_{provider_name}_auth",
-                json_str(provider.get("auth_token_ref")),
-                False,
-            )
-        )
-    return refs
-
-
-def _checks_from_state(value: object) -> tuple[BootstrapCheck, ...]:
-    if not isinstance(value, list):
-        return ()
-    checks: list[BootstrapCheck] = []
-    for item in value:
-        data = as_dict(item)
-        raw_status = data.get("status")
-        status: CheckStatus = "failed"
-        if raw_status == "passed":
-            status = "passed"
-        elif raw_status == "skipped":
-            status = "skipped"
-        checks.append(
-            BootstrapCheck(
-                name=json_str(data.get("name"), default="unknown") or "unknown",
-                status=status,
-                message=json_str(data.get("message"), default="") or "",
-                required=data.get("required") is not False,
-                latency_ms=json_int(data.get("latency_ms")),
-            )
-        )
-    return tuple(checks)
-
-
-def _model_provider_auth_headers(
-    session: Session,
-    provider_name: str,
-    auth_token_ref: str | None,
-) -> dict[str, str] | BootstrapCheck:
-    if not auth_token_ref:
-        return {}
-    try:
-        token = SecretStoreService().get_secret_value(session, secret_ref=auth_token_ref)
-    except SecretStoreError as exc:
-        return BootstrapCheck(f"model_provider_{provider_name}_auth", "failed", str(exc))
-    return {"authorization": f"Bearer {token}"}
 
 
 def _redis_ping(redis_url: str, timeout: float) -> None:
@@ -672,10 +376,6 @@ def _result(
 
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
-
-
-def _datetime_or_none(value: Any) -> datetime | None:
-    return value if isinstance(value, datetime) else None
 
 
 def _timeout_seconds(value: object, *, default_ms: int) -> float:

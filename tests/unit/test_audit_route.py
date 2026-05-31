@@ -15,6 +15,8 @@ from app.modules.auth.schemas import AuthContext, AuthRole, AuthUser
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
 
+AUTH_TARGET = "app.api.dependencies.auth.AuthService.authenticate_access_token"
+
 
 class _FakeSession:
     def __enter__(self) -> _FakeSession:
@@ -30,7 +32,7 @@ def _create_test_app():
 
 def _open_business_api(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.shared.middleware.SetupService.load_state",
+        "app.api.middleware.setup_guard.SetupService.load_state",
         lambda _self: SetupState(
             initialized=True,
             setup_status=SetupStatus.INITIALIZED,
@@ -148,7 +150,7 @@ def test_audit_log_list_route_requires_audit_read_scope(monkeypatch) -> None:
 
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.audit.session_scope", lambda: _FakeSession())
-    monkeypatch.setattr("app.api.routes.audit.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
         "app.api.routes.audit.AuditService.list_audit_logs",
         lambda _self, _session, **_kwargs: AuditLogList(items=[_audit_log()], total=1),
@@ -177,7 +179,7 @@ def test_audit_log_get_route_returns_single_log(monkeypatch) -> None:
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.audit.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.audit.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
@@ -208,7 +210,7 @@ def test_query_log_list_route_requires_audit_read_scope(monkeypatch) -> None:
 
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.audit.session_scope", lambda: _FakeSession())
-    monkeypatch.setattr("app.api.routes.audit.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr("app.api.routes.audit.AuditService.list_query_logs", list_query_logs)
 
     client = TestClient(_create_test_app())
@@ -238,7 +240,7 @@ def test_query_log_get_route_returns_single_log(monkeypatch) -> None:
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.audit.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.audit.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr("app.api.routes.audit.AuditService.get_query_log", get_query_log)
@@ -267,7 +269,7 @@ def test_model_call_log_list_route_requires_audit_read_scope(monkeypatch) -> Non
 
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.audit.session_scope", lambda: _FakeSession())
-    monkeypatch.setattr("app.api.routes.audit.AuthService.authenticate_access_token", authenticate)
+    monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
         "app.api.routes.audit.AuditService.list_model_call_logs",
         list_model_call_logs,
@@ -301,7 +303,7 @@ def test_model_call_log_get_route_returns_single_log(monkeypatch) -> None:
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.audit.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.audit.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(

@@ -111,14 +111,17 @@ def test_index_ops_service_reports_collection_health() -> None:
         expected_dimension=768,
     ).list_collection_health(session, enterprise_id="33333333-3333-3333-3333-333333333333")
 
-    assert len(result) == 1
-    assert result[0].collection_name == "little_bear_p0"
-    assert result[0].qdrant_reachable is True
-    assert result[0].qdrant_exists is True
-    assert result[0].active_ref_count == 5
-    assert result[0].issues == ()
+    assert len(result.items) == 1
+    assert result.total == 1
+    assert result.items[0].collection_name == "little_bear_p0"
+    assert result.items[0].qdrant_reachable is True
+    assert result.items[0].qdrant_exists is True
+    assert result.items[0].active_ref_count == 5
+    assert result.items[0].issues == ()
     assert inspector.collections == ["little_bear_p0"]
     assert session.executed[0][1]["enterprise_id"] == "33333333-3333-3333-3333-333333333333"
+    assert session.executed[0][1]["limit"] == 20
+    assert session.executed[0][1]["offset"] == 0
 
 
 def test_index_ops_service_flags_mismatches_and_pending_cleanup() -> None:
@@ -155,7 +158,7 @@ def test_index_ops_service_flags_mismatches_and_pending_cleanup() -> None:
         expected_dimension=768,
     ).list_collection_health(session, enterprise_id="33333333-3333-3333-3333-333333333333")
 
-    assert result[0].issues == (
+    assert result.items[0].issues == (
         "qdrant_count_unavailable",
         "qdrant_vector_size_mismatch",
         "qdrant_points_less_than_active_refs",
@@ -189,8 +192,8 @@ def test_index_ops_service_reports_qdrant_config_issue() -> None:
         qdrant_config_issue="qdrant_base_url_missing",
     ).list_collection_health(session, enterprise_id="33333333-3333-3333-3333-333333333333")
 
-    assert result[0].qdrant_reachable is False
-    assert result[0].issues == ("qdrant_base_url_missing",)
+    assert result.items[0].qdrant_reachable is False
+    assert result.items[0].issues == ("qdrant_base_url_missing",)
 
 
 def test_index_ops_service_lists_collection_snapshots_after_enterprise_check() -> None:
@@ -199,15 +202,22 @@ def test_index_ops_service_lists_collection_snapshots_after_enterprise_check() -
     inspector = _FakeQdrantInspector(
         QdrantCollectionInfo(collection_name="little_bear_p0", exists=True),
     )
+    inspector.snapshots = (
+        QdrantSnapshotInfo(name="first.snapshot", size=100),
+        QdrantSnapshotInfo(name="second.snapshot", size=200),
+    )
 
     result = IndexOpsService(qdrant_inspector=inspector).list_collection_snapshots(
         session,
         enterprise_id="33333333-3333-3333-3333-333333333333",
         collection_name=" little_bear_p0 ",
+        page=2,
+        page_size=1,
     )
 
-    assert result[0].collection_name == "little_bear_p0"
-    assert result[0].name == "little_bear_p0.snapshot"
+    assert result.items[0].collection_name == "little_bear_p0"
+    assert result.items[0].name == "second.snapshot"
+    assert result.total == 2
     assert inspector.collections == ["little_bear_p0"]
 
 

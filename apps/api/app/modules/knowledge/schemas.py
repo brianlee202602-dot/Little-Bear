@@ -23,14 +23,12 @@ class AccessibleKnowledgeBaseList:
 @dataclass(frozen=True)
 class AccessibleDocument:
     id: str
-    kb_id: str
-    folder_id: str | None
     title: str
     lifecycle_status: str
     index_status: str
-    owner_department_id: str
-    visibility: str
-    current_version_id: str | None
+    updated_at: datetime | None
+    can_view: bool = True
+    can_cite: bool = True
 
 
 @dataclass(frozen=True)
@@ -97,21 +95,3 @@ class AccessibleCitationSource:
     source_offsets: dict[str, Any] | None
     text_status: str
 
-
-@dataclass(frozen=True)
-class AccessiblePreviewCitation:
-    source_id: str
-    doc_id: str
-    document_version_id: str
-    title: str
-    page_start: int
-    page_end: int
-    score: float
-
-
-@dataclass(frozen=True)
-class AccessibleDocumentPreview:
-    doc_id: str
-    title: str
-    preview: str
-    citations: tuple[AccessiblePreviewCitation, ...]

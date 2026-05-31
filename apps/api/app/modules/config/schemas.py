@@ -79,6 +79,14 @@ class ConfigItem:
 
 
 @dataclass(frozen=True)
+class ConfigItemList:
+    """配置项列表分页结果。"""
+
+    items: list[ConfigItem]
+    total: int
+
+
+@dataclass(frozen=True)
 class ConfigVersion:
     """配置版本元数据和可选配置正文。"""
 

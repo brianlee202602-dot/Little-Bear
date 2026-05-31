@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.schemas.config import PaginationData
+from app.api.schemas.common import CitationData, PaginationData
 
 
 class QueryHistoryMessage(BaseModel):
@@ -28,18 +28,6 @@ class QueryRequest(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
     top_k: int = Field(default=8, ge=1, le=50)
     include_sources: bool = True
-
-
-class CitationData(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source_id: str
-    doc_id: str
-    document_version_id: str
-    title: str
-    page_start: int
-    page_end: int
-    score: float
 
 
 class QueryResponse(BaseModel):

@@ -1,44 +1,54 @@
-"""普通用户知识库浏览服务。"""
+"""Facade for user-facing knowledge browsing."""
 
 from __future__ import annotations
 
-import json
-from datetime import datetime
 from typing import Any
 
-from app.modules.knowledge.errors import KnowledgeServiceError
+from app.modules.knowledge.access_control import KnowledgeAccessGuard
+from app.modules.knowledge.browser_service import KnowledgeBrowserService
+from app.modules.knowledge.document_reader import KnowledgeDocumentReader
+from app.modules.knowledge.mappers import (
+    _chunk_from_mapping,
+    _database_error,
+    _document_from_mapping,
+    _document_list_item_from_mapping,
+    _document_version_from_mapping,
+    _json_mapping,
+    _knowledge_base_from_mapping,
+    _knowledge_base_visibility_sql,
+    _optional_int,
+    _optional_str,
+)
+from app.modules.knowledge.repository import KnowledgeRepository
 from app.modules.knowledge.schemas import (
-    AccessibleChunk,
     AccessibleChunkList,
     AccessibleCitationSource,
     AccessibleDocument,
     AccessibleDocumentList,
-    AccessibleDocumentListItem,
-    AccessibleDocumentPreview,
-    AccessibleDocumentVersion,
     AccessibleDocumentVersionList,
-    AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
-    AccessiblePreviewCitation,
 )
-from app.modules.permissions import PermissionService, PermissionServiceError
+from app.modules.knowledge.source_reader import KnowledgeSourceReader
+from app.modules.permissions import PermissionService
 from app.modules.permissions.schemas import PermissionContext
-from app.modules.permissions.service import knowledge_base_access_where_sql
 from app.modules.storage.service import ObjectStorage
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 
 class KnowledgeService:
+    """Route-facing facade for knowledge browsing and source verification."""
+
     def __init__(
         self,
         *,
         permission_service: PermissionService | None = None,
         object_storage: ObjectStorage | None = None,
+        repository: KnowledgeRepository | None = None,
     ) -> None:
         self.permission_service = permission_service or PermissionService()
         self.object_storage = object_storage
+        self._repository = repository or KnowledgeRepository()
+        self._access_guard = KnowledgeAccessGuard(self.permission_service)
 
     def list_knowledge_bases(
         self,
@@ -52,64 +62,15 @@ class KnowledgeService:
         status: str | None = None,
         request_id: str | None = None,
     ) -> AccessibleKnowledgeBaseList:
-        context = self._permission_context(
+        return self._browser_service().list_knowledge_bases(
             session,
             user_id=user_id,
             enterprise_id=enterprise_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            status=status,
             request_id=request_id,
-            required_scope="knowledge_base:read",
-        )
-        page = max(page, 1)
-        page_size = min(max(page_size, 1), 200)
-        conditions = [
-            "enterprise_id = CAST(:enterprise_id AS uuid)",
-            "deleted_at IS NULL",
-            "status = 'active'",
-        ]
-        params: dict[str, Any] = {
-            "enterprise_id": context.enterprise_id,
-            "limit": page_size,
-            "offset": (page - 1) * page_size,
-        }
-        if keyword:
-            conditions.append("name ILIKE :keyword")
-            params["keyword"] = f"%{keyword.strip()}%"
-        if status and status != "active":
-            conditions.append("FALSE")
-        resource_sql = _knowledge_base_visibility_sql(context, params)
-        if resource_sql:
-            conditions.append(resource_sql)
-        where_sql = " AND ".join(conditions)
-
-        try:
-            rows = session.execute(
-                text(
-                    f"""
-                    SELECT
-                        id::text AS kb_id,
-                        name,
-                        status
-                    FROM knowledge_bases kb
-                    WHERE {where_sql}
-                    ORDER BY updated_at DESC, name
-                    LIMIT :limit OFFSET :offset
-                    """
-                ),
-                params,
-            ).all()
-            total_row = session.execute(
-                text(f"SELECT count(*) AS total FROM knowledge_bases kb WHERE {where_sql}"),
-                params,
-            ).one()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "KNOWLEDGE_BASES_UNAVAILABLE",
-                "knowledge bases cannot be read",
-                exc,
-            ) from exc
-        return AccessibleKnowledgeBaseList(
-            items=[_knowledge_base_from_mapping(row._mapping) for row in rows],
-            total=int(total_row._mapping["total"]),
         )
 
     def list_documents(
@@ -125,82 +86,16 @@ class KnowledgeService:
         status: str | None = None,
         request_id: str | None = None,
     ) -> AccessibleDocumentList:
-        context = self._permission_context(
+        return self._browser_service().list_documents(
             session,
             user_id=user_id,
             enterprise_id=enterprise_id,
+            kb_id=kb_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            status=status,
             request_id=request_id,
-            required_scope="document:read",
-        )
-        self._ensure_queryable_knowledge_base(session, context, kb_id=kb_id)
-        active_index_ids = self._load_active_index_versions(
-            session,
-            enterprise_id=context.enterprise_id,
-            kb_ids=(kb_id,),
-        )
-        if not active_index_ids:
-            return AccessibleDocumentList(items=[], total=0)
-        permission_filter = self.permission_service.build_filter(
-            context,
-            kb_ids=(kb_id,),
-            active_index_version_ids=active_index_ids,
-            required_scope="document:read",
-        )
-        page = max(page, 1)
-        page_size = min(max(page_size, 1), 200)
-        params = dict(permission_filter.params)
-        params.update({"limit": page_size, "offset": (page - 1) * page_size})
-        filters: list[str] = []
-        if keyword:
-            filters.append("d.title ILIKE :keyword")
-            params["keyword"] = f"%{keyword.strip()}%"
-        if status and status != "active":
-            filters.append("FALSE")
-        filter_sql = "".join(f"\n                      AND {condition}" for condition in filters)
-
-        try:
-            rows = session.execute(
-                text(
-                    f"""
-                    SELECT DISTINCT
-                        d.id::text AS document_id,
-                        d.title,
-                        d.lifecycle_status,
-                        d.index_status,
-                        d.updated_at
-                    FROM documents d
-                    JOIN chunks c ON c.document_id = d.id
-                    JOIN chunk_index_refs cir ON cir.chunk_id = c.id
-                    WHERE {permission_filter.metadata_where_sql}
-                      {filter_sql}
-                    ORDER BY d.updated_at DESC, d.title, document_id
-                    LIMIT :limit OFFSET :offset
-                    """
-                ),
-                params,
-            ).all()
-            total_row = session.execute(
-                text(
-                    f"""
-                    SELECT count(DISTINCT d.id) AS total
-                    FROM documents d
-                    JOIN chunks c ON c.document_id = d.id
-                    JOIN chunk_index_refs cir ON cir.chunk_id = c.id
-                    WHERE {permission_filter.metadata_where_sql}
-                      {filter_sql}
-                    """
-                ),
-                params,
-            ).one()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "KNOWLEDGE_DOCUMENTS_UNAVAILABLE",
-                "documents cannot be read",
-                exc,
-            ) from exc
-        return AccessibleDocumentList(
-            items=[_document_list_item_from_mapping(row._mapping) for row in rows],
-            total=int(total_row._mapping["total"]),
         )
 
     def get_document(
@@ -212,77 +107,13 @@ class KnowledgeService:
         document_id: str,
         request_id: str | None = None,
     ) -> AccessibleDocument:
-        context = self._permission_context(
+        return self._document_reader().get_document(
             session,
             user_id=user_id,
             enterprise_id=enterprise_id,
-            request_id=request_id,
-            required_scope="document:read",
-        )
-        document_kb_id = self._load_document_kb_id(
-            session,
-            enterprise_id=context.enterprise_id,
             document_id=document_id,
+            request_id=request_id,
         )
-        self._ensure_queryable_knowledge_base(session, context, kb_id=document_kb_id)
-        active_index_ids = self._load_active_index_versions(
-            session,
-            enterprise_id=context.enterprise_id,
-            kb_ids=(document_kb_id,),
-        )
-        if not active_index_ids:
-            raise KnowledgeServiceError(
-                "KNOWLEDGE_DOCUMENT_NOT_FOUND",
-                "document is not accessible",
-                status_code=404,
-                details={"document_id": document_id},
-            )
-        permission_filter = self.permission_service.build_filter(
-            context,
-            kb_ids=(document_kb_id,),
-            active_index_version_ids=active_index_ids,
-            required_scope="document:read",
-        )
-        params = dict(permission_filter.params)
-        params["document_id"] = document_id
-        try:
-            row = session.execute(
-                text(
-                    f"""
-                    SELECT DISTINCT
-                        d.id::text AS document_id,
-                        d.kb_id::text AS kb_id,
-                        d.folder_id::text AS folder_id,
-                        d.title,
-                        d.lifecycle_status,
-                        d.index_status,
-                        d.owner_department_id::text AS owner_department_id,
-                        d.visibility,
-                        d.current_version_id::text AS current_version_id
-                    FROM documents d
-                    JOIN chunks c ON c.document_id = d.id
-                    JOIN chunk_index_refs cir ON cir.chunk_id = c.id
-                    WHERE {permission_filter.metadata_where_sql}
-                      AND d.id = CAST(:document_id AS uuid)
-                    LIMIT 1
-                    """
-                ),
-                params,
-            ).one_or_none()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "KNOWLEDGE_DOCUMENT_UNAVAILABLE",
-                "document cannot be read",
-                exc,
-            ) from exc
-        if row is None:
-            raise KnowledgeServiceError(
-                "KNOWLEDGE_DOCUMENT_NOT_FOUND",
-                "document is not accessible",
-                status_code=404,
-                details={"document_id": document_id},
-            )
-        return _document_from_mapping(row._mapping)
 
     def list_document_versions(
         self,
@@ -295,58 +126,14 @@ class KnowledgeService:
         page_size: int,
         request_id: str | None = None,
     ) -> AccessibleDocumentVersionList:
-        self.get_document(
+        return self._document_reader().list_document_versions(
             session,
             user_id=user_id,
             enterprise_id=enterprise_id,
             document_id=document_id,
+            page=page,
+            page_size=page_size,
             request_id=request_id,
-        )
-        page = max(page, 1)
-        page_size = min(max(page_size, 1), 100)
-        try:
-            rows = session.execute(
-                text(
-                    """
-                    SELECT
-                        id::text AS version_id,
-                        document_id::text AS document_id,
-                        version_no,
-                        status
-                    FROM document_versions
-                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND document_id = CAST(:document_id AS uuid)
-                    ORDER BY version_no DESC, created_at DESC
-                    LIMIT :limit OFFSET :offset
-                    """
-                ),
-                {
-                    "enterprise_id": enterprise_id,
-                    "document_id": document_id,
-                    "limit": page_size,
-                    "offset": (page - 1) * page_size,
-                },
-            ).all()
-            total_row = session.execute(
-                text(
-                    """
-                    SELECT count(*) AS total
-                    FROM document_versions
-                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND document_id = CAST(:document_id AS uuid)
-                    """
-                ),
-                {"enterprise_id": enterprise_id, "document_id": document_id},
-            ).one()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "KNOWLEDGE_DOCUMENT_VERSIONS_UNAVAILABLE",
-                "document versions cannot be read",
-                exc,
-            ) from exc
-        return AccessibleDocumentVersionList(
-            items=[_document_version_from_mapping(row._mapping) for row in rows],
-            total=int(total_row._mapping["total"]),
         )
 
     def list_document_chunks(
@@ -362,149 +149,16 @@ class KnowledgeService:
         status: str | None = None,
         request_id: str | None = None,
     ) -> AccessibleChunkList:
-        context = self._permission_context(
-            session,
-            user_id=user_id,
-            enterprise_id=enterprise_id,
-            request_id=request_id,
-            required_scope="document:read",
-        )
-        document_kb_id = self._load_document_kb_id(
-            session,
-            enterprise_id=context.enterprise_id,
-            document_id=document_id,
-        )
-        self._ensure_queryable_knowledge_base(session, context, kb_id=document_kb_id)
-        active_index_ids = self._load_active_index_versions(
-            session,
-            enterprise_id=context.enterprise_id,
-            kb_ids=(document_kb_id,),
-        )
-        if not active_index_ids:
-            return AccessibleChunkList(items=[], total=0)
-        permission_filter = self.permission_service.build_filter(
-            context,
-            kb_ids=(document_kb_id,),
-            active_index_version_ids=active_index_ids,
-            required_scope="document:read",
-        )
-        page = max(page, 1)
-        page_size = min(max(page_size, 1), 200)
-        params = dict(permission_filter.params)
-        params.update(
-            {
-                "document_id": document_id,
-                "limit": page_size,
-                "offset": (page - 1) * page_size,
-            }
-        )
-        filters: list[str] = ["d.id = CAST(:document_id AS uuid)"]
-        if keyword:
-            filters.append("c.text_preview ILIKE :keyword")
-            params["keyword"] = f"%{keyword.strip()}%"
-        if status and status != "active":
-            filters.append("FALSE")
-        filter_sql = "".join(f"\n                      AND {condition}" for condition in filters)
-        try:
-            rows = session.execute(
-                text(
-                    f"""
-                    SELECT DISTINCT
-                        c.id::text AS chunk_id,
-                        c.document_id::text AS document_id,
-                        c.document_version_id::text AS document_version_id,
-                        c.text_preview,
-                        c.page_start,
-                        c.page_end,
-                        c.status,
-                        c.ordinal
-                    FROM documents d
-                    JOIN chunks c ON c.document_id = d.id
-                    JOIN chunk_index_refs cir ON cir.chunk_id = c.id
-                    WHERE {permission_filter.metadata_where_sql}
-                      {filter_sql}
-                    ORDER BY c.ordinal, chunk_id
-                    LIMIT :limit OFFSET :offset
-                    """
-                ),
-                params,
-            ).all()
-            total_row = session.execute(
-                text(
-                    f"""
-                    SELECT count(DISTINCT c.id) AS total
-                    FROM documents d
-                    JOIN chunks c ON c.document_id = d.id
-                    JOIN chunk_index_refs cir ON cir.chunk_id = c.id
-                    WHERE {permission_filter.metadata_where_sql}
-                      {filter_sql}
-                    """
-                ),
-                params,
-            ).one()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "KNOWLEDGE_CHUNKS_UNAVAILABLE",
-                "document chunks cannot be read",
-                exc,
-            ) from exc
-        return AccessibleChunkList(
-            items=[_chunk_from_mapping(row._mapping) for row in rows],
-            total=int(total_row._mapping["total"]),
-        )
-
-    def get_document_preview(
-        self,
-        session: Session,
-        *,
-        user_id: str,
-        enterprise_id: str,
-        document_id: str,
-        request_id: str | None = None,
-    ) -> AccessibleDocumentPreview:
-        document = self.get_document(
+        return self._document_reader().list_document_chunks(
             session,
             user_id=user_id,
             enterprise_id=enterprise_id,
             document_id=document_id,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            status=status,
             request_id=request_id,
-        )
-        chunks = self.list_document_chunks(
-            session,
-            user_id=user_id,
-            enterprise_id=enterprise_id,
-            document_id=document_id,
-            page=1,
-            page_size=100,
-            request_id=request_id,
-        )
-        preview_parts: list[str] = []
-        remaining = 8000
-        citations: list[AccessiblePreviewCitation] = []
-        for chunk in chunks.items:
-            if remaining > 0:
-                text_preview = chunk.text_preview.strip()
-                if text_preview:
-                    preview_parts.append(text_preview[:remaining])
-                    remaining -= len(preview_parts[-1])
-            if len(citations) < 20:
-                page_start = chunk.page_start or 0
-                citations.append(
-                    AccessiblePreviewCitation(
-                        source_id=chunk.id,
-                        doc_id=document.id,
-                        document_version_id=chunk.document_version_id,
-                        title=document.title,
-                        page_start=page_start,
-                        page_end=chunk.page_end or page_start,
-                        score=1.0,
-                    )
-                )
-        return AccessibleDocumentPreview(
-            doc_id=document.id,
-            title=document.title,
-            preview="\n\n".join(preview_parts),
-            citations=tuple(citations),
         )
 
     def get_document_source(
@@ -517,103 +171,17 @@ class KnowledgeService:
         source_id: str,
         request_id: str | None = None,
     ) -> AccessibleCitationSource:
-        context = self._permission_context(
+        return self._source_reader().get_document_source(
             session,
             user_id=user_id,
             enterprise_id=enterprise_id,
-            request_id=request_id,
-            required_scope="document:read",
-        )
-        document_kb_id = self._load_document_kb_id(
-            session,
-            enterprise_id=context.enterprise_id,
             document_id=document_id,
+            source_id=source_id,
+            request_id=request_id,
         )
-        self._ensure_queryable_knowledge_base(session, context, kb_id=document_kb_id)
-        active_index_ids = self._load_active_index_versions(
-            session,
-            enterprise_id=context.enterprise_id,
-            kb_ids=(document_kb_id,),
-        )
-        if not active_index_ids:
-            raise KnowledgeServiceError(
-                "KNOWLEDGE_SOURCE_NOT_FOUND",
-                "source is not accessible",
-                status_code=404,
-                details={"document_id": document_id, "source_id": source_id},
-            )
-        permission_filter = self.permission_service.build_filter(
-            context,
-            kb_ids=(document_kb_id,),
-            active_index_version_ids=active_index_ids,
-            required_scope="document:read",
-        )
-        params = dict(permission_filter.params)
-        params.update({"document_id": document_id, "source_id": source_id})
-        try:
-            row = session.execute(
-                text(
-                    f"""
-                    SELECT DISTINCT
-                        c.id::text AS chunk_id,
-                        c.document_id::text AS document_id,
-                        c.document_version_id::text AS document_version_id,
-                        c.text_object_key,
-                        c.text_preview,
-                        c.heading_path,
-                        c.source_offsets,
-                        c.page_start,
-                        c.page_end,
-                        c.status,
-                        c.ordinal,
-                        d.title
-                    FROM documents d
-                    JOIN chunks c ON c.document_id = d.id
-                    JOIN chunk_index_refs cir ON cir.chunk_id = c.id
-                    WHERE {permission_filter.metadata_where_sql}
-                      AND d.id = CAST(:document_id AS uuid)
-                      AND c.id = CAST(:source_id AS uuid)
-                    LIMIT 1
-                    """
-                ),
-                params,
-            ).one_or_none()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "KNOWLEDGE_SOURCE_UNAVAILABLE",
-                "source cannot be read",
-                exc,
-            ) from exc
-        if row is None:
-            raise KnowledgeServiceError(
-                "KNOWLEDGE_SOURCE_NOT_FOUND",
-                "source is not accessible",
-                status_code=404,
-                details={"document_id": document_id, "source_id": source_id},
-            )
-        return self._source_from_mapping(row._mapping)
 
     def _source_from_mapping(self, row: Any) -> AccessibleCitationSource:
-        text_preview = str(row["text_preview"])
-        object_key = _optional_str(row.get("text_object_key"))
-        text, text_status = self._read_source_text(
-            object_key=object_key,
-            text_preview=text_preview,
-        )
-        return AccessibleCitationSource(
-            source_id=str(row["chunk_id"]),
-            doc_id=str(row["document_id"]),
-            document_version_id=str(row["document_version_id"]),
-            title=str(row["title"]),
-            text=text,
-            text_preview=text_preview,
-            page_start=_optional_int(row.get("page_start")),
-            page_end=_optional_int(row.get("page_end")),
-            ordinal=int(row["ordinal"]),
-            heading_path=_optional_str(row.get("heading_path")),
-            source_offsets=_json_mapping(row.get("source_offsets")),
-            text_status=text_status,
-        )
+        return self._source_reader().source_from_mapping(row)
 
     def _read_source_text(
         self,
@@ -621,13 +189,10 @@ class KnowledgeService:
         object_key: str | None,
         text_preview: str,
     ) -> tuple[str, str]:
-        if not object_key or self.object_storage is None:
-            return text_preview, "preview_only"
-        try:
-            content = self.object_storage.get_object(object_key=object_key)
-        except (KeyError, OSError):
-            return text_preview, "object_unavailable"
-        return content.decode("utf-8", errors="replace"), "object"
+        return self._source_reader().read_source_text(
+            object_key=object_key,
+            text_preview=text_preview,
+        )
 
     def _permission_context(
         self,
@@ -638,23 +203,13 @@ class KnowledgeService:
         request_id: str | None,
         required_scope: str,
     ) -> PermissionContext:
-        try:
-            context = self.permission_service.build_context(
-                session,
-                user_id=user_id,
-                enterprise_id=enterprise_id,
-                request_id=request_id,
-            )
-            self.permission_service.require_scope(context, required_scope)
-            return context
-        except PermissionServiceError as exc:
-            raise KnowledgeServiceError(
-                exc.error_code,
-                exc.message,
-                status_code=exc.status_code,
-                retryable=exc.retryable,
-                details=exc.details,
-            ) from exc
+        return self._access_guard.permission_context(
+            session,
+            user_id=user_id,
+            enterprise_id=enterprise_id,
+            request_id=request_id,
+            required_scope=required_scope,
+        )
 
     def _load_active_index_versions(
         self,
@@ -663,27 +218,11 @@ class KnowledgeService:
         enterprise_id: str,
         kb_ids: tuple[str, ...],
     ) -> tuple[str, ...]:
-        try:
-            rows = session.execute(
-                text(
-                    """
-                    SELECT id::text AS index_version_id
-                    FROM index_versions
-                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND kb_id = ANY(CAST(:kb_ids AS uuid[]))
-                      AND status = 'active'
-                    ORDER BY activated_at DESC NULLS LAST, id
-                    """
-                ),
-                {"enterprise_id": enterprise_id, "kb_ids": list(kb_ids)},
-            ).all()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "KNOWLEDGE_INDEX_UNAVAILABLE",
-                "active index versions cannot be read",
-                exc,
-            ) from exc
-        return tuple(str(row._mapping["index_version_id"]) for row in rows)
+        return self._repository.load_active_index_versions(
+            session,
+            enterprise_id=enterprise_id,
+            kb_ids=kb_ids,
+        )
 
     def _ensure_queryable_knowledge_base(
         self,
@@ -692,21 +231,7 @@ class KnowledgeService:
         *,
         kb_id: str,
     ) -> None:
-        try:
-            self.permission_service.require_queryable_knowledge_bases(
-                session,
-                context,
-                kb_ids=(kb_id,),
-                required_scope="document:read",
-            )
-        except PermissionServiceError as exc:
-            raise KnowledgeServiceError(
-                exc.error_code,
-                "knowledge base is not accessible",
-                status_code=404 if exc.status_code == 404 else exc.status_code,
-                retryable=exc.retryable,
-                details=exc.details,
-            ) from exc
+        self._access_guard.ensure_queryable_knowledge_base(session, context, kb_id=kb_id)
 
     def _load_document_kb_id(
         self,
@@ -715,134 +240,42 @@ class KnowledgeService:
         enterprise_id: str,
         document_id: str,
     ) -> str:
-        try:
-            row = session.execute(
-                text(
-                    """
-                    SELECT kb_id::text AS kb_id
-                    FROM documents
-                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                      AND id = CAST(:document_id AS uuid)
-                      AND deleted_at IS NULL
-                    LIMIT 1
-                    """
-                ),
-                {"enterprise_id": enterprise_id, "document_id": document_id},
-            ).one_or_none()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "KNOWLEDGE_DOCUMENT_UNAVAILABLE",
-                "document cannot be read",
-                exc,
-            ) from exc
-        if row is None:
-            raise KnowledgeServiceError(
-                "KNOWLEDGE_DOCUMENT_NOT_FOUND",
-                "document is not found",
-                status_code=404,
-                details={"document_id": document_id},
-            )
-        return str(row._mapping["kb_id"])
+        return self._repository.load_document_kb_id(
+            session,
+            enterprise_id=enterprise_id,
+            document_id=document_id,
+        )
+
+    def _browser_service(self) -> KnowledgeBrowserService:
+        return KnowledgeBrowserService(
+            access_guard=self._access_guard,
+            repository=self._repository,
+        )
+
+    def _document_reader(self) -> KnowledgeDocumentReader:
+        return KnowledgeDocumentReader(
+            access_guard=self._access_guard,
+            repository=self._repository,
+        )
+
+    def _source_reader(self) -> KnowledgeSourceReader:
+        return KnowledgeSourceReader(
+            access_guard=self._access_guard,
+            repository=self._repository,
+            object_storage=self.object_storage,
+        )
 
 
-def _knowledge_base_visibility_sql(
-    context: PermissionContext,
-    params: dict[str, Any],
-) -> str:
-    return knowledge_base_access_where_sql(
-        context,
-        params,
-        permission="discover",
-        alias="kb",
-    )
-
-
-def _knowledge_base_from_mapping(row: Any) -> AccessibleKnowledgeBase:
-    return AccessibleKnowledgeBase(
-        id=str(row["kb_id"]),
-        name=str(row["name"]),
-        status=str(row["status"]),
-    )
-
-
-def _document_from_mapping(row: Any) -> AccessibleDocument:
-    return AccessibleDocument(
-        id=str(row["document_id"]),
-        kb_id=str(row["kb_id"]),
-        folder_id=_optional_str(row.get("folder_id")),
-        title=str(row["title"]),
-        lifecycle_status=str(row["lifecycle_status"]),
-        index_status=str(row["index_status"]),
-        owner_department_id=str(row["owner_department_id"]),
-        visibility=str(row["visibility"]),
-        current_version_id=_optional_str(row.get("current_version_id")),
-    )
-
-
-def _document_list_item_from_mapping(row: Any) -> AccessibleDocumentListItem:
-    return AccessibleDocumentListItem(
-        id=str(row["document_id"]),
-        title=str(row["title"]),
-        lifecycle_status=str(row["lifecycle_status"]),
-        index_status=str(row["index_status"]),
-        updated_at=row.get("updated_at") if isinstance(row.get("updated_at"), datetime) else None,
-    )
-
-
-def _document_version_from_mapping(row: Any) -> AccessibleDocumentVersion:
-    return AccessibleDocumentVersion(
-        id=str(row["version_id"]),
-        document_id=str(row["document_id"]),
-        version_no=int(row["version_no"]),
-        status=str(row["status"]),
-    )
-
-
-def _chunk_from_mapping(row: Any) -> AccessibleChunk:
-    return AccessibleChunk(
-        id=str(row["chunk_id"]),
-        document_id=str(row["document_id"]),
-        document_version_id=str(row["document_version_id"]),
-        text_preview=str(row["text_preview"]),
-        page_start=_optional_int(row.get("page_start")),
-        page_end=_optional_int(row.get("page_end")),
-        status=str(row["status"]),
-        ordinal=int(row["ordinal"]),
-    )
-
-
-def _optional_str(value: Any) -> str | None:
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped or None
-    return None
-
-
-def _optional_int(value: Any) -> int | None:
-    return value if isinstance(value, int) else None
-
-
-def _json_mapping(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str) and value:
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-        return parsed if isinstance(parsed, dict) else None
-    return None
-
-
-def _database_error(
-    error_code: str,
-    message: str,
-    exc: SQLAlchemyError,
-) -> KnowledgeServiceError:
-    return KnowledgeServiceError(
-        error_code,
-        message,
-        status_code=503,
-        retryable=True,
-        details={"error_type": exc.__class__.__name__},
-    )
+__all__ = [
+    "KnowledgeService",
+    "_chunk_from_mapping",
+    "_database_error",
+    "_document_from_mapping",
+    "_document_list_item_from_mapping",
+    "_document_version_from_mapping",
+    "_json_mapping",
+    "_knowledge_base_from_mapping",
+    "_knowledge_base_visibility_sql",
+    "_optional_int",
+    "_optional_str",
+]

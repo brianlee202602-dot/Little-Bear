@@ -8,12 +8,10 @@ from app.modules.knowledge.schemas import (
     AccessibleDocument,
     AccessibleDocumentList,
     AccessibleDocumentListItem,
-    AccessibleDocumentPreview,
     AccessibleDocumentVersion,
     AccessibleDocumentVersionList,
     AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
-    AccessiblePreviewCitation,
 )
 from app.modules.knowledge.service import KnowledgeService
 
@@ -24,12 +22,10 @@ __all__ = [
     "AccessibleDocument",
     "AccessibleDocumentList",
     "AccessibleDocumentListItem",
-    "AccessibleDocumentPreview",
     "AccessibleDocumentVersion",
     "AccessibleDocumentVersionList",
     "AccessibleKnowledgeBase",
     "AccessibleKnowledgeBaseList",
-    "AccessiblePreviewCitation",
     "KnowledgeService",
     "KnowledgeServiceError",
 ]

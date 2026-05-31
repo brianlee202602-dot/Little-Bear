@@ -6,34 +6,63 @@ Secret Store，也不拼接业务对象明细。
 
 from __future__ import annotations
 
+from functools import partial
+
 from fastapi import APIRouter, Header, Query
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import JSONResponse
 
+from app.api.dependencies.auth import (
+    authenticate_required_scope as _authenticate,
+)
+from app.api.dependencies.auth import (
+    current_request_id as _request_id,
+)
+from app.api.dependencies.auth import (
+    extract_bearer_token as _extract_bearer_token,
+)
+from app.api.errors import database_error_response, service_error_response
+from app.api.presenters.audit import (
+    audit_log_data as _audit_log_data,
+)
+from app.api.presenters.audit import (
+    audit_log_list_item_data as _audit_log_list_item_data,
+)
+from app.api.presenters.audit import (
+    model_call_log_data as _model_call_log_data,
+)
+from app.api.presenters.audit import (
+    model_call_log_list_item_data as _model_call_log_list_item_data,
+)
+from app.api.presenters.audit import (
+    query_log_data as _query_log_data,
+)
+from app.api.presenters.audit import (
+    query_log_list_item_data as _query_log_list_item_data,
+)
 from app.api.schemas.audit import (
-    AuditLogData,
-    AuditLogListItemData,
     AuditLogListResponse,
     AuditLogResponse,
-    ModelCallLogData,
-    ModelCallLogListItemData,
     ModelCallLogListResponse,
     ModelCallLogResponse,
-    QueryLogData,
-    QueryLogListItemData,
     QueryLogListResponse,
     QueryLogResponse,
 )
-from app.api.schemas.config import PaginationData
+from app.api.schemas.common import PaginationData
 from app.db.session import session_scope
 from app.modules.audit.errors import AuditServiceError
-from app.modules.audit.schemas import AuditLog, ModelCallLog, QueryLog
 from app.modules.audit.service import AuditService
 from app.modules.auth.errors import AuthServiceError
-from app.modules.auth.service import AuthService
-from app.shared.context import get_request_context
 
 router = APIRouter(prefix="/internal/v1/admin", tags=["admin-audit"])
+
+_auth_error_response = service_error_response
+_audit_error_response = service_error_response
+_database_error_response = partial(
+    database_error_response,
+    error_code="AUDIT_DATABASE_ERROR",
+    message="audit database operation failed",
+)
 
 
 @router.get("/audit-logs", response_model=AuditLogListResponse)
@@ -51,11 +80,7 @@ async def list_audit_logs(
     service = AuditService()
     try:
         with session_scope() as session:
-            AuthService().authenticate_access_token(
-                session,
-                access_token=token or "",
-                required_scope="audit:read",
-            )
+            _authenticate(session, token, required_scope="audit:read")
             log_list = service.list_audit_logs(
                 session,
                 page=page,
@@ -91,11 +116,7 @@ async def get_audit_log(
     service = AuditService()
     try:
         with session_scope() as session:
-            AuthService().authenticate_access_token(
-                session,
-                access_token=token or "",
-                required_scope="audit:read",
-            )
+            _authenticate(session, token, required_scope="audit:read")
             log = service.get_audit_log(session, audit_id)
     except AuthServiceError as exc:
         return _auth_error_response(exc, stage="audit_log_get")
@@ -125,11 +146,7 @@ async def list_query_logs(
     service = AuditService()
     try:
         with session_scope() as session:
-            auth_context = AuthService().authenticate_access_token(
-                session,
-                access_token=token or "",
-                required_scope="audit:read",
-            )
+            auth_context = _authenticate(session, token, required_scope="audit:read")
             log_list = service.list_query_logs(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
@@ -169,11 +186,7 @@ async def get_query_log(
     service = AuditService()
     try:
         with session_scope() as session:
-            auth_context = AuthService().authenticate_access_token(
-                session,
-                access_token=token or "",
-                required_scope="audit:read",
-            )
+            auth_context = _authenticate(session, token, required_scope="audit:read")
             log = service.get_query_log(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
@@ -207,11 +220,7 @@ async def list_model_call_logs(
     service = AuditService()
     try:
         with session_scope() as session:
-            auth_context = AuthService().authenticate_access_token(
-                session,
-                access_token=token or "",
-                required_scope="audit:read",
-            )
+            auth_context = _authenticate(session, token, required_scope="audit:read")
             log_list = service.list_model_call_logs(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
@@ -251,11 +260,7 @@ async def get_model_call_log(
     service = AuditService()
     try:
         with session_scope() as session:
-            auth_context = AuthService().authenticate_access_token(
-                session,
-                access_token=token or "",
-                required_scope="audit:read",
-            )
+            auth_context = _authenticate(session, token, required_scope="audit:read")
             log = service.get_model_call_log(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
@@ -270,183 +275,3 @@ async def get_model_call_log(
 
     return ModelCallLogResponse(request_id=_request_id(), data=_model_call_log_data(log))
 
-
-def _audit_log_data(log: AuditLog) -> AuditLogData:
-    return AuditLogData(
-        id=log.id,
-        request_id=log.request_id,
-        trace_id=log.trace_id,
-        event_name=log.event_name,
-        actor_type=log.actor_type,
-        actor_id=log.actor_id,
-        action=log.action,
-        resource_type=log.resource_type,
-        resource_id=log.resource_id,
-        result=log.result,
-        risk_level=log.risk_level,
-        config_version=log.config_version,
-        permission_version=log.permission_version,
-        index_version_hash=log.index_version_hash,
-        summary_json=log.summary_json,
-        error_code=log.error_code,
-        created_at=log.created_at,
-    )
-
-
-def _audit_log_list_item_data(log: AuditLog) -> AuditLogListItemData:
-    return AuditLogListItemData(
-        id=log.id,
-        event_name=log.event_name,
-        actor_type=log.actor_type,
-        action=log.action,
-        resource_type=log.resource_type,
-        result=log.result,
-        risk_level=log.risk_level,
-        config_version=log.config_version,
-        permission_version=log.permission_version,
-        error_code=log.error_code,
-        created_at=log.created_at,
-    )
-
-
-def _query_log_data(log: QueryLog) -> QueryLogData:
-    return QueryLogData(
-        id=log.id,
-        request_id=log.request_id,
-        trace_id=log.trace_id,
-        user_id=log.user_id,
-        user_display_name=log.user_display_name,
-        kb_ids=list(log.kb_ids),
-        knowledge_base_names=list(log.knowledge_base_names),
-        query_hash=log.query_hash,
-        status=log.status,
-        degraded=log.degraded,
-        degrade_reason=log.degrade_reason,
-        config_version=log.config_version,
-        permission_version=log.permission_version,
-        permission_filter_hash=log.permission_filter_hash,
-        index_version_hash=log.index_version_hash,
-        model_route_hash=log.model_route_hash,
-        latency_ms=log.latency_ms,
-        candidate_count=log.candidate_count,
-        citation_count=log.citation_count,
-        error_code=log.error_code,
-        created_at=log.created_at,
-    )
-
-
-def _query_log_list_item_data(log: QueryLog) -> QueryLogListItemData:
-    return QueryLogListItemData(
-        id=log.id,
-        user_display_name=log.user_display_name,
-        knowledge_base_names=list(log.knowledge_base_names),
-        status=log.status,
-        degraded=log.degraded,
-        degrade_reason=log.degrade_reason,
-        latency_ms=log.latency_ms,
-        candidate_count=log.candidate_count,
-        citation_count=log.citation_count,
-        error_code=log.error_code,
-        created_at=log.created_at,
-    )
-
-
-def _model_call_log_data(log: ModelCallLog) -> ModelCallLogData:
-    return ModelCallLogData(
-        id=log.id,
-        request_id=log.request_id,
-        trace_id=log.trace_id,
-        caller=log.caller,
-        model_type=log.model_type,
-        model_name=log.model_name,
-        model_version=log.model_version,
-        model_route_hash=log.model_route_hash,
-        status=log.status,
-        latency_ms=log.latency_ms,
-        token_usage_json=log.token_usage_json,
-        degraded=log.degraded,
-        config_version=log.config_version,
-        prompt_hash=log.prompt_hash,
-        input_hash=log.input_hash,
-        output_hash=log.output_hash,
-        error_code=log.error_code,
-        created_at=log.created_at,
-    )
-
-
-def _model_call_log_list_item_data(log: ModelCallLog) -> ModelCallLogListItemData:
-    return ModelCallLogListItemData(
-        id=log.id,
-        caller=log.caller,
-        model_type=log.model_type,
-        model_name=log.model_name,
-        model_version=log.model_version,
-        status=log.status,
-        latency_ms=log.latency_ms,
-        degraded=log.degraded,
-        error_code=log.error_code,
-        created_at=log.created_at,
-    )
-
-
-def _extract_bearer_token(authorization: str | None) -> str | None:
-    if not authorization:
-        return None
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        return None
-    return token.strip()
-
-
-def _request_id() -> str:
-    request_context = get_request_context()
-    return request_context.request_id if request_context else "req_unknown"
-
-
-def _auth_error_response(exc: AuthServiceError, *, stage: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "request_id": _request_id(),
-            "error_code": exc.error_code,
-            "message": exc.message,
-            "stage": stage,
-            "retryable": exc.retryable,
-            "details": exc.details,
-        },
-    )
-
-
-def _audit_error_response(exc: AuditServiceError, *, stage: str) -> JSONResponse:
-    not_found = {"AUDIT_LOG_NOT_FOUND", "QUERY_LOG_NOT_FOUND", "MODEL_CALL_LOG_NOT_FOUND"}
-    return JSONResponse(
-        status_code=404 if exc.error_code in not_found else 503,
-        content={
-            "request_id": _request_id(),
-            "error_code": exc.error_code,
-            "message": exc.message,
-            "stage": stage,
-            "retryable": exc.retryable,
-            "details": exc.details,
-        },
-    )
-
-
-def _database_error_response(exc: SQLAlchemyError, *, stage: str) -> JSONResponse:
-    original = getattr(exc, "orig", None) or exc.__cause__
-    return JSONResponse(
-        status_code=500,
-        content={
-            "request_id": _request_id(),
-            "error_code": "AUDIT_DATABASE_ERROR",
-            "message": "audit database operation failed",
-            "stage": stage,
-            "retryable": True,
-            "details": {
-                "database_error": {
-                    "type": exc.__class__.__name__,
-                    "driver": original.__class__.__name__ if original is not None else None,
-                }
-            },
-        },
-    )

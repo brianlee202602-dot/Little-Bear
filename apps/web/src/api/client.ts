@@ -64,18 +64,6 @@ export interface KnowledgeBaseListResponse {
   pagination: PaginationData;
 }
 
-export interface DocumentData {
-  id: string;
-  kb_id: string;
-  folder_id: string | null;
-  title: string;
-  lifecycle_status: string;
-  index_status: string;
-  owner_department_id: string;
-  visibility: "department" | "enterprise";
-  current_version_id: string | null;
-}
-
 export interface DocumentListResponse {
   request_id: string;
   data: DocumentListItemData[];
@@ -90,11 +78,6 @@ export interface DocumentListItemData {
   updated_at: string | null;
   can_view: boolean;
   can_cite: boolean;
-}
-
-export interface DocumentResponse {
-  request_id: string;
-  data: DocumentData;
 }
 
 export interface DocumentVersionData {
@@ -125,18 +108,6 @@ export interface ChunkListResponse {
   request_id: string;
   data: ChunkData[];
   pagination: PaginationData;
-}
-
-export interface DocumentPreviewData {
-  doc_id: string;
-  title: string;
-  preview: string;
-  citations: CitationData[];
-}
-
-export interface DocumentPreviewResponse {
-  request_id: string;
-  data: DocumentPreviewData;
 }
 
 export interface CitationSourceData {
@@ -350,19 +321,6 @@ export async function listDocuments(
   );
 }
 
-export async function getDocument(
-  documentId: string,
-  accessToken: string,
-): Promise<DocumentResponse> {
-  return requestJson<DocumentResponse>(
-    `/internal/v1/documents/${encodeURIComponent(documentId)}`,
-    {
-      method: "GET",
-    },
-    accessToken,
-  );
-}
-
 export async function listDocumentVersions(
   documentId: string,
   accessToken: string,
@@ -398,19 +356,6 @@ export async function listDocumentChunks(
   }
   return requestJson<ChunkListResponse>(
     `/internal/v1/documents/${encodeURIComponent(documentId)}/chunks?${params.toString()}`,
-    {
-      method: "GET",
-    },
-    accessToken,
-  );
-}
-
-export async function getDocumentPreview(
-  documentId: string,
-  accessToken: string,
-): Promise<DocumentPreviewResponse> {
-  return requestJson<DocumentPreviewResponse>(
-    `/internal/v1/documents/${encodeURIComponent(documentId)}/preview`,
     {
       method: "GET",
     },

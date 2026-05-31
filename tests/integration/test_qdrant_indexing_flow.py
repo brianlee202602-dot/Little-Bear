@@ -10,10 +10,13 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import pytest
-from app.adapters import QdrantVectorIndexWriter, QdrantVectorRetriever
-from app.modules.indexing.schemas import DraftVectorPoint
+from app.adapters import (
+    QdrantVectorIndexWriter,
+    QdrantVectorRetriever,
+    VectorStoreDraftPoint,
+    VectorStoreSearchFilter,
+)
 from app.modules.models import ModelGatewayEmbeddingClient
-from app.modules.permissions.schemas import PermissionFilter
 
 pytestmark = pytest.mark.skipif(
     os.getenv("LITTLE_BEAR_RUN_QDRANT_INTEGRATION") != "1",
@@ -173,8 +176,8 @@ def _draft_point(
     chunk_id: str,
     text: str,
     page_start: int,
-) -> DraftVectorPoint:
-    return DraftVectorPoint(
+) -> VectorStoreDraftPoint:
+    return VectorStoreDraftPoint(
         collection_name=collection_name,
         vector_id=vector_id,
         text=text,
@@ -203,19 +206,8 @@ def _draft_point(
     )
 
 
-def _permission_filter() -> PermissionFilter:
-    return PermissionFilter(
-        enterprise_id=ENTERPRISE_ID,
-        department_ids=(DEPARTMENT_ID,),
-        kb_ids=(KB_ID,),
-        active_index_version_ids=(INDEX_VERSION_ID,),
-        permission_version=42,
-        permission_filter_hash="integration_perm_hash",
-        qdrant_filter=_active_filter(),
-        keyword_where_sql="",
-        metadata_where_sql="",
-        params={},
-    )
+def _permission_filter() -> VectorStoreSearchFilter:
+    return VectorStoreSearchFilter(payload_filter=_active_filter())
 
 
 def _active_filter() -> dict[str, Any]:

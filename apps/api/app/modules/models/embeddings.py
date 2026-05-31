@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import math
 from typing import Any, Protocol
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from app.modules.models.errors import ModelClientError
+from app.modules.models.http import join_url, post_json
 
 
 class EmbeddingClient(Protocol):
@@ -63,11 +62,16 @@ class ModelGatewayEmbeddingClient:
             model=self.model,
             texts=texts,
         )
-        response = _post_json(
-            _join_url(self.base_url, self.path),
+        response = post_json(
+            join_url(self.base_url, self.path),
             payload,
             timeout_seconds=self.timeout_seconds,
             auth_token=self.auth_token,
+            provider_label="embedding provider",
+            http_error_code="EMBEDDING_PROVIDER_HTTP_ERROR",
+            unavailable_error_code="EMBEDDING_PROVIDER_UNAVAILABLE",
+            response_invalid_error_code="EMBEDDING_PROVIDER_RESPONSE_INVALID",
+            opener=urlopen,
         )
         vectors = _extract_embeddings(response)
         if len(vectors) != len(texts):
@@ -97,46 +101,6 @@ def _embedding_payload(
     if provider_type == "tei" and normalized_path not in {"/v1/embeddings", "/embeddings"}:
         return {"inputs": texts}
     return {"model": model, "input": texts}
-
-
-def _post_json(
-    url: str,
-    payload: dict[str, Any],
-    *,
-    timeout_seconds: float,
-    auth_token: str | None,
-) -> Any:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {"content-type": "application/json", "accept": "application/json"}
-    if auth_token:
-        headers["authorization"] = f"Bearer {auth_token}"
-    request = Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            status = getattr(response, "status", 200)
-            response_body = response.read()
-    except HTTPError as exc:
-        raise ModelClientError(
-            "EMBEDDING_PROVIDER_HTTP_ERROR",
-            f"embedding provider returned HTTP {exc.code}",
-        ) from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise ModelClientError(
-            "EMBEDDING_PROVIDER_UNAVAILABLE",
-            f"embedding provider request failed: {exc.__class__.__name__}",
-        ) from exc
-    if status < 200 or status >= 300:
-        raise ModelClientError(
-            "EMBEDDING_PROVIDER_HTTP_ERROR",
-            f"embedding provider returned HTTP {status}",
-        )
-    try:
-        return json.loads(response_body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ModelClientError(
-            "EMBEDDING_PROVIDER_RESPONSE_INVALID",
-            "embedding provider response is not valid JSON",
-        ) from exc
 
 
 def _extract_embeddings(response: Any) -> list[list[float]]:
@@ -180,6 +144,3 @@ def _l2_normalize(vector: list[float]) -> list[float]:
 def _is_number(value: object) -> bool:
     return isinstance(value, int | float)
 
-
-def _join_url(base_url: str, path: str) -> str:
-    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"

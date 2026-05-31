@@ -399,14 +399,19 @@ def test_config_service_uses_cache_until_invalidated(monkeypatch) -> None:
 
 
 def test_config_service_lists_editable_active_config_sections() -> None:
-    items = ConfigService(cache=ConfigCache()).list_config_items(_FakeSession())
+    result = ConfigService(cache=ConfigCache()).list_config_items(
+        _FakeSession(),
+        page=1,
+        page_size=50,
+    )
 
-    keys = {item.key for item in items}
+    keys = {item.key for item in result.items}
 
     assert "auth" in keys
     assert "model_gateway" in keys
     assert "config_version" not in keys
     assert "schema_version" not in keys
+    assert result.total == len(result.items)
 
 
 def test_config_service_saves_draft_from_active_config() -> None:

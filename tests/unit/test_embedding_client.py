@@ -47,6 +47,7 @@ def test_embedding_client_parses_openai_compatible_response(monkeypatch) -> None
 
     assert captured["url"] == "https://model.example/v1/embeddings"
     assert captured["timeout"] == 1.5
+    assert captured["headers"]["Authorization"] == "Bearer token"
     assert captured["body"] == {"model": "bge-m3", "input": ["员工手册"]}
     assert math.isclose(vector[0], 0.6)
     assert math.isclose(vector[1], 0.8)

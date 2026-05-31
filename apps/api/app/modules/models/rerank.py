@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from app.modules.models.errors import ModelClientError
+from app.modules.models.http import join_url, post_json
 from app.shared.json_utils import stable_json_hash
 
 
@@ -78,8 +77,8 @@ class ModelGatewayRerankClient:
             )
         input_hash = stable_json_hash({"query": query_text, "texts": list(texts)})
         started_at = time.monotonic()
-        response = _post_json(
-            _join_url(self.base_url, self.path),
+        response = post_json(
+            join_url(self.base_url, self.path),
             _rerank_payload(
                 provider_type=self.provider_type,
                 model=self.model,
@@ -89,6 +88,11 @@ class ModelGatewayRerankClient:
             ),
             timeout_seconds=self.timeout_seconds,
             auth_token=self.auth_token,
+            provider_label="rerank provider",
+            http_error_code="RERANK_PROVIDER_HTTP_ERROR",
+            unavailable_error_code="RERANK_PROVIDER_UNAVAILABLE",
+            response_invalid_error_code="RERANK_PROVIDER_RESPONSE_INVALID",
+            opener=urlopen,
         )
         items = _extract_items(response)
         if not items:
@@ -139,46 +143,6 @@ def _rerank_payload(
     }
 
 
-def _post_json(
-    url: str,
-    payload: dict[str, Any],
-    *,
-    timeout_seconds: float,
-    auth_token: str | None,
-) -> Any:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {"content-type": "application/json", "accept": "application/json"}
-    if auth_token:
-        headers["authorization"] = f"Bearer {auth_token}"
-    request = Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            status = getattr(response, "status", 200)
-            response_body = response.read()
-    except HTTPError as exc:
-        raise ModelClientError(
-            "RERANK_PROVIDER_HTTP_ERROR",
-            f"rerank provider returned HTTP {exc.code}",
-        ) from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise ModelClientError(
-            "RERANK_PROVIDER_UNAVAILABLE",
-            f"rerank provider request failed: {exc.__class__.__name__}",
-        ) from exc
-    if status < 200 or status >= 300:
-        raise ModelClientError(
-            "RERANK_PROVIDER_HTTP_ERROR",
-            f"rerank provider returned HTTP {status}",
-        )
-    try:
-        return json.loads(response_body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ModelClientError(
-            "RERANK_PROVIDER_RESPONSE_INVALID",
-            "rerank provider response is not valid JSON",
-        ) from exc
-
-
 def _extract_items(response: Any) -> tuple[RerankScoredItem, ...]:
     values: Any = response
     if isinstance(response, dict):
@@ -208,10 +172,6 @@ def _item_from_value(value: Any, *, default_index: int) -> RerankScoredItem | No
     if not isinstance(index, int) or not isinstance(score, int | float):
         return None
     return RerankScoredItem(index=index, score=float(score))
-
-
-def _join_url(base_url: str, path: str) -> str:
-    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
 def _elapsed_ms(started_at: float) -> int:

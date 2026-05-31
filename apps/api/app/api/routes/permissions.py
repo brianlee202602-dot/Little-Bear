@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from fastapi import APIRouter, Header
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import JSONResponse
 
+from app.api.dependencies.auth import (
+    authenticate_required_scope as _authenticate,
+)
+from app.api.dependencies.auth import (
+    current_request_id as _request_id,
+)
+from app.api.dependencies.auth import (
+    extract_bearer_token as _extract_bearer_token,
+)
+from app.api.errors import database_error_response, service_error_response
 from app.api.schemas.permissions import (
     KnowledgeBaseAccessRuleData,
     KnowledgeBasePermissionPolicyData,
@@ -16,20 +28,27 @@ from app.api.schemas.permissions import (
     ResourcePermissionPutRequest,
 )
 from app.db.session import session_scope
-from app.modules.admin.errors import AdminServiceError
-from app.modules.admin.schemas import (
-    AdminKnowledgeBaseAccessRule,
-    AdminKnowledgeBaseAccessRuleInput,
-    AdminKnowledgeBasePermissionPolicy,
-    AdminPermissionPolicy,
-)
-from app.modules.admin.service import AdminActorContext, AdminService
 from app.modules.auth.errors import AuthServiceError
 from app.modules.auth.schemas import AuthContext
-from app.modules.auth.service import AuthService
-from app.shared.context import get_request_context
+from app.modules.permissions.admin_schemas import (
+    PermissionAdminActorContext,
+    PermissionKnowledgeBaseAccessRule,
+    PermissionKnowledgeBaseAccessRuleInput,
+    PermissionKnowledgeBasePolicy,
+    PermissionPolicy,
+)
+from app.modules.permissions.admin_service import PermissionAdminService
+from app.modules.permissions.errors import PermissionServiceError
 
 router = APIRouter(prefix="/internal/v1", tags=["permissions"])
+
+_auth_error_response = service_error_response
+_admin_error_response = service_error_response
+_database_error_response = partial(
+    database_error_response,
+    error_code="PERMISSION_DATABASE_ERROR",
+    message="permission database operation failed",
+)
 
 
 @router.put(
@@ -43,7 +62,7 @@ async def put_knowledge_base_permissions(
     x_permission_confirm: str | None = Header(default=None),
 ) -> KnowledgeBasePermissionPolicyResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
-    service = AdminService()
+    service = PermissionAdminService()
     try:
         with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="permission:manage")
@@ -58,7 +77,7 @@ async def put_knowledge_base_permissions(
                     payload.default_document_owner_department_id
                 ),
                 access_rules=[
-                    AdminKnowledgeBaseAccessRuleInput(
+                    PermissionKnowledgeBaseAccessRuleInput(
                         subject_type=rule.subject_type,
                         subject_id=rule.subject_id,
                         permission=rule.permission,
@@ -70,7 +89,7 @@ async def put_knowledge_base_permissions(
             )
     except AuthServiceError as exc:
         return _auth_error_response(exc, stage="knowledge_base_permission_put")
-    except AdminServiceError as exc:
+    except PermissionServiceError as exc:
         return _admin_error_response(exc, stage="knowledge_base_permission_put")
     except SQLAlchemyError as exc:
         return _database_error_response(exc, stage="knowledge_base_permission_put")
@@ -88,7 +107,7 @@ async def put_document_permissions(
     x_permission_confirm: str | None = Header(default=None),
 ) -> PermissionPolicyResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
-    service = AdminService()
+    service = PermissionAdminService()
     try:
         with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="permission:manage")
@@ -104,22 +123,14 @@ async def put_document_permissions(
             )
     except AuthServiceError as exc:
         return _auth_error_response(exc, stage="document_permission_put")
-    except AdminServiceError as exc:
+    except PermissionServiceError as exc:
         return _admin_error_response(exc, stage="document_permission_put")
     except SQLAlchemyError as exc:
         return _database_error_response(exc, stage="document_permission_put")
     return PermissionPolicyResponse(request_id=_request_id(), data=_permission_policy_data(policy))
 
 
-def _authenticate(session: object, token: str | None, *, required_scope: str) -> AuthContext:
-    return AuthService().authenticate_access_token(
-        session,
-        access_token=token or "",
-        required_scope=required_scope,
-    )
-
-
-def _actor_context(auth_context: AuthContext) -> AdminActorContext:
+def _actor_context(auth_context: AuthContext) -> PermissionAdminActorContext:
     knowledge_base_ids = tuple(
         role.scope_id
         for role in auth_context.user.roles
@@ -134,7 +145,7 @@ def _actor_context(auth_context: AuthContext) -> AdminActorContext:
         )
         for role in auth_context.user.roles
     )
-    return AdminActorContext(
+    return PermissionAdminActorContext(
         user_id=auth_context.user.id,
         scopes=auth_context.user.scopes,
         department_ids=tuple(department.id for department in auth_context.user.departments),
@@ -144,7 +155,7 @@ def _actor_context(auth_context: AuthContext) -> AdminActorContext:
     )
 
 
-def _permission_policy_data(policy: AdminPermissionPolicy) -> PermissionPolicyData:
+def _permission_policy_data(policy: PermissionPolicy) -> PermissionPolicyData:
     return PermissionPolicyData(
         resource_type=policy.resource_type,
         resource_id=policy.resource_id,
@@ -154,7 +165,7 @@ def _permission_policy_data(policy: AdminPermissionPolicy) -> PermissionPolicyDa
 
 
 def _knowledge_base_permission_policy_data(
-    policy: AdminKnowledgeBasePermissionPolicy,
+    policy: PermissionKnowledgeBasePolicy,
 ) -> KnowledgeBasePermissionPolicyData:
     return KnowledgeBasePermissionPolicyData(
         resource_type=policy.resource_type,
@@ -168,72 +179,10 @@ def _knowledge_base_permission_policy_data(
 
 
 def _knowledge_base_access_rule_data(
-    rule: AdminKnowledgeBaseAccessRule,
+    rule: PermissionKnowledgeBaseAccessRule,
 ) -> KnowledgeBaseAccessRuleData:
     return KnowledgeBaseAccessRuleData(
         subject_type=rule.subject_type,
         subject_id=rule.subject_id,
         permission=rule.permission,
-    )
-
-
-def _extract_bearer_token(authorization: str | None) -> str | None:
-    if not authorization:
-        return None
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        return None
-    return token.strip()
-
-
-def _request_id() -> str:
-    request_context = get_request_context()
-    return request_context.request_id if request_context else "req_unknown"
-
-
-def _auth_error_response(exc: AuthServiceError, *, stage: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "request_id": _request_id(),
-            "error_code": exc.error_code,
-            "message": exc.message,
-            "stage": stage,
-            "retryable": exc.retryable,
-            "details": exc.details,
-        },
-    )
-
-
-def _admin_error_response(exc: AdminServiceError, *, stage: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "request_id": _request_id(),
-            "error_code": exc.error_code,
-            "message": exc.message,
-            "stage": stage,
-            "retryable": exc.retryable,
-            "details": exc.details,
-        },
-    )
-
-
-def _database_error_response(exc: SQLAlchemyError, *, stage: str) -> JSONResponse:
-    original = getattr(exc, "orig", None) or exc.__cause__
-    return JSONResponse(
-        status_code=500,
-        content={
-            "request_id": _request_id(),
-            "error_code": "PERMISSION_DATABASE_ERROR",
-            "message": "permission database operation failed",
-            "stage": stage,
-            "retryable": True,
-            "details": {
-                "database_error": {
-                    "type": exc.__class__.__name__,
-                    "driver": original.__class__.__name__ if original is not None else None,
-                }
-            },
-        },
     )

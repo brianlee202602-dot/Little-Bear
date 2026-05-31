@@ -224,14 +224,14 @@ GET /internal/v1/knowledge-bases/{kb_id}/documents
 GET /internal/v1/documents/{doc_id}
 GET /internal/v1/documents/{doc_id}/versions
 GET /internal/v1/documents/{doc_id}/chunks
-GET /internal/v1/documents/{doc_id}/preview
+GET /internal/v1/documents/{doc_id}/sources/{source_id}
 ```
 
 要求：
 
 - 所有列表都必须经过 Permission Service 过滤。
 - 普通用户只能看到自己有权访问的知识库、文件夹、文档和 chunk。
-- `preview` 返回原文预览或解析后内容时必须做 access block 校验和引用有效性检查。
+- citation source 详情返回原文片段时必须重新做 access block 校验和引用有效性检查。
 - 文档原文下载如后续支持，应使用短期签名 URL，并在签发前做权限校验和审计。
 
 ## 8. 文档导入与任务 API

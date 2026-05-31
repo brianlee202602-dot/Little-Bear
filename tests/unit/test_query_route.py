@@ -20,6 +20,8 @@ from app.modules.query.service import QueryStreamPlan
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
 
+AUTH_TARGET = "app.api.dependencies.auth.AuthService.authenticate_access_token"
+
 
 class _FakeSession:
     def __enter__(self) -> _FakeSession:
@@ -195,7 +197,7 @@ def _create_test_app():
 
 def _open_business_api(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.shared.middleware.SetupService.load_state",
+        "app.api.middleware.setup_guard.SetupService.load_state",
         lambda _self: SetupState(
             initialized=True,
             setup_status=SetupStatus.INITIALIZED,
@@ -237,13 +239,24 @@ def _auth_context() -> AuthContext:
 
 def _patch_conversation_service(monkeypatch, captured: dict[str, object]) -> None:
     service = _FakeConversationService(captured)
-    monkeypatch.setattr("app.api.routes.query.QueryConversationService", lambda: service)
+    monkeypatch.setattr(
+        "app.api.routes.query_conversations.QueryConversationService",
+        lambda: service,
+    )
+    monkeypatch.setattr("app.api.routes.query_execute.QueryConversationService", lambda: service)
+    monkeypatch.setattr("app.api.routes.query_stream.QueryConversationService", lambda: service)
+
+
+def _patch_query_session_scope(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.query_conversations.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.query_execute.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.query_stream.session_scope", lambda: _FakeSession())
 
 
 def test_create_query_route_returns_query_response(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.query.session_scope", lambda: _FakeSession())
+    _patch_query_session_scope(monkeypatch)
     captured: dict[str, object] = {}
 
     def _authenticate(*_args, **kwargs):
@@ -273,12 +286,12 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(
-        "app.api.routes.query.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         _authenticate,
     )
     _patch_conversation_service(monkeypatch, captured)
     monkeypatch.setattr(
-        "app.api.routes.query.build_query_service",
+        "app.api.routes.query_execute.build_query_service",
         lambda _session: _FakeQueryService(_create_query),
     )
 
@@ -316,7 +329,7 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
 def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.query.session_scope", lambda: _FakeSession())
+    _patch_query_session_scope(monkeypatch)
     captured: dict[str, object] = {}
 
     def _authenticate(*_args, **kwargs):
@@ -346,12 +359,12 @@ def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(
-        "app.api.routes.query.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         _authenticate,
     )
     _patch_conversation_service(monkeypatch, captured)
     monkeypatch.setattr(
-        "app.api.routes.query.build_query_service",
+        "app.api.routes.query_stream.build_query_service",
         lambda _session: _FakeQueryService(_create_query),
     )
 
@@ -383,7 +396,7 @@ def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
 def test_create_query_stream_route_uses_provider_token_stream(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.query.session_scope", lambda: _FakeSession())
+    _patch_query_session_scope(monkeypatch)
     captured: dict[str, object] = {}
 
     def _authenticate(*_args, **kwargs):
@@ -391,12 +404,12 @@ def test_create_query_stream_route_uses_provider_token_stream(monkeypatch) -> No
         return _auth_context()
 
     monkeypatch.setattr(
-        "app.api.routes.query.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         _authenticate,
     )
     _patch_conversation_service(monkeypatch, captured)
     monkeypatch.setattr(
-        "app.api.routes.query.build_query_service",
+        "app.api.routes.query_stream.build_query_service",
         lambda _session: _FakeStreamingQueryService(captured),
     )
 
@@ -430,9 +443,9 @@ def test_create_query_stream_route_uses_provider_token_stream(monkeypatch) -> No
 def test_create_query_route_returns_service_error(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.query.session_scope", lambda: _FakeSession())
+    _patch_query_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.query.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **_kwargs: _auth_context(),
     )
     captured: dict[str, object] = {}
@@ -442,7 +455,7 @@ def test_create_query_route_returns_service_error(monkeypatch) -> None:
         raise QueryServiceError("QUERY_FILTER_UNSUPPORTED", "unsupported", status_code=400)
 
     monkeypatch.setattr(
-        "app.api.routes.query.build_query_service",
+        "app.api.routes.query_execute.build_query_service",
         lambda _session: _FakeQueryService(_raise_error),
     )
 
@@ -464,11 +477,11 @@ def test_create_query_route_returns_service_error(monkeypatch) -> None:
 def test_query_conversation_routes_use_current_user_scope(monkeypatch) -> None:
     app = _create_test_app()
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.query.session_scope", lambda: _FakeSession())
+    _patch_query_session_scope(monkeypatch)
     captured: dict[str, object] = {}
     _patch_conversation_service(monkeypatch, captured)
     monkeypatch.setattr(
-        "app.api.routes.query.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda *_args, **kwargs: (captured.update(kwargs) or _auth_context()),
     )
 

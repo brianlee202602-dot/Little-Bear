@@ -8,6 +8,8 @@ from app.modules.auth.schemas import AuthContext, AuthDepartment, AuthRole, Auth
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
 
+AUTH_TARGET = "app.api.dependencies.auth.AuthService.authenticate_access_token"
+
 
 class _FakeSession:
     def __enter__(self) -> _FakeSession:
@@ -23,7 +25,7 @@ def _create_test_app():
 
 def _open_business_api(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.shared.middleware.SetupService.load_state",
+        "app.api.middleware.setup_guard.SetupService.load_state",
         lambda _self: SetupState(
             initialized=True,
             setup_status=SetupStatus.INITIALIZED,
@@ -192,7 +194,7 @@ def test_current_user_route_wraps_user_response(monkeypatch) -> None:
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.auth.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.auth.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
 
@@ -215,7 +217,7 @@ def test_admin_current_user_capabilities_route_returns_admin_capabilities(monkey
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.auth.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.auth.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
 
@@ -238,7 +240,7 @@ def test_admin_current_user_capabilities_route_rejects_employee(monkeypatch) -> 
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.auth.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.auth.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _employee_auth_context(),
     )
 

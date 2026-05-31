@@ -6,12 +6,15 @@ from app.main import create_app
 from app.modules.auth.schemas import AuthContext, AuthRole, AuthUser
 from app.modules.config.schemas import (
     ConfigItem,
+    ConfigItemList,
     ConfigValidationResult,
     ConfigVersion,
     ConfigVersionList,
 )
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
+
+AUTH_TARGET = "app.api.dependencies.auth.AuthService.authenticate_access_token"
 
 
 class _FakeSession:
@@ -28,7 +31,7 @@ def _create_test_app():
 
 def _open_business_api(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.shared.middleware.SetupService.load_state",
+        "app.api.middleware.setup_guard.SetupService.load_state",
         lambda _self: SetupState(
             initialized=True,
             setup_status=SetupStatus.INITIALIZED,
@@ -37,6 +40,12 @@ def _open_business_api(monkeypatch) -> None:
             service_bootstrap_ready=True,
         ),
     )
+
+
+def _patch_config_session_scope(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.config_items.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.config_versions.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr("app.api.routes.config_validations.session_scope", lambda: _FakeSession())
 
 
 def _auth_context() -> AuthContext:
@@ -105,19 +114,22 @@ def test_config_list_route_requires_config_read_scope(monkeypatch) -> None:
         return _auth_context()
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
-    monkeypatch.setattr("app.api.routes.config.AuthService.authenticate_access_token", authenticate)
+    _patch_config_session_scope(monkeypatch)
+    monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.config.ConfigService.list_config_items",
-        lambda _self, _session: [
-            ConfigItem(
-                key="auth",
-                value_json={"access_token_ttl_minutes": 30},
-                scope_type="global",
-                status="active",
-                version=1,
-            )
-        ],
+        "app.api.routes.config_items.ConfigService.list_config_items",
+        lambda _self, _session, *, page, page_size: ConfigItemList(
+            items=[
+                ConfigItem(
+                    key="auth",
+                    value_json={"access_token_ttl_minutes": 30},
+                    scope_type="global",
+                    status="active",
+                    version=1,
+                )
+            ],
+            total=1,
+        ),
     )
 
     client = TestClient(_create_test_app())
@@ -131,6 +143,8 @@ def test_config_list_route_requires_config_read_scope(monkeypatch) -> None:
     payload = response.json()
     assert payload["request_id"] == "req_cfg"
     assert payload["data"][0]["key"] == "auth"
+    assert "value_json" not in payload["data"][0]
+    assert payload["pagination"] == {"page": 1, "page_size": 50, "total": 1}
 
 
 def test_config_write_route_requires_system_admin_role(monkeypatch) -> None:
@@ -142,13 +156,13 @@ def test_config_write_route_requires_system_admin_role(monkeypatch) -> None:
         return ConfigValidationResult(valid=True)
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _config_manager_without_system_admin_role(),
     )
     monkeypatch.setattr(
-        "app.api.routes.config.ConfigService.validate_config_payload",
+        "app.api.routes.config_validations.ConfigService.validate_config_payload",
         validate_config_payload,
     )
 
@@ -166,9 +180,9 @@ def test_config_write_route_requires_system_admin_role(monkeypatch) -> None:
 
 def test_high_risk_config_put_requires_confirmation(monkeypatch) -> None:
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
 
@@ -185,13 +199,13 @@ def test_high_risk_config_put_requires_confirmation(monkeypatch) -> None:
 
 def test_config_validation_route_returns_validation_result(monkeypatch) -> None:
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.config.ConfigService.validate_config_payload",
+        "app.api.routes.config_validations.ConfigService.validate_config_payload",
         lambda _self, _session, **_kwargs: ConfigValidationResult(valid=True),
     )
 
@@ -228,12 +242,15 @@ def test_config_version_list_route_returns_paginated_summary_without_config(monk
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.config.ConfigService.list_config_versions", list_versions)
+    monkeypatch.setattr(
+        "app.api.routes.config_versions.ConfigService.list_config_versions",
+        list_versions,
+    )
 
     client = TestClient(_create_test_app())
     response = client.get(
@@ -251,9 +268,9 @@ def test_config_version_list_route_returns_paginated_summary_without_config(monk
 
 def test_config_version_create_route_requires_confirmation(monkeypatch) -> None:
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
 
@@ -285,12 +302,15 @@ def test_config_version_create_route_saves_full_config(monkeypatch) -> None:
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.config.ConfigService.create_config_version", create_version)
+    monkeypatch.setattr(
+        "app.api.routes.config_versions.ConfigService.create_config_version",
+        create_version,
+    )
 
     client = TestClient(_create_test_app())
     response = client.post(
@@ -324,12 +344,15 @@ def test_config_version_update_route_updates_existing_version(monkeypatch) -> No
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.config.ConfigService.update_config_version", update_version)
+    monkeypatch.setattr(
+        "app.api.routes.config_versions.ConfigService.update_config_version",
+        update_version,
+    )
 
     client = TestClient(_create_test_app())
     response = client.put(
@@ -352,9 +375,9 @@ def test_config_version_update_route_updates_existing_version(monkeypatch) -> No
 
 def test_config_publish_route_requires_confirmation(monkeypatch) -> None:
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
 
@@ -373,13 +396,13 @@ def test_config_publish_route_invalidates_auth_runtime(monkeypatch) -> None:
     invalidated: dict[str, bool] = {}
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.config.ConfigService.publish_config_version",
+        "app.api.routes.config_versions.ConfigService.publish_config_version",
         lambda _self, _session, **_kwargs: ConfigVersion(
             version=2,
             status="active",
@@ -388,7 +411,7 @@ def test_config_publish_route_invalidates_auth_runtime(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        "app.api.routes.config.GLOBAL_AUTH_RUNTIME_CONFIG_PROVIDER.invalidate",
+        "app.api.routes.config_versions.GLOBAL_AUTH_RUNTIME_CONFIG_PROVIDER.invalidate",
         lambda: invalidated.update({"value": True}),
     )
 
@@ -421,12 +444,15 @@ def test_config_patch_route_archives_version(monkeypatch) -> None:
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.config.ConfigService.archive_config_version", archive)
+    monkeypatch.setattr(
+        "app.api.routes.config_versions.ConfigService.archive_config_version",
+        archive,
+    )
 
     client = TestClient(_create_test_app())
     response = client.patch(
@@ -448,9 +474,9 @@ def test_config_patch_route_archives_version(monkeypatch) -> None:
 
 def test_config_delete_draft_route_requires_confirmation(monkeypatch) -> None:
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
 
@@ -473,12 +499,15 @@ def test_config_delete_draft_route_archives_version(monkeypatch) -> None:
         return None
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.config.session_scope", lambda: _FakeSession())
+    _patch_config_session_scope(monkeypatch)
     monkeypatch.setattr(
-        "app.api.routes.config.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.config.ConfigService.archive_config_version", archive)
+    monkeypatch.setattr(
+        "app.api.routes.config_versions.ConfigService.archive_config_version",
+        archive,
+    )
 
     client = TestClient(_create_test_app())
     response = client.delete(

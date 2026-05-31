@@ -9,9 +9,8 @@ from app.modules.config.service import ConfigService
 from app.modules.import_pipeline.errors import ImportServiceError
 from app.modules.import_pipeline.executors import HeadingParagraphChunker, MultiFormatDocumentParser
 from app.modules.import_pipeline.service import ImportService
-from app.modules.secrets.service import SecretStoreError, SecretStoreService
-from app.modules.storage import MinioObjectStorage
-from app.shared.json_utils import as_dict, json_int, json_str
+from app.modules.storage import StorageRuntimeError, build_object_storage_from_config
+from app.shared.json_utils import as_dict, json_int
 from sqlalchemy.orm import Session
 
 
@@ -32,30 +31,11 @@ def build_import_service(session: Session) -> ImportService:
 
 
 def _build_import_service(session: Session, config: dict[str, Any]) -> ImportService:
-    storage_config = as_dict(config.get("storage"))
     chunk_config = as_dict(config.get("chunk"))
     import_config = as_dict(config.get("import"))
-    provider = json_str(storage_config, "provider")
-    if provider != "minio":
-        raise ImportServiceError(
-            "IMPORT_RUNTIME_STORAGE_UNSUPPORTED",
-            "active config storage provider is unsupported for import runtime",
-            status_code=503,
-            retryable=True,
-            details={"provider": provider},
-        )
-
-    endpoint = json_str(storage_config, "minio_endpoint")
-    bucket = json_str(storage_config, "bucket")
-    access_key_ref = json_str(storage_config, "access_key_ref")
-    secret_key_ref = json_str(storage_config, "secret_key_ref")
     missing = [
         path
         for path, value in (
-            ("storage.minio_endpoint", endpoint),
-            ("storage.bucket", bucket),
-            ("storage.access_key_ref", access_key_ref),
-            ("storage.secret_key_ref", secret_key_ref),
             ("import.max_file_mb", json_int(import_config, "max_file_mb")),
             ("import.allowed_file_types", _json_str_list(import_config.get("allowed_file_types"))),
         )
@@ -70,19 +50,30 @@ def _build_import_service(session: Session, config: dict[str, Any]) -> ImportSer
             details={"missing": missing},
         )
 
+    try:
+        object_storage = build_object_storage_from_config(session, config, required=True)
+    except StorageRuntimeError as exc:
+        raise ImportServiceError(
+            _import_storage_error_code(exc.error_code),
+            exc.message,
+            status_code=exc.status_code,
+            retryable=exc.retryable,
+            details=exc.details,
+        ) from exc
+    if object_storage is None:
+        raise ImportServiceError(
+            "IMPORT_RUNTIME_STORAGE_UNAVAILABLE",
+            "object storage is unavailable for import runtime",
+            status_code=503,
+            retryable=True,
+        )
+
     max_chars = _chunk_chars(json_int(chunk_config, "default_size_tokens"), default=1600)
     overlap_chars = _chunk_chars(json_int(chunk_config, "overlap_tokens"), default=0)
     max_file_mb = json_int(import_config, "max_file_mb") or 1
     allowed_file_types = _json_str_list(import_config.get("allowed_file_types"))
     return ImportService(
-        object_storage=MinioObjectStorage(
-            endpoint=endpoint or "",
-            bucket=bucket or "",
-            access_key=_secret_value(session, access_key_ref),
-            secret_key=_secret_value(session, secret_key_ref),
-            region=json_str(storage_config, "region", default="us-east-1") or "us-east-1",
-            object_key_prefix=json_str(storage_config, "object_key_prefix", default="") or "",
-        ),
+        object_storage=object_storage,
         parser=MultiFormatDocumentParser(),
         chunker=HeadingParagraphChunker(max_chars=max_chars, overlap_chars=overlap_chars),
         max_upload_bytes=max_file_mb * 1024 * 1024,
@@ -90,24 +81,13 @@ def _build_import_service(session: Session, config: dict[str, Any]) -> ImportSer
     )
 
 
-def _secret_value(session: Session, secret_ref: str | None) -> str:
-    if not secret_ref:
-        raise ImportServiceError(
-            "IMPORT_RUNTIME_SECRET_REF_MISSING",
-            "object storage secret ref is missing",
-            status_code=503,
-            retryable=True,
-        )
-    try:
-        return SecretStoreService().get_secret_value(session, secret_ref=secret_ref)
-    except SecretStoreError as exc:
-        raise ImportServiceError(
-            "IMPORT_RUNTIME_SECRET_UNAVAILABLE",
-            "object storage secret cannot be loaded",
-            status_code=503,
-            retryable=True,
-            details={"secret_ref": secret_ref, "source_error_code": exc.error_code},
-        ) from exc
+def _import_storage_error_code(error_code: str) -> str:
+    mapping = {
+        "STORAGE_RUNTIME_PROVIDER_UNSUPPORTED": "IMPORT_RUNTIME_STORAGE_UNSUPPORTED",
+        "STORAGE_RUNTIME_CONFIG_INCOMPLETE": "IMPORT_RUNTIME_CONFIG_INCOMPLETE",
+        "STORAGE_RUNTIME_SECRET_UNAVAILABLE": "IMPORT_RUNTIME_SECRET_UNAVAILABLE",
+    }
+    return mapping.get(error_code, "IMPORT_RUNTIME_STORAGE_UNAVAILABLE")
 
 
 def _chunk_chars(token_count: int | None, *, default: int) -> int:

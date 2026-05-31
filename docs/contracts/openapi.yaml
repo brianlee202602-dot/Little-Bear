@@ -183,6 +183,23 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /internal/v1/admin/users/me/capabilities:
+    get:
+      tags: [Auth]
+      summary: Get current admin portal capabilities
+      operationId: getAdminCurrentUserCapabilities
+      x-token-type: access
+      x-required-scope: auth:session
+      responses:
+        "200":
+          description: Current admin portal capabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminCurrentUserCapabilitiesResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
   /internal/v1/users/me/password:
     put:
       tags: [Auth]
@@ -510,8 +527,6 @@ paths:
       x-required-scope: document:read
       parameters:
         - $ref: "#/components/parameters/DocId"
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: Document
@@ -564,30 +579,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ChunkListResponse"
-        default:
-          $ref: "#/components/responses/Error"
-
-  /internal/v1/documents/{doc_id}/preview:
-    get:
-      tags: [KnowledgeBase]
-      summary: Preview accessible document
-      operationId: getDocumentPreview
-      x-token-type: access
-      x-required-scope: document:read
-      x-audit-required: true
-      parameters:
-        - $ref: "#/components/parameters/DocId"
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PageSize"
-        - $ref: "#/components/parameters/Keyword"
-        - $ref: "#/components/parameters/Status"
-      responses:
-        "200":
-          description: Document preview
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/DocumentPreviewResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1047,7 +1038,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/DocumentListResponse"
+                $ref: "#/components/schemas/AdminDocumentListResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1220,13 +1211,15 @@ paths:
       x-required-scope: document:manage
       parameters:
         - $ref: "#/components/parameters/DocId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: Versions
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/DocumentVersionListResponse"
+                $ref: "#/components/schemas/AdminDocumentVersionListResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1250,7 +1243,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ChunkListResponse"
+                $ref: "#/components/schemas/AdminChunkListResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1285,6 +1278,8 @@ paths:
       x-required-scope: document:index
       parameters:
         - $ref: "#/components/parameters/DocId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: Index versions
@@ -1302,6 +1297,9 @@ paths:
       operationId: adminGetIndexHealth
       x-token-type: access
       x-required-scope: document:index
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: Index collection health
@@ -1325,6 +1323,8 @@ paths:
           required: true
           schema:
             type: string
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: Collection snapshots
@@ -1486,6 +1486,8 @@ paths:
       x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: User
@@ -1506,6 +1508,8 @@ paths:
       x-confirmation-condition: disabling admin
       parameters:
         - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       requestBody:
         required: true
         content:
@@ -1533,6 +1537,8 @@ paths:
       x-confirmation-condition: always
       parameters:
         - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "204":
           description: User deleted
@@ -1574,6 +1580,8 @@ paths:
       x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "204":
           description: User unlocked
@@ -1715,6 +1723,8 @@ paths:
       x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: User departments
@@ -1903,6 +1913,8 @@ paths:
       x-audit-required: true
       parameters:
         - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
       responses:
         "200":
           description: Role bindings
@@ -2493,6 +2505,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ModelCallLogListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /internal/v1/admin/model-call-logs/{model_call_log_id}:
+    get:
+      tags: [AdminAudit]
+      summary: Admin get model call log
+      operationId: adminGetModelCallLog
+      x-token-type: access
+      x-required-scope: audit:read
+      x-audit-required: true
+      parameters:
+        - name: model_call_log_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Model call log
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCallLogResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -3592,14 +3628,10 @@ components:
 
     Document:
       type: object
-      required: [id, kb_id, title, lifecycle_status, index_status, owner_department_id, visibility]
+      required: [id, title, lifecycle_status, index_status, can_view, can_cite]
       properties:
         id:
           type: string
-        kb_id:
-          type: string
-        folder_id:
-          type: [string, "null"]
         title:
           type: string
         lifecycle_status:
@@ -3608,12 +3640,32 @@ components:
         index_status:
           type: string
           enum: [none, indexing, indexed, index_failed, blocked]
-        owner_department_id:
-          type: string
-        visibility:
-          $ref: "#/components/schemas/Visibility"
-        current_version_id:
+        updated_at:
           type: [string, "null"]
+          format: date-time
+        can_view:
+          type: boolean
+        can_cite:
+          type: boolean
+    DocumentListItem:
+      type: object
+      required: [id, title, lifecycle_status, index_status, can_view, can_cite]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        lifecycle_status:
+          type: string
+        index_status:
+          type: string
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+        can_view:
+          type: boolean
+        can_cite:
+          type: boolean
     DocumentPatchRequest:
       type: object
       properties:
@@ -3647,7 +3699,96 @@ components:
         data:
           type: array
           items:
-            $ref: "#/components/schemas/Document"
+            $ref: "#/components/schemas/DocumentListItem"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    AdminDocumentListItem:
+      type: object
+      required: [id, title, lifecycle_status, index_status, visibility, can_rebuild_index]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        folder_name:
+          type: [string, "null"]
+        lifecycle_status:
+          type: string
+          enum: [draft, active, archived, deleted]
+        index_status:
+          type: string
+          enum: [none, indexing, indexed, index_failed, blocked]
+        visibility:
+          $ref: "#/components/schemas/Visibility"
+        owner_department_name:
+          type: [string, "null"]
+        current_version_no:
+          type: [integer, "null"]
+        can_rebuild_index:
+          type: boolean
+    AdminDocumentListResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminDocumentListItem"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    AdminDocumentVersion:
+      type: object
+      properties:
+        id:
+          type: string
+        document_id:
+          type: string
+        version_no:
+          type: integer
+        status:
+          type: string
+    AdminDocumentVersionListResponse:
+      type: object
+      required: [request_id, data, pagination]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminDocumentVersion"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    AdminChunk:
+      type: object
+      properties:
+        id:
+          type: string
+        document_id:
+          type: string
+        document_version_id:
+          type: string
+        text_preview:
+          type: string
+        page_start:
+          type: integer
+        page_end:
+          type: integer
+        status:
+          type: string
+        ordinal:
+          type: integer
+    AdminChunkListResponse:
+      type: object
+      required: [request_id, data, pagination]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminChunk"
         pagination:
           $ref: "#/components/schemas/Pagination"
     DocumentVersion:
@@ -3812,24 +3953,6 @@ components:
           $ref: "#/components/schemas/RequestId"
         data:
           $ref: "#/components/schemas/CitationSource"
-    DocumentPreviewResponse:
-      type: object
-      properties:
-        request_id:
-          $ref: "#/components/schemas/RequestId"
-        data:
-          type: object
-          properties:
-            doc_id:
-              type: string
-            title:
-              type: string
-            preview:
-              type: string
-            citations:
-              type: array
-              items:
-                $ref: "#/components/schemas/Citation"
     IndexVersion:
       type: object
       properties:
@@ -3859,6 +3982,7 @@ components:
           format: date-time
     IndexVersionListResponse:
       type: object
+      required: [request_id, data, pagination]
       properties:
         request_id:
           $ref: "#/components/schemas/RequestId"
@@ -3866,6 +3990,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/IndexVersion"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
 
     IndexCollectionHealth:
       type: object
@@ -3908,6 +4034,7 @@ components:
             type: string
     IndexHealthResponse:
       type: object
+      required: [request_id, data, pagination]
       properties:
         request_id:
           $ref: "#/components/schemas/RequestId"
@@ -3915,6 +4042,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/IndexCollectionHealth"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
 
     IndexCollectionSnapshot:
       type: object
@@ -3938,6 +4067,7 @@ components:
           $ref: "#/components/schemas/IndexCollectionSnapshot"
     IndexCollectionSnapshotListResponse:
       type: object
+      required: [request_id, data, pagination]
       properties:
         request_id:
           $ref: "#/components/schemas/RequestId"
@@ -3945,6 +4075,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/IndexCollectionSnapshot"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
     IndexCollectionSnapshotRecoverRequest:
       type: object
       required: [location]
@@ -4210,6 +4342,36 @@ components:
           $ref: "#/components/schemas/RequestId"
         data:
           $ref: "#/components/schemas/User"
+    AdminCurrentUserCapabilitiesResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/AdminCurrentUserCapabilities"
+    AdminCurrentUserCapabilities:
+      type: object
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        departments:
+          type: array
+          items:
+            $ref: "#/components/schemas/Department"
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+        scopes:
+          type: array
+          items:
+            type: string
     UserListResponse:
       type: object
       required: [request_id, data, pagination]
@@ -4332,6 +4494,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Department"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
 
     Role:
       type: object
@@ -4482,6 +4646,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RoleBinding"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
 
     ResourcePermissionPutRequest:
       type: object
@@ -4538,6 +4704,18 @@ components:
           enum: [draft, validating, active, inactive, archived, failed]
         version:
           type: integer
+    ConfigItemListItem:
+      type: object
+      properties:
+        key:
+          type: string
+        scope_type:
+          type: string
+        status:
+          type: string
+          enum: [draft, validating, active, inactive, archived, failed]
+        version:
+          type: integer
     ConfigPutRequest:
       type: object
       required: [value_json]
@@ -4560,7 +4738,7 @@ components:
         data:
           type: array
           items:
-            $ref: "#/components/schemas/ConfigItem"
+            $ref: "#/components/schemas/ConfigItemListItem"
         pagination:
           $ref: "#/components/schemas/Pagination"
     ConfigVersion:
@@ -4823,6 +5001,13 @@ components:
             $ref: "#/components/schemas/ModelCallLog"
         pagination:
           $ref: "#/components/schemas/Pagination"
+    ModelCallLogResponse:
+      type: object
+      properties:
+        request_id:
+          $ref: "#/components/schemas/RequestId"
+        data:
+          $ref: "#/components/schemas/ModelCallLog"
 
     HealthResponse:
       type: object

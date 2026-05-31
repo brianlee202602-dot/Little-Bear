@@ -3,14 +3,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from app.main import create_app
-from app.modules.admin.schemas import (
-    AdminKnowledgeBaseAccessRule,
-    AdminKnowledgeBasePermissionPolicy,
-    AdminPermissionPolicy,
-)
 from app.modules.auth.schemas import AuthContext, AuthDepartment, AuthRole, AuthUser
+from app.modules.permissions.admin_schemas import (
+    PermissionKnowledgeBaseAccessRule,
+    PermissionKnowledgeBasePolicy,
+    PermissionPolicy,
+)
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
+
+AUTH_TARGET = "app.api.dependencies.auth.AuthService.authenticate_access_token"
 
 
 class _FakeSession:
@@ -27,7 +29,7 @@ def _create_test_app():
 
 def _open_business_api(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.shared.middleware.SetupService.load_state",
+        "app.api.middleware.setup_guard.SetupService.load_state",
         lambda _self: SetupState(
             initialized=True,
             setup_status=SetupStatus.INITIALIZED,
@@ -85,7 +87,7 @@ def test_put_document_permissions_requires_permission_manage_scope(monkeypatch) 
 
     def replace_document_permissions(_self, _session, **kwargs):
         seen.update(kwargs)
-        return AdminPermissionPolicy(
+        return PermissionPolicy(
             resource_type="document",
             resource_id=kwargs["doc_id"],
             visibility=kwargs["visibility"],
@@ -95,11 +97,11 @@ def test_put_document_permissions_requires_permission_manage_scope(monkeypatch) 
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.permissions.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.permissions.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         authenticate,
     )
     monkeypatch.setattr(
-        "app.api.routes.permissions.AdminService.replace_document_permissions",
+        "app.api.routes.permissions.PermissionAdminService.replace_document_permissions",
         replace_document_permissions,
     )
 
@@ -126,14 +128,14 @@ def test_put_knowledge_base_permissions_requires_confirmation(monkeypatch) -> No
 
     def replace_knowledge_base_permissions(_self, _session, **kwargs):
         seen.update(kwargs)
-        return AdminKnowledgeBasePermissionPolicy(
+        return PermissionKnowledgeBasePolicy(
             resource_type="knowledge_base",
             resource_id=kwargs["kb_id"],
             kb_visibility=kwargs["kb_visibility"],
             default_document_visibility=kwargs["default_document_visibility"],
             default_document_owner_department_id=kwargs["default_document_owner_department_id"],
             access_rules=(
-                AdminKnowledgeBaseAccessRule(
+                PermissionKnowledgeBaseAccessRule(
                     subject_type="department",
                     subject_id="department_1",
                     permission="query",
@@ -145,11 +147,11 @@ def test_put_knowledge_base_permissions_requires_confirmation(monkeypatch) -> No
     _open_business_api(monkeypatch)
     monkeypatch.setattr("app.api.routes.permissions.session_scope", lambda: _FakeSession())
     monkeypatch.setattr(
-        "app.api.routes.permissions.AuthService.authenticate_access_token",
+        AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.permissions.AdminService.replace_knowledge_base_permissions",
+        "app.api.routes.permissions.PermissionAdminService.replace_knowledge_base_permissions",
         replace_knowledge_base_permissions,
     )
 

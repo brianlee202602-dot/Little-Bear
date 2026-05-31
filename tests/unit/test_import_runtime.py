@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from app.modules.import_pipeline.executors import MultiFormatDocumentParser
 from app.modules.import_pipeline.runtime import _build_import_service
+from app.modules.storage import InMemoryObjectStorage
 
 
 def test_build_import_service_uses_active_import_config(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.modules.import_pipeline.runtime._secret_value",
-        lambda *_args, **_kwargs: "secret",
+        "app.modules.import_pipeline.runtime.build_object_storage_from_config",
+        lambda *_args, **_kwargs: InMemoryObjectStorage(),
     )
 
     service = _build_import_service(

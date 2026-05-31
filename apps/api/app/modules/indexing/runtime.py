@@ -4,19 +4,96 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.adapters import QdrantVectorIndexWriter
+from app.adapters import (
+    QdrantVectorIndexWriter,
+    VectorStoreDraftPoint,
+    VectorStoreEmbeddingError,
+    VectorStorePayloadUpdate,
+)
 from app.modules.config.errors import ConfigServiceError
 from app.modules.config.service import ConfigService
 from app.modules.indexing.errors import IndexingServiceError
+from app.modules.indexing.schemas import DraftVectorPoint, VectorPayloadUpdate
 from app.modules.indexing.service import (
     DEFAULT_COLLECTION,
     DEFAULT_MODEL_VERSION,
     IndexingService,
 )
-from app.modules.models import ModelGatewayEmbeddingClient
+from app.modules.models import ModelClientError, ModelGatewayEmbeddingClient
 from app.modules.secrets.service import SecretStoreError, SecretStoreService
 from app.shared.json_utils import as_dict, json_bool, json_int, json_str
 from sqlalchemy.orm import Session
+
+
+class _VectorStoreEmbeddingClientAdapter:
+    def __init__(self, client: ModelGatewayEmbeddingClient) -> None:
+        self.client = client
+
+    def embed_query(self, query_text: str) -> list[float]:
+        try:
+            return self.client.embed_query(query_text)
+        except ModelClientError as exc:
+            raise VectorStoreEmbeddingError(exc.error_code) from exc
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        try:
+            return self.client.embed_texts(texts)
+        except ModelClientError as exc:
+            raise VectorStoreEmbeddingError(exc.error_code) from exc
+
+
+class _QdrantVectorIndexWriterAdapter:
+    def __init__(self, writer: QdrantVectorIndexWriter) -> None:
+        self.writer = writer
+
+    @property
+    def embedding_client(self) -> ModelGatewayEmbeddingClient:
+        return self.writer.embedding_client.client
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self.writer.timeout_seconds
+
+    def upsert_draft_points(self, points: tuple[DraftVectorPoint, ...]) -> None:
+        self.writer.upsert_draft_points(
+            tuple(
+                VectorStoreDraftPoint(
+                    collection_name=point.collection_name,
+                    vector_id=point.vector_id,
+                    text=point.text,
+                    payload=point.payload,
+                )
+                for point in points
+            )
+        )
+
+    def activate_points(
+        self,
+        *,
+        collection_name: str,
+        vector_ids: tuple[str, ...],
+        permission_version: int,
+    ) -> None:
+        self.writer.activate_points(
+            collection_name=collection_name,
+            vector_ids=vector_ids,
+            permission_version=permission_version,
+        )
+
+    def update_payloads(self, updates: tuple[VectorPayloadUpdate, ...]) -> None:
+        self.writer.update_payloads(
+            tuple(
+                VectorStorePayloadUpdate(
+                    collection_name=update.collection_name,
+                    vector_id=update.vector_id,
+                    payload=update.payload,
+                )
+                for update in updates
+            )
+        )
+
+    def delete_points(self, *, collection_name: str, vector_ids: tuple[str, ...]) -> None:
+        self.writer.delete_points(collection_name=collection_name, vector_ids=vector_ids)
 
 
 def build_indexing_service(session: Session) -> IndexingService:
@@ -83,15 +160,17 @@ def _build_indexing_service(session: Session, config: dict[str, Any]) -> Indexin
         expected_dimension=dimension,
         normalize=json_bool(model_config, "embedding_normalize", default=False),
     )
-    vector_writer = QdrantVectorIndexWriter(
-        base_url=qdrant_base_url,
-        api_key=_secret_value(session, json_str(vector_store, "api_key_ref")),
-        embedding_client=embedding_client,
-        timeout_seconds=_timeout_seconds(
-            json_int(timeout_config, "vector_search_ms"),
-            default_ms=3000,
-            min_ms=3000,
-        ),
+    vector_writer = _QdrantVectorIndexWriterAdapter(
+        QdrantVectorIndexWriter(
+            base_url=qdrant_base_url,
+            api_key=_secret_value(session, json_str(vector_store, "api_key_ref")),
+            embedding_client=_VectorStoreEmbeddingClientAdapter(embedding_client),
+            timeout_seconds=_timeout_seconds(
+                json_int(timeout_config, "vector_search_ms"),
+                default_ms=3000,
+                min_ms=3000,
+            ),
+        )
     )
     return IndexingService(
         embedding_model=embedding_model,

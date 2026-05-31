@@ -1,38 +1,41 @@
-"""Import Service 与 Worker 状态推进。"""
+"""Import Service facade."""
 
 from __future__ import annotations
 
-import json
-import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any
 
-from app.modules.import_pipeline.errors import ImportServiceError
+from app.modules.import_pipeline import upload_validation as _upload_validation
+from app.modules.import_pipeline.audit_writer import ImportAuditWriter
+from app.modules.import_pipeline.command_service import ImportCommandService
+from app.modules.import_pipeline.document_writer import ImportDocumentWriter
 from app.modules.import_pipeline.executors import (
     DocumentChunker,
     DocumentCleaner,
     DocumentParser,
     HeadingParagraphChunker,
     MultiFormatDocumentParser,
-    ParsedDocument,
     PlainTextCleaner,
-    SourceDocument,
 )
+from app.modules.import_pipeline.permission_guard import ImportPermissionGuard
+from app.modules.import_pipeline.repository import ImportPipelineRepository
+from app.modules.import_pipeline.retry_service import ImportRetryService
 from app.modules.import_pipeline.schemas import (
     DocumentImportItem,
     ImportActorContext,
     ImportJob,
     ImportJobList,
 )
-from app.modules.indexing.errors import IndexingServiceError
+from app.modules.import_pipeline.stage_runner import ImportStageRunner
+from app.modules.import_pipeline.upload_validation import (
+    CONTENT_TYPE_TO_FILE_TYPE,
+    DEFAULT_ALLOWED_FILE_TYPES,
+    DEFAULT_MAX_UPLOAD_BYTES,
+    EXTENSION_TO_FILE_TYPE,
+)
+from app.modules.import_pipeline.worker_service import ImportWorkerService
 from app.modules.indexing.runtime import build_indexing_service
-from app.modules.permissions.errors import PermissionServiceError
-from app.modules.permissions.service import PermissionService
 from app.modules.storage.service import InMemoryObjectStorage, ObjectStorage
-from app.shared.context import get_request_context
-from app.shared.json_utils import stable_json_hash
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 IMPORT_STAGES = (
@@ -47,27 +50,10 @@ IMPORT_STAGES = (
     "finished",
 )
 TERMINAL_STATUSES = {"success", "partial_success", "failed", "cancelled"}
-DEFAULT_MAX_UPLOAD_BYTES = 2 * 1024 * 1024
-DEFAULT_ALLOWED_FILE_TYPES = ("txt", "md", "pdf", "docx")
-CONTENT_TYPE_TO_FILE_TYPE = {
-    "application/pdf": "pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-    "text/plain": "txt",
-    "text/markdown": "md",
-    "text/x-markdown": "md",
-}
-EXTENSION_TO_FILE_TYPE = {
-    "pdf": "pdf",
-    "docx": "docx",
-    "txt": "txt",
-    "text": "txt",
-    "md": "md",
-    "markdown": "md",
-}
 
 
 class ImportService:
-    """导入任务写模型和 Worker 任务状态机。"""
+    """Facade for import API commands and worker state-machine workflows."""
 
     def __init__(
         self,
@@ -83,8 +69,16 @@ class ImportService:
         self.parser = parser or MultiFormatDocumentParser()
         self.cleaner = cleaner or PlainTextCleaner()
         self.chunker = chunker or HeadingParagraphChunker()
+        self.command_service = ImportCommandService(self)
+        self.retry_service = ImportRetryService(self)
+        self.repository = ImportPipelineRepository()
+        self.document_writer = ImportDocumentWriter(object_storage=self.object_storage)
+        self.permission_guard = ImportPermissionGuard()
+        self.worker_service = ImportWorkerService(self)
+        self.stage_runner = ImportStageRunner(self)
+        self.audit_writer = ImportAuditWriter()
         self.max_upload_bytes = max_upload_bytes or DEFAULT_MAX_UPLOAD_BYTES
-        self.allowed_file_types = _normalize_allowed_file_types(
+        self.allowed_file_types = _upload_validation.normalize_allowed_file_types(
             allowed_file_types or DEFAULT_ALLOWED_FILE_TYPES
         )
 
@@ -96,37 +90,12 @@ class ImportService:
         size_bytes: int,
         file_index: int,
     ) -> str:
-        """按导入运行时配置校验上传文件，并返回规范化文件类型。"""
-
-        file_type = _infer_file_type(filename=filename, content_type=content_type)
-        if not file_type or file_type not in self.allowed_file_types:
-            raise ImportServiceError(
-                "IMPORT_FILE_TYPE_UNSUPPORTED",
-                "uploaded file type is not allowed by active import config",
-                status_code=415,
-                retryable=False,
-                details={
-                    "file_index": file_index,
-                    "filename": filename,
-                    "content_type": content_type,
-                    "file_type": file_type,
-                    "allowed_file_types": list(self.allowed_file_types),
-                },
-            )
-        if size_bytes > self.max_upload_bytes:
-            raise ImportServiceError(
-                "IMPORT_FILE_TOO_LARGE",
-                "uploaded file is too large for active import config",
-                status_code=413,
-                retryable=False,
-                details={
-                    "file_index": file_index,
-                    "filename": filename,
-                    "max_bytes": self.max_upload_bytes,
-                    "size_bytes": size_bytes,
-                },
-            )
-        return file_type
+        return self.command_service.validate_upload_file(
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            file_index=file_index,
+        )
 
     def create_document_import(
         self,
@@ -143,237 +112,19 @@ class ImportService:
         idempotency_key: str | None = None,
         actor_context: ImportActorContext | None = None,
     ) -> ImportJob:
-        """创建 upload、URL 或 metadata_batch 导入任务，并预创建文档与 draft 版本。"""
-
-        _require_scope(actor_context, "document:import")
-        normalized_items = _normalize_items(job_type=job_type, items=items)
-        knowledge_base = self._load_knowledge_base(
+        return self.command_service.create_document_import(
             session,
             enterprise_id=enterprise_id,
             kb_id=kb_id,
-        )
-        if knowledge_base["status"] != "active":
-            raise ImportServiceError(
-                "IMPORT_KB_UNAVAILABLE",
-                "knowledge base is not active",
-                status_code=409,
-                details={"kb_id": kb_id, "status": knowledge_base["status"]},
-            )
-        _ensure_actor_can_import_to_kb(actor_context, knowledge_base=knowledge_base)
-
-        if idempotency_key:
-            existing = self._load_job_by_idempotency(
-                session,
-                enterprise_id=enterprise_id,
-                actor_user_id=actor_user_id,
-                idempotency_key=idempotency_key,
-            )
-            if existing:
-                return existing
-
-        resolved_owner_department_id = self._resolve_owner_department_id(
-            session,
-            enterprise_id=enterprise_id,
-            requested_owner_department_id=owner_department_id,
-            default_document_owner_department_id=knowledge_base[
-                "default_document_owner_department_id"
-            ],
-            knowledge_base=knowledge_base,
+            actor_user_id=actor_user_id,
+            job_type=job_type,
+            items=items,
+            owner_department_id=owner_department_id,
+            visibility=visibility,
+            folder_id=folder_id,
+            idempotency_key=idempotency_key,
             actor_context=actor_context,
         )
-        resolved_visibility = visibility or knowledge_base["default_document_visibility"]
-        self._validate_visibility(
-            owner_department_id=resolved_owner_department_id,
-            visibility=resolved_visibility,
-        )
-        self._ensure_document_permission_within_parent_knowledge_base(
-            knowledge_base=knowledge_base,
-            visibility=resolved_visibility,
-            owner_department_id=resolved_owner_department_id,
-        )
-        if folder_id:
-            self._ensure_folder_available(
-                session,
-                enterprise_id=enterprise_id,
-                kb_id=kb_id,
-                folder_id=folder_id,
-            )
-
-        permission_version = self._load_permission_version(session, enterprise_id)
-        document_ids: list[str] = []
-        document_version_ids: list[str] = []
-        request_items: list[dict[str, Any]] = []
-        for item in normalized_items:
-            document_id = str(uuid.uuid4())
-            document_version_id = str(uuid.uuid4())
-            content_payload = {
-                "job_type": job_type,
-                "title": item.title,
-                "url": item.url,
-                "metadata": item.metadata,
-            }
-            content_hash = stable_json_hash(content_payload)
-            policy_id = self._replace_resource_policy(
-                session,
-                enterprise_id=enterprise_id,
-                resource_type="document",
-                resource_id=document_id,
-                owner_department_id=resolved_owner_department_id,
-                visibility=resolved_visibility,
-                policy_version=1,
-                actor_user_id=actor_user_id,
-            )
-            snapshot = self._insert_permission_snapshot(
-                session,
-                enterprise_id=enterprise_id,
-                resource_type="document",
-                resource_id=document_id,
-                owner_department_id=resolved_owner_department_id,
-                visibility=resolved_visibility,
-                permission_version=permission_version,
-                policy_version=1,
-                policy_id=policy_id,
-            )
-            self._insert_document(
-                session,
-                enterprise_id=enterprise_id,
-                kb_id=kb_id,
-                folder_id=folder_id,
-                document_id=document_id,
-                title=item.title,
-                source_type="upload" if job_type == "upload" else "api",
-                source_uri=item.url or _metadata_source_uri(item.metadata),
-                owner_department_id=resolved_owner_department_id,
-                visibility=resolved_visibility,
-                content_hash=content_hash,
-                permission_snapshot_id=snapshot["snapshot_id"],
-                tags=_metadata_tags(item.metadata),
-                actor_user_id=actor_user_id,
-            )
-            object_key = None
-            if job_type == "upload":
-                object_key = self._store_upload_object(
-                    enterprise_id=enterprise_id,
-                    kb_id=kb_id,
-                    document_id=document_id,
-                    actor_user_id=actor_user_id,
-                    item=item,
-                )
-            self._insert_document_version(
-                session,
-                enterprise_id=enterprise_id,
-                document_id=document_id,
-                document_version_id=document_version_id,
-                object_key=object_key,
-                content_hash=content_hash,
-                actor_user_id=actor_user_id,
-            )
-            document_ids.append(document_id)
-            document_version_ids.append(document_version_id)
-            request_items.append(
-                {
-                    "document_id": document_id,
-                    "document_version_id": document_version_id,
-                    "title": item.title,
-                    "url": item.url,
-                    "object_key": object_key,
-                    "content_type": item.content_type,
-                    "metadata": item.metadata,
-                    "content_hash": content_hash,
-                }
-            )
-
-        job_id = str(uuid.uuid4())
-        request_json = {
-            "job_type": job_type,
-            "kb_id": kb_id,
-            "document_ids": document_ids,
-            "document_version_ids": document_version_ids,
-            "owner_department_id": resolved_owner_department_id,
-            "visibility": resolved_visibility,
-            "folder_id": folder_id,
-            "items": request_items,
-        }
-        self._insert_import_job(
-            session,
-            enterprise_id=enterprise_id,
-            job_id=job_id,
-            job_type=job_type,
-            kb_id=kb_id,
-            document_id=document_ids[0],
-            document_version_id=document_version_ids[0],
-            request_json=request_json,
-            idempotency_key=idempotency_key,
-            actor_user_id=actor_user_id,
-        )
-        self._insert_audit_log(
-            session,
-            enterprise_id=enterprise_id,
-            actor_id=actor_user_id,
-            event_name="import_job.created",
-            resource_type="import_job",
-            resource_id=job_id,
-            action="create",
-            result="success",
-            risk_level="high",
-            summary={
-                "job_type": job_type,
-                "kb_id": kb_id,
-                "document_ids": document_ids,
-                "permission_version": permission_version,
-            },
-        )
-        return ImportJob(
-            id=job_id,
-            kb_id=kb_id,
-            status="queued",
-            stage="validate",
-            document_ids=tuple(document_ids),
-            job_type=job_type,
-        )
-
-    def _store_upload_object(
-        self,
-        *,
-        enterprise_id: str,
-        kb_id: str,
-        document_id: str,
-        actor_user_id: str,
-        item: DocumentImportItem,
-    ) -> str:
-        if item.object_content is None:
-            raise ImportServiceError(
-                "IMPORT_OBJECT_CONTENT_REQUIRED",
-                "upload import item requires raw object content",
-                status_code=400,
-                details={"title": item.title},
-            )
-        object_key = _build_upload_object_key(
-            enterprise_id=enterprise_id,
-            kb_id=kb_id,
-            document_id=document_id,
-            filename=_metadata_filename(item.metadata) or item.title,
-        )
-        try:
-            self.object_storage.put_object(
-                object_key=object_key,
-                content=item.object_content,
-                content_type=item.content_type,
-            )
-        except Exception as exc:
-            raise ImportServiceError(
-                "IMPORT_OBJECT_STORE_FAILED",
-                "upload source object cannot be stored",
-                status_code=503,
-                retryable=True,
-                details={
-                    "document_id": document_id,
-                    "kb_id": kb_id,
-                    "filename": _metadata_filename(item.metadata) or item.title,
-                    "actor_user_id": actor_user_id,
-                },
-            ) from exc
-        return object_key
 
     def get_import_job(
         self,
@@ -384,14 +135,13 @@ class ImportService:
         actor_user_id: str | None = None,
         owner_only: bool = True,
     ) -> ImportJob:
-        row = self._load_import_job_row(
+        return self.command_service.get_import_job(
             session,
-            job_id=job_id,
+            job_id,
             enterprise_id=enterprise_id,
             actor_user_id=actor_user_id,
             owner_only=owner_only,
         )
-        return _job_from_mapping(row)
 
     def list_import_jobs(
         self,
@@ -407,66 +157,17 @@ class ImportService:
         actor_user_id: str | None = None,
         owner_only: bool = True,
     ) -> ImportJobList:
-        page = max(page, 1)
-        page_size = min(max(page_size, 1), 200)
-        conditions = ["enterprise_id = CAST(:enterprise_id AS uuid)"]
-        params: dict[str, Any] = {
-            "enterprise_id": enterprise_id,
-            "limit": page_size,
-            "offset": (page - 1) * page_size,
-        }
-        if owner_only:
-            conditions.append("created_by = CAST(:actor_user_id AS uuid)")
-            params["actor_user_id"] = actor_user_id
-        if status:
-            conditions.append("status = :status")
-            params["status"] = status
-        if stage:
-            conditions.append("stage = :stage")
-            params["stage"] = stage
-        if kb_id:
-            conditions.append("kb_id = CAST(:kb_id AS uuid)")
-            params["kb_id"] = kb_id
-        if job_type:
-            conditions.append("job_type = :job_type")
-            params["job_type"] = job_type
-        where_sql = " AND ".join(conditions)
-        try:
-            rows = session.execute(
-                text(
-                    f"""
-                    SELECT
-                        id::text AS job_id,
-                        job_type,
-                        kb_id::text AS kb_id,
-                        document_id::text AS document_id,
-                        document_version_id::text AS document_version_id,
-                        status,
-                        stage,
-                        request_json,
-                        result_json,
-                        error_message
-                    FROM import_jobs
-                    WHERE {where_sql}
-                    ORDER BY created_at DESC
-                    LIMIT :limit OFFSET :offset
-                    """
-                ),
-                params,
-            ).all()
-            total_row = session.execute(
-                text(f"SELECT count(*) AS total FROM import_jobs WHERE {where_sql}"),
-                params,
-            ).one()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "IMPORT_JOBS_UNAVAILABLE",
-                "import jobs cannot be read",
-                exc,
-            ) from exc
-        return ImportJobList(
-            items=tuple(_job_from_mapping(row._mapping) for row in rows),
-            total=int(total_row._mapping["total"]),
+        return self.command_service.list_import_jobs(
+            session,
+            enterprise_id=enterprise_id,
+            page=page,
+            page_size=page_size,
+            status=status,
+            stage=stage,
+            kb_id=kb_id,
+            job_type=job_type,
+            actor_user_id=actor_user_id,
+            owner_only=owner_only,
         )
 
     def request_cancel(
@@ -478,77 +179,13 @@ class ImportService:
         actor_user_id: str,
         owner_only: bool = True,
     ) -> ImportJob:
-        row = self._load_import_job_row(
+        return self.command_service.request_cancel(
             session,
-            job_id=job_id,
+            job_id,
             enterprise_id=enterprise_id,
             actor_user_id=actor_user_id,
             owner_only=owner_only,
         )
-        current = row["status"]
-        if current in TERMINAL_STATUSES:
-            return _job_from_mapping(row)
-
-        if current in {"queued", "retrying"}:
-            update_sql = """
-                UPDATE import_jobs
-                SET status = 'cancelled',
-                    cancel_requested_at = now(),
-                    cancel_requested_by = CAST(:actor_user_id AS uuid),
-                    locked_by = NULL,
-                    locked_until = NULL,
-                    finished_at = now(),
-                    updated_at = now()
-                WHERE id = CAST(:job_id AS uuid)
-                  AND enterprise_id = CAST(:enterprise_id AS uuid)
-                RETURNING
-                    id::text AS job_id, job_type, kb_id::text AS kb_id,
-                    document_id::text AS document_id,
-                    document_version_id::text AS document_version_id,
-                    status, stage, request_json, result_json, error_message
-            """
-            event_name = "import_job.cancelled"
-        else:
-            update_sql = """
-                UPDATE import_jobs
-                SET cancel_requested_at = COALESCE(cancel_requested_at, now()),
-                    cancel_requested_by = COALESCE(
-                        cancel_requested_by,
-                        CAST(:actor_user_id AS uuid)
-                    ),
-                    updated_at = now()
-                WHERE id = CAST(:job_id AS uuid)
-                  AND enterprise_id = CAST(:enterprise_id AS uuid)
-                RETURNING
-                    id::text AS job_id, job_type, kb_id::text AS kb_id,
-                    document_id::text AS document_id,
-                    document_version_id::text AS document_version_id,
-                    status, stage, request_json, result_json, error_message
-            """
-            event_name = "import_job.cancel_requested"
-
-        updated = session.execute(
-            text(update_sql),
-            {
-                "job_id": job_id,
-                "enterprise_id": enterprise_id,
-                "actor_user_id": actor_user_id,
-            },
-        ).one()
-        job = _job_from_mapping(updated._mapping)
-        self._insert_audit_log(
-            session,
-            enterprise_id=enterprise_id,
-            actor_id=actor_user_id,
-            event_name=event_name,
-            resource_type="import_job",
-            resource_id=job.id,
-            action="cancel",
-            result="success",
-            risk_level="medium",
-            summary={"previous_status": current, "status": job.status, "stage": job.stage},
-        )
-        return job
 
     def create_retry(
         self,
@@ -559,19 +196,12 @@ class ImportService:
         actor_user_id: str,
         owner_only: bool = True,
     ) -> ImportJob:
-        row = self._load_import_job_row(
+        return self.retry_service.create_retry(
             session,
-            job_id=job_id,
+            job_id,
             enterprise_id=enterprise_id,
             actor_user_id=actor_user_id,
             owner_only=owner_only,
-        )
-        return self._create_retry_from_row(
-            session,
-            row=row,
-            enterprise_id=enterprise_id,
-            actor_user_id=actor_user_id,
-            retried_from_job_id=job_id,
         )
 
     def create_index_job_retries(
@@ -583,114 +213,12 @@ class ImportService:
         job_ids: list[str],
         owner_only: bool = False,
     ) -> ImportJobList:
-        normalized_job_ids = _unique_strings(job_ids)
-        if not normalized_job_ids:
-            raise ImportServiceError(
-                "IMPORT_RETRY_JOBS_REQUIRED",
-                "index job retry requires at least one job id",
-                status_code=400,
-            )
-        rows = [
-            self._load_import_job_row(
-                session,
-                job_id=job_id,
-                enterprise_id=enterprise_id,
-                actor_user_id=actor_user_id,
-                owner_only=owner_only,
-            )
-            for job_id in normalized_job_ids
-        ]
-        invalid_jobs = [
-            {
-                "job_id": row["job_id"],
-                "job_type": row["job_type"],
-                "status": row["status"],
-            }
-            for row in rows
-            if row["job_type"] != "index_rebuild"
-            or row["status"] not in {"failed", "cancelled"}
-        ]
-        if invalid_jobs:
-            raise ImportServiceError(
-                "IMPORT_INDEX_RETRY_NOT_ALLOWED",
-                "only failed or cancelled index rebuild jobs can be retried",
-                status_code=409,
-                details={"invalid_jobs": invalid_jobs},
-            )
-        jobs = tuple(
-            self._create_retry_from_row(
-                session,
-                row=row,
-                enterprise_id=enterprise_id,
-                actor_user_id=actor_user_id,
-                retried_from_job_id=row["job_id"],
-                risk_level="high",
-                batch_job_ids=normalized_job_ids,
-            )
-            for row in rows
-        )
-        return ImportJobList(items=jobs, total=len(jobs))
-
-    def _create_retry_from_row(
-        self,
-        session: Session,
-        *,
-        row: Any,
-        enterprise_id: str,
-        actor_user_id: str,
-        retried_from_job_id: str,
-        risk_level: str = "medium",
-        batch_job_ids: list[str] | None = None,
-    ) -> ImportJob:
-        if row["status"] not in {"failed", "cancelled"}:
-            raise ImportServiceError(
-                "IMPORT_RETRY_NOT_ALLOWED",
-                "only failed or cancelled import jobs can be retried",
-                status_code=409,
-                details={"status": row["status"]},
-            )
-        request_json = _json_mapping(row["request_json"])
-        retry_job_id = str(uuid.uuid4())
-        retry_request_json = {
-            **request_json,
-            "retried_from_job_id": retried_from_job_id,
-        }
-        initial_stage = "embed" if row["job_type"] == "index_rebuild" else "validate"
-        self._insert_import_job(
+        return self.retry_service.create_index_job_retries(
             session,
             enterprise_id=enterprise_id,
-            job_id=retry_job_id,
-            job_type=row["job_type"],
-            kb_id=row["kb_id"],
-            document_id=row["document_id"],
-            document_version_id=row["document_version_id"],
-            request_json=retry_request_json,
-            idempotency_key=None,
             actor_user_id=actor_user_id,
-            initial_stage=initial_stage,
-        )
-        self._insert_audit_log(
-            session,
-            enterprise_id=enterprise_id,
-            actor_id=actor_user_id,
-            event_name="import_job.retry_created",
-            resource_type="import_job",
-            resource_id=retry_job_id,
-            action="retry",
-            result="success",
-            risk_level=risk_level,
-            summary={
-                "retried_from_job_id": retried_from_job_id,
-                "batch_job_ids": batch_job_ids or [],
-            },
-        )
-        return ImportJob(
-            id=retry_job_id,
-            kb_id=row["kb_id"],
-            status="queued",
-            stage=initial_stage,
-            document_ids=tuple(_document_ids_from_request(retry_request_json, row["document_id"])),
-            job_type=row["job_type"],
+            job_ids=job_ids,
+            owner_only=owner_only,
         )
 
     def claim_next_job(
@@ -701,69 +229,12 @@ class ImportService:
         lock_seconds: int = 60,
         now: datetime | None = None,
     ) -> ImportJob | None:
-        current_time = now or datetime.now(UTC)
-        locked_until = current_time + timedelta(seconds=max(lock_seconds, 1))
-        try:
-            row = session.execute(
-                text(
-                    """
-                    WITH candidate AS (
-                        SELECT id
-                        FROM import_jobs
-                        WHERE status IN ('queued', 'retrying')
-                          AND (next_retry_at IS NULL OR next_retry_at <= :now)
-                          AND (locked_until IS NULL OR locked_until < :now)
-                        ORDER BY created_at ASC
-                        LIMIT 1
-                        FOR UPDATE SKIP LOCKED
-                    )
-                    UPDATE import_jobs AS job
-                    SET status = 'running',
-                        stage = CASE
-                            WHEN job.stage = 'finished' THEN 'validate'
-                            ELSE job.stage
-                        END,
-                        attempt_count = job.attempt_count + 1,
-                        locked_by = :worker_id,
-                        locked_until = :locked_until,
-                        next_retry_at = NULL,
-                        error_code = NULL,
-                        error_message = NULL,
-                        updated_at = :now
-                    FROM candidate
-                    WHERE job.id = candidate.id
-                    RETURNING
-                        job.id::text AS job_id,
-                        job.job_type,
-                        job.kb_id::text AS kb_id,
-                        job.document_id::text AS document_id,
-                        job.document_version_id::text AS document_version_id,
-                        job.status,
-                        job.stage,
-                        job.request_json,
-                        job.result_json,
-                        job.error_message
-                    """
-                ),
-                {"worker_id": worker_id, "locked_until": locked_until, "now": current_time},
-            ).one_or_none()
-        except SQLAlchemyError as exc:
-            raise _database_error(
-                "IMPORT_CLAIM_FAILED",
-                "import job cannot be claimed",
-                exc,
-            ) from exc
-        if row is None:
-            return None
-        job = _job_from_mapping(row._mapping)
-        self._insert_worker_audit_log(
+        return self.worker_service.claim_next_job(
             session,
-            enterprise_id=self._job_enterprise_id(session, job.id),
-            event_name="import_job.claimed",
-            resource_id=job.id,
-            summary={"worker_id": worker_id, "stage": job.stage},
+            worker_id=worker_id,
+            lock_seconds=lock_seconds,
+            now=now,
         )
-        return job
 
     def advance_claimed_job(
         self,
@@ -772,44 +243,11 @@ class ImportService:
         job_id: str,
         worker_id: str,
     ) -> ImportJob:
-        row = self._load_claimed_job(session, job_id=job_id, worker_id=worker_id)
-        if row["cancel_requested_at"] is not None:
-            return self._cancel_claimed_job(session, row=row, worker_id=worker_id)
-
-        self._apply_stage_effect(session, row=row)
-        next_stage = _next_stage(row["stage"])
-        if next_stage is None:
-            return self._succeed_claimed_job(session, row=row, worker_id=worker_id)
-        if next_stage == "finished":
-            return self._succeed_claimed_job(session, row=row, worker_id=worker_id)
-
-        updated = session.execute(
-            text(
-                """
-                UPDATE import_jobs
-                SET stage = :next_stage,
-                    updated_at = now()
-                WHERE id = CAST(:job_id AS uuid)
-                  AND locked_by = :worker_id
-                  AND status = 'running'
-                RETURNING
-                    id::text AS job_id, job_type, kb_id::text AS kb_id,
-                    document_id::text AS document_id,
-                    document_version_id::text AS document_version_id,
-                    status, stage, request_json, result_json, error_message
-                """
-            ),
-            {"job_id": job_id, "worker_id": worker_id, "next_stage": next_stage},
-        ).one()
-        job = _job_from_mapping(updated._mapping)
-        self._insert_worker_audit_log(
+        return self.worker_service.advance_claimed_job(
             session,
-            enterprise_id=row["enterprise_id"],
-            event_name="import_job.stage_advanced",
-            resource_id=job.id,
-            summary={"worker_id": worker_id, "stage": job.stage},
+            job_id=job_id,
+            worker_id=worker_id,
         )
-        return job
 
     def mark_claimed_job_failed(
         self,
@@ -823,73 +261,16 @@ class ImportService:
         error_details: dict[str, Any] | None = None,
         retry_delay_seconds: int = 60,
     ) -> ImportJob:
-        row = self._load_claimed_job(session, job_id=job_id, worker_id=worker_id)
-        should_retry = retryable and int(row["attempt_count"]) < int(row["max_attempts"])
-        status = "retrying" if should_retry else "failed"
-        next_retry_at = datetime.now(UTC) + timedelta(seconds=max(retry_delay_seconds, 1))
-        error_details_json = json.dumps(
-            {
-                "error_code": error_code,
-                "error_message": error_message[:500],
-                "retryable": retryable,
-                "details": error_details or {},
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        updated = session.execute(
-            text(
-                """
-                UPDATE import_jobs
-                SET status = :status,
-                    locked_by = NULL,
-                    locked_until = NULL,
-                    next_retry_at = :next_retry_at,
-                    error_code = :error_code,
-                    error_message = :error_message,
-                    result_json = jsonb_set(
-                        COALESCE(result_json, '{}'::jsonb),
-                        '{last_error}',
-                        CAST(:error_details_json AS jsonb),
-                        true
-                    ),
-                    finished_at = CASE WHEN :status = 'failed' THEN now() ELSE finished_at END,
-                    updated_at = now()
-                WHERE id = CAST(:job_id AS uuid)
-                  AND locked_by = :worker_id
-                  AND status = 'running'
-                RETURNING
-                    id::text AS job_id, job_type, kb_id::text AS kb_id,
-                    document_id::text AS document_id,
-                    document_version_id::text AS document_version_id,
-                    status, stage, request_json, result_json, error_message
-                """
-            ),
-            {
-                "job_id": job_id,
-                "worker_id": worker_id,
-                "status": status,
-                "next_retry_at": next_retry_at if should_retry else None,
-                "error_code": error_code,
-                "error_message": error_message[:500],
-                "error_details_json": error_details_json,
-            },
-        ).one()
-        job = _job_from_mapping(updated._mapping)
-        self._insert_worker_audit_log(
+        return self.worker_service.mark_claimed_job_failed(
             session,
-            enterprise_id=row["enterprise_id"],
-            event_name="import_job.retry_scheduled" if should_retry else "import_job.failed",
-            resource_id=job.id,
-            summary={
-                "worker_id": worker_id,
-                "status": status,
-                "error_code": error_code,
-                "retryable": retryable,
-                "details": error_details or {},
-            },
+            job_id=job_id,
+            worker_id=worker_id,
+            error_code=error_code,
+            error_message=error_message,
+            retryable=retryable,
+            error_details=error_details,
+            retry_delay_seconds=retry_delay_seconds,
         )
-        return job
 
     def heartbeat_claimed_job(
         self,
@@ -899,111 +280,41 @@ class ImportService:
         worker_id: str,
         lock_seconds: int = 60,
     ) -> None:
-        locked_until = datetime.now(UTC) + timedelta(seconds=max(lock_seconds, 1))
-        session.execute(
-            text(
-                """
-                UPDATE import_jobs
-                SET locked_until = :locked_until,
-                    updated_at = now()
-                WHERE id = CAST(:job_id AS uuid)
-                  AND locked_by = :worker_id
-                  AND status = 'running'
-                """
-            ),
-            {"job_id": job_id, "worker_id": worker_id, "locked_until": locked_until},
+        self.worker_service.heartbeat_claimed_job(
+            session,
+            job_id=job_id,
+            worker_id=worker_id,
+            lock_seconds=lock_seconds,
         )
 
     def _apply_stage_effect(self, session: Session, *, row: Any) -> None:
-        stage = row["stage"]
-        job_type = row["job_type"]
-        if job_type == "permission_refresh":
-            if stage == "index":
-                try:
-                    build_indexing_service(session).refresh_permission_payloads(
-                        session,
-                        request_json=_json_mapping(row["request_json"]),
-                    )
-                    return
-                except IndexingServiceError as exc:
-                    raise ImportServiceError(
-                        exc.error_code,
-                        exc.message,
-                        status_code=exc.status_code,
-                        retryable=exc.retryable,
-                        details=exc.details,
-                    ) from exc
-            if stage in {"publish", "cleanup"}:
-                return
-        if stage == "cleanup":
-            try:
-                build_indexing_service(session).cleanup_pending_delete_indexes(
-                    session,
-                    request_json=_json_mapping(row["request_json"]),
-                )
-                return
-            except IndexingServiceError as exc:
-                raise ImportServiceError(
-                    exc.error_code,
-                    exc.message,
-                    status_code=exc.status_code,
-                    retryable=exc.retryable,
-                    details=exc.details,
-                ) from exc
-        if stage == "validate":
-            self._mark_documents_indexing(session, request_json=_json_mapping(row["request_json"]))
-            return
-        if stage == "parse":
-            self._mark_versions_parsed(
-                session,
-                row=row,
-                request_json=_json_mapping(row["request_json"]),
-            )
-            return
-        if stage == "clean":
-            self._mark_versions_cleaned(
-                session,
-                row=row,
-                request_json=_json_mapping(row["request_json"]),
-            )
-            return
-        if stage == "chunk":
-            self._write_draft_chunks(
-                session,
-                row=row,
-                request_json=_json_mapping(row["request_json"]),
-            )
-            return
-        if stage not in {"embed", "index", "publish"}:
-            return
+        original = self.stage_runner.indexing_service_factory
+        self.stage_runner.indexing_service_factory = build_indexing_service
         try:
-            indexing_service = build_indexing_service(session)
-            if stage == "embed":
-                indexing_service.create_draft_indexes(
-                    session,
-                    request_json=_json_mapping(row["request_json"]),
-                )
-                return
-            if stage == "index":
-                indexing_service.write_draft_indexes(
-                    session,
-                    request_json=_json_mapping(row["request_json"]),
-                )
-                return
-            if stage == "publish":
-                indexing_service.publish_ready_indexes(
-                    session,
-                    request_json=_json_mapping(row["request_json"]),
-                )
-                return
-        except IndexingServiceError as exc:
-            raise ImportServiceError(
-                exc.error_code,
-                exc.message,
-                status_code=exc.status_code,
-                retryable=exc.retryable,
-                details=exc.details,
-            ) from exc
+            self.stage_runner.apply_stage_effect(session, row=row)
+        finally:
+            self.stage_runner.indexing_service_factory = original
+
+    def _create_retry_from_row(
+        self,
+        session: Session,
+        *,
+        row: Any,
+        enterprise_id: str,
+        actor_user_id: str,
+        retried_from_job_id: str,
+        risk_level: str = "medium",
+        batch_job_ids: list[str] | None = None,
+    ) -> ImportJob:
+        return self.retry_service.create_retry_from_row(
+            session,
+            row=row,
+            enterprise_id=enterprise_id,
+            actor_user_id=actor_user_id,
+            risk_level=risk_level,
+            retried_from_job_id=retried_from_job_id,
+            batch_job_ids=batch_job_ids,
+        )
 
     def _mark_documents_indexing(
         self,
@@ -1011,26 +322,7 @@ class ImportService:
         *,
         request_json: dict[str, Any],
     ) -> None:
-        document_ids = _document_ids_from_request(request_json, None)
-        if not document_ids:
-            raise ImportServiceError(
-                "IMPORT_DOCUMENTS_REQUIRED",
-                "import job request does not include document ids",
-                status_code=409,
-            )
-        session.execute(
-            text(
-                """
-                UPDATE documents
-                SET index_status = 'indexing',
-                    updated_at = now()
-                WHERE id = ANY(CAST(:document_ids AS uuid[]))
-                  AND index_status IN ('none', 'index_failed')
-                  AND lifecycle_status = 'draft'
-                """
-            ),
-            {"document_ids": document_ids},
-        )
+        self.stage_runner.mark_documents_indexing(session, request_json=request_json)
 
     def _mark_versions_parsed(
         self,
@@ -1039,51 +331,7 @@ class ImportService:
         row: Any,
         request_json: dict[str, Any],
     ) -> None:
-        items = _request_items(request_json)
-        for item in items:
-            document_id = _item_str(item, "document_id")
-            document_version_id = _item_str(item, "document_version_id")
-            if not document_id or not document_version_id:
-                continue
-            source = self._source_document_from_item(item)
-            parsed = self.parser.parse(source)
-            parsed_object_key = _derived_object_key(
-                "parsed",
-                enterprise_id=row["enterprise_id"],
-                document_id=document_id,
-                document_version_id=document_version_id,
-            )
-            self._put_text_object(
-                object_key=parsed_object_key,
-                text_content=parsed.text,
-                error_code="IMPORT_PARSED_OBJECT_STORE_FAILED",
-            )
-            item["parsed_object_key"] = parsed_object_key
-            item["parser_version"] = parsed.parser_version
-            session.execute(
-                text(
-                    """
-                    UPDATE document_versions
-                    SET status = CASE WHEN status = 'draft' THEN 'parsed' ELSE status END,
-                        parser_version = :parser_version,
-                        parsed_object_key = :parsed_object_key
-                    WHERE id = CAST(:document_version_id AS uuid)
-                      AND status IN ('draft', 'parsed')
-                    """
-                ),
-                {
-                    "document_version_id": document_version_id,
-                    "parser_version": parsed.parser_version,
-                    "parsed_object_key": parsed_object_key,
-                },
-            )
-        if not any(_item_str(item, "document_version_id") for item in items):
-            raise ImportServiceError(
-                "IMPORT_DOCUMENT_VERSIONS_REQUIRED",
-                "import job request does not include document version ids",
-                status_code=409,
-            )
-        self._update_job_request_json(session, job_id=row["job_id"], request_json=request_json)
+        self.stage_runner.mark_versions_parsed(session, row=row, request_json=request_json)
 
     def _mark_versions_cleaned(
         self,
@@ -1092,232 +340,32 @@ class ImportService:
         row: Any,
         request_json: dict[str, Any],
     ) -> None:
-        items = _request_items(request_json)
-        for item in items:
-            document_id = _item_str(item, "document_id")
-            document_version_id = _item_str(item, "document_version_id")
-            if not document_id or not document_version_id:
-                continue
-            parsed_text = self._item_stage_text(item, preferred_key="parsed_object_key")
-            cleaned = self.cleaner.clean(
-                ParsedDocument(
-                    text=parsed_text,
-                    parser_version=_item_str(item, "parser_version") or "stage-text",
-                    metadata=_item_metadata(item),
-                )
-            )
-            cleaned_object_key = _derived_object_key(
-                "cleaned",
-                enterprise_id=row["enterprise_id"],
-                document_id=document_id,
-                document_version_id=document_version_id,
-            )
-            self._put_text_object(
-                object_key=cleaned_object_key,
-                text_content=cleaned.text,
-                error_code="IMPORT_CLEANED_OBJECT_STORE_FAILED",
-            )
-            item["cleaned_object_key"] = cleaned_object_key
-            item["cleaner_version"] = cleaned.cleaner_version
-            session.execute(
-                text(
-                    """
-                    UPDATE document_versions
-                    SET cleaned_object_key = :cleaned_object_key
-                    WHERE id = CAST(:document_version_id AS uuid)
-                      AND status IN ('parsed', 'chunked')
-                    """
-                ),
-                {
-                    "document_version_id": document_version_id,
-                    "cleaned_object_key": cleaned_object_key,
-                },
-            )
-        if not any(_item_str(item, "document_version_id") for item in items):
-            raise ImportServiceError(
-                "IMPORT_DOCUMENT_VERSIONS_REQUIRED",
-                "import job request does not include document version ids",
-                status_code=409,
-            )
-        self._update_job_request_json(session, job_id=row["job_id"], request_json=request_json)
+        self.stage_runner.mark_versions_cleaned(session, row=row, request_json=request_json)
 
     def _write_draft_chunks(
         self,
         session: Session,
         *,
         row: Any,
-        request_json: dict[str, Any],
+        request_json: dict[str, Any] | None = None,
     ) -> None:
-        items = _request_items(request_json)
-        if not items:
-            raise ImportServiceError(
-                "IMPORT_ITEMS_REQUIRED",
-                "import job request does not include items for chunking",
-                status_code=409,
-            )
-        document_version_ids: list[str] = []
-        for item_index, item in enumerate(items):
-            document_id = _item_str(item, "document_id")
-            document_version_id = _item_str(item, "document_version_id")
-            if not document_id or not document_version_id:
-                continue
-            document_version_ids.append(document_version_id)
-            text_content = self._item_stage_text(item, preferred_key="cleaned_object_key")
-            cleaned = self.cleaner.clean(
-                ParsedDocument(
-                    text=text_content,
-                    parser_version=_item_str(item, "parser_version") or "stage-text",
-                    metadata=_item_metadata(item),
-                )
-            )
-            chunk_documents = self.chunker.chunk(cleaned, title=_item_title(item))
-            item["chunk_count"] = len(chunk_documents)
-            item["chunker_version"] = self.chunker.version
-            for chunk in chunk_documents:
-                chunk_text = chunk.text
-                preview = chunk_text[:500]
-                content_hash = stable_json_hash(
-                    {
-                        "document_id": document_id,
-                        "document_version_id": document_version_id,
-                        "ordinal": chunk.ordinal,
-                        "text": chunk_text,
-                    }
-                )
-                text_object_key = _chunk_text_object_key(
-                    enterprise_id=row["enterprise_id"],
-                    document_id=document_id,
-                    document_version_id=document_version_id,
-                    ordinal=chunk.ordinal,
-                )
-                self._put_text_object(
-                    object_key=text_object_key,
-                    text_content=chunk_text,
-                    error_code="IMPORT_CHUNK_OBJECT_STORE_FAILED",
-                )
-                session.execute(
-                    text(
-                        """
-                        INSERT INTO chunks(
-                            id, enterprise_id, kb_id, document_id, document_version_id,
-                            ordinal, text_object_key, text_preview, heading_path, source_offsets,
-                            content_hash, token_count, status, permission_snapshot_id
-                        )
-                        SELECT
-                            CAST(:id AS uuid), d.enterprise_id, d.kb_id, d.id, dv.id,
-                            :ordinal, :text_object_key, :text_preview, :heading_path,
-                            CAST(:source_offsets AS jsonb), :content_hash, :token_count,
-                            'draft', d.permission_snapshot_id
-                        FROM documents d
-                        JOIN document_versions dv
-                          ON dv.id = CAST(:document_version_id AS uuid)
-                         AND dv.document_id = d.id
-                        WHERE d.id = CAST(:document_id AS uuid)
-                        ON CONFLICT ON CONSTRAINT uq_chunks_version_ordinal DO NOTHING
-                        """
-                    ),
-                    {
-                        "id": str(uuid.uuid4()),
-                        "document_id": document_id,
-                        "document_version_id": document_version_id,
-                        "ordinal": chunk.ordinal,
-                        "text_object_key": text_object_key,
-                        "text_preview": preview,
-                        "heading_path": chunk.heading_path,
-                        "source_offsets": json.dumps(
-                            {
-                                "item_index": item_index,
-                                "chunk_ordinal": chunk.ordinal,
-                                **chunk.source_offsets,
-                            },
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        ),
-                        "content_hash": content_hash,
-                        "token_count": chunk.token_count,
-                    },
-                )
-        if document_version_ids:
-            session.execute(
-                text(
-                    """
-                    UPDATE document_versions
-                    SET status = 'chunked',
-                        chunker_version = :chunker_version
-                    WHERE id = ANY(CAST(:document_version_ids AS uuid[]))
-                      AND status IN ('parsed', 'chunked')
-                    """
-                ),
-                {
-                    "document_version_ids": document_version_ids,
-                    "chunker_version": self.chunker.version,
-                },
-            )
-        self._update_job_request_json(session, job_id=row["job_id"], request_json=request_json)
+        self.stage_runner.write_draft_chunks(session, row=row, request_json=request_json)
 
-    def _source_document_from_item(self, item: dict[str, Any]) -> SourceDocument:
-        object_key = _item_str(item, "object_key")
-        content = None
-        if object_key and _looks_like_object_key(object_key):
-            content = self._get_object(
-                object_key=object_key,
-                error_code="IMPORT_OBJECT_READ_FAILED",
-            )
-        return SourceDocument(
-            title=_item_title(item),
-            url=_item_str(item, "url"),
-            object_key=object_key,
-            content=content,
-            content_type=_item_content_type(item),
-            metadata=_item_metadata(item),
-        )
+    def _source_document_from_item(self, item: dict[str, Any]) -> Any:
+        return self.stage_runner.source_document_from_item(item)
 
     def _item_stage_text(self, item: dict[str, Any], *, preferred_key: str) -> str:
-        object_key = _item_str(item, preferred_key)
-        if object_key:
-            content = self._get_object(
-                object_key=object_key,
-                error_code="IMPORT_STAGE_OBJECT_READ_FAILED",
-            )
-            try:
-                return content.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise ImportServiceError(
-                    "IMPORT_STAGE_OBJECT_ENCODING_UNSUPPORTED",
-                    "derived import object is not valid UTF-8 text",
-                    status_code=422,
-                    retryable=False,
-                    details={"object_key": object_key},
-                ) from exc
-        return _item_text_content(item)
+        return self.stage_runner.item_stage_text(item, preferred_key=preferred_key)
 
     def _get_object(self, *, object_key: str, error_code: str) -> bytes:
-        try:
-            return self.object_storage.get_object(object_key=object_key)
-        except Exception as exc:
-            raise ImportServiceError(
-                error_code,
-                "import object cannot be read",
-                status_code=503,
-                retryable=True,
-                details={"object_key": object_key},
-            ) from exc
+        return self.stage_runner.get_object(object_key=object_key, error_code=error_code)
 
     def _put_text_object(self, *, object_key: str, text_content: str, error_code: str) -> None:
-        try:
-            self.object_storage.put_object(
-                object_key=object_key,
-                content=text_content.encode("utf-8"),
-                content_type="text/plain; charset=utf-8",
-            )
-        except Exception as exc:
-            raise ImportServiceError(
-                error_code,
-                "derived import object cannot be stored",
-                status_code=503,
-                retryable=True,
-                details={"object_key": object_key},
-            ) from exc
+        self.stage_runner.put_text_object(
+            object_key=object_key,
+            text_content=text_content,
+            error_code=error_code,
+        )
 
     def _update_job_request_json(
         self,
@@ -1326,215 +374,11 @@ class ImportService:
         job_id: str,
         request_json: dict[str, Any],
     ) -> None:
-        session.execute(
-            text(
-                """
-                UPDATE import_jobs
-                SET request_json = CAST(:request_json AS jsonb),
-                    updated_at = now()
-                WHERE id = CAST(:job_id AS uuid)
-                """
-            ),
-            {
-                "job_id": job_id,
-                "request_json": json.dumps(request_json, ensure_ascii=False, sort_keys=True),
-            },
+        self.stage_runner.update_job_request_json(
+            session,
+            job_id=job_id,
+            request_json=request_json,
         )
-
-    def _load_knowledge_base(
-        self,
-        session: Session,
-        *,
-        enterprise_id: str,
-        kb_id: str,
-    ) -> dict[str, Any]:
-        row = session.execute(
-            text(
-                """
-                SELECT
-                    id::text AS kb_id,
-                    owner_department_id::text AS owner_department_id,
-                    kb_visibility,
-                    default_document_visibility,
-                    default_document_owner_department_id::text
-                        AS default_document_owner_department_id,
-                    COALESCE(
-                        (
-                            SELECT jsonb_agg(
-                                jsonb_build_object(
-                                    'subject_type', kba.subject_type,
-                                    'subject_id', kba.subject_id::text,
-                                    'permission', kba.permission
-                                )
-                                ORDER BY kba.subject_type, kba.subject_id::text, kba.permission
-                            )
-                            FROM knowledge_base_accesses kba
-                            WHERE kba.enterprise_id = knowledge_bases.enterprise_id
-                              AND kba.kb_id = knowledge_bases.id
-                              AND kba.status = 'active'
-                        ),
-                        '[]'::jsonb
-                    ) AS access_rules,
-                    status,
-                    policy_version
-                FROM knowledge_bases
-                WHERE id = CAST(:kb_id AS uuid)
-                  AND enterprise_id = CAST(:enterprise_id AS uuid)
-                  AND deleted_at IS NULL
-                """
-            ),
-            {"enterprise_id": enterprise_id, "kb_id": kb_id},
-        ).one_or_none()
-        if row is None:
-            raise ImportServiceError(
-                "IMPORT_KB_NOT_FOUND",
-                "knowledge base was not found",
-                status_code=404,
-                details={"kb_id": kb_id},
-            )
-        return dict(row._mapping)
-
-    def _resolve_owner_department_id(
-        self,
-        session: Session,
-        *,
-        enterprise_id: str,
-        requested_owner_department_id: str | None,
-        default_document_owner_department_id: str,
-        knowledge_base: dict[str, Any],
-        actor_context: ImportActorContext | None,
-    ) -> str:
-        actor_department_id = (
-            actor_context.department_ids[0]
-            if actor_context and actor_context.department_ids
-            else None
-        )
-        owner_department_id = (
-            requested_owner_department_id
-            or actor_department_id
-            or default_document_owner_department_id
-        )
-        row = session.execute(
-            text(
-                """
-                SELECT id::text AS department_id, status
-                FROM departments
-                WHERE id = CAST(:department_id AS uuid)
-                  AND enterprise_id = CAST(:enterprise_id AS uuid)
-                  AND deleted_at IS NULL
-                """
-            ),
-            {"enterprise_id": enterprise_id, "department_id": owner_department_id},
-        ).one_or_none()
-        if row is None:
-            raise ImportServiceError(
-                "IMPORT_OWNER_DEPARTMENT_NOT_FOUND",
-                "owner department was not found",
-                status_code=404,
-                details={"owner_department_id": owner_department_id},
-            )
-        if row._mapping["status"] != "active":
-            raise ImportServiceError(
-                "IMPORT_OWNER_DEPARTMENT_UNAVAILABLE",
-                "owner department is not active",
-                status_code=409,
-                details={
-                    "owner_department_id": owner_department_id,
-                    "status": row._mapping["status"],
-                },
-            )
-        if (
-            actor_context
-            and owner_department_id not in actor_context.department_ids
-            and not actor_context.can_import_all_knowledge_bases
-            and not _actor_can_import_for_default_document_owner(
-                actor_context,
-                knowledge_base=knowledge_base,
-                owner_department_id=owner_department_id,
-                default_document_owner_department_id=default_document_owner_department_id,
-            )
-        ):
-            raise ImportServiceError(
-                "IMPORT_OWNER_DEPARTMENT_DENIED",
-                "current user cannot import for the requested owner department",
-                status_code=403,
-                details={"owner_department_id": owner_department_id},
-            )
-        return owner_department_id
-
-    def _validate_visibility(self, *, owner_department_id: str, visibility: str) -> None:
-        try:
-            PermissionService().validate_visibility_policy(
-                {"owner_department_id": owner_department_id, "visibility": visibility}
-            )
-        except PermissionServiceError as exc:
-            raise ImportServiceError(
-                exc.error_code,
-                exc.message,
-                status_code=exc.status_code,
-                retryable=exc.retryable,
-                details=exc.details,
-            ) from exc
-
-    def _ensure_document_permission_within_parent_knowledge_base(
-        self,
-        *,
-        knowledge_base: dict[str, Any],
-        visibility: str,
-        owner_department_id: str,
-    ) -> None:
-        if visibility == "enterprise":
-            return
-        kb_id = str(knowledge_base.get("kb_id") or knowledge_base.get("id") or "")
-        if not _department_can_query_knowledge_base(knowledge_base, owner_department_id):
-            raise ImportServiceError(
-                "IMPORT_DOCUMENT_PERMISSION_OUTSIDE_KB_SCOPE",
-                "document owner department must be able to access parent knowledge base",
-                status_code=409,
-                details={
-                    "kb_id": kb_id,
-                    "kb_visibility": knowledge_base["kb_visibility"],
-                    "kb_owner_department_id": knowledge_base["owner_department_id"],
-                    "document_visibility": visibility,
-                    "document_owner_department_id": owner_department_id,
-                },
-            )
-
-    def _ensure_folder_available(
-        self,
-        session: Session,
-        *,
-        enterprise_id: str,
-        kb_id: str,
-        folder_id: str,
-    ) -> None:
-        row = session.execute(
-            text(
-                """
-                SELECT id::text AS folder_id, status
-                FROM folders
-                WHERE id = CAST(:folder_id AS uuid)
-                  AND kb_id = CAST(:kb_id AS uuid)
-                  AND enterprise_id = CAST(:enterprise_id AS uuid)
-                  AND deleted_at IS NULL
-                """
-            ),
-            {"enterprise_id": enterprise_id, "kb_id": kb_id, "folder_id": folder_id},
-        ).one_or_none()
-        if row is None:
-            raise ImportServiceError(
-                "IMPORT_FOLDER_NOT_FOUND",
-                "folder was not found",
-                status_code=404,
-                details={"folder_id": folder_id},
-            )
-        if row._mapping["status"] != "active":
-            raise ImportServiceError(
-                "IMPORT_FOLDER_UNAVAILABLE",
-                "folder is not active",
-                status_code=409,
-                details={"folder_id": folder_id, "status": row._mapping["status"]},
-            )
 
     def _load_job_by_idempotency(
         self,
@@ -1544,58 +388,15 @@ class ImportService:
         actor_user_id: str,
         idempotency_key: str,
     ) -> ImportJob | None:
-        row = session.execute(
-            text(
-                """
-                SELECT
-                    id::text AS job_id,
-                    job_type,
-                    kb_id::text AS kb_id,
-                    document_id::text AS document_id,
-                    document_version_id::text AS document_version_id,
-                    status,
-                    stage,
-                    request_json,
-                    result_json,
-                    error_message
-                FROM import_jobs
-                WHERE enterprise_id = CAST(:enterprise_id AS uuid)
-                  AND created_by = CAST(:actor_user_id AS uuid)
-                  AND idempotency_key = :idempotency_key
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ),
-            {
-                "enterprise_id": enterprise_id,
-                "actor_user_id": actor_user_id,
-                "idempotency_key": idempotency_key,
-            },
-        ).one_or_none()
-        return _job_from_mapping(row._mapping) if row else None
+        return self.repository.load_job_by_idempotency(
+            session,
+            enterprise_id=enterprise_id,
+            actor_user_id=actor_user_id,
+            idempotency_key=idempotency_key,
+        )
 
     def _load_permission_version(self, session: Session, enterprise_id: str) -> int:
-        row = session.execute(
-            text(
-                """
-                SELECT permission_version
-                FROM enterprises
-                WHERE id = CAST(:enterprise_id AS uuid)
-                  AND status = 'active'
-                LIMIT 1
-                """
-            ),
-            {"enterprise_id": enterprise_id},
-        ).one_or_none()
-        if row is None:
-            raise ImportServiceError(
-                "IMPORT_ENTERPRISE_UNAVAILABLE",
-                "enterprise is not active",
-                status_code=409,
-                details={"enterprise_id": enterprise_id},
-            )
-        version = int(row._mapping["permission_version"])
-        return version
+        return self.repository.load_permission_version(session, enterprise_id)
 
     def _replace_resource_policy(
         self,
@@ -1609,36 +410,16 @@ class ImportService:
         policy_version: int,
         actor_user_id: str,
     ) -> str:
-        policy_id = str(uuid.uuid4())
-        policy = {"owner_department_id": owner_department_id, "visibility": visibility}
-        policy_hash = stable_json_hash(policy)
-        session.execute(
-            text(
-                """
-                INSERT INTO resource_policies(
-                    id, enterprise_id, resource_type, resource_id, version,
-                    policy_json, policy_hash, status, created_by
-                )
-                VALUES (
-                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :resource_type,
-                    CAST(:resource_id AS uuid), :version,
-                    CAST(:policy_json AS jsonb), :policy_hash, 'active',
-                    CAST(:actor_user_id AS uuid)
-                )
-                """
-            ),
-            {
-                "id": policy_id,
-                "enterprise_id": enterprise_id,
-                "resource_type": resource_type,
-                "resource_id": resource_id,
-                "version": policy_version,
-                "policy_json": json.dumps(policy, ensure_ascii=False, sort_keys=True),
-                "policy_hash": policy_hash,
-                "actor_user_id": actor_user_id,
-            },
+        return self.repository.replace_resource_policy(
+            session,
+            enterprise_id=enterprise_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            owner_department_id=owner_department_id,
+            visibility=visibility,
+            policy_version=policy_version,
+            actor_user_id=actor_user_id,
         )
-        return policy_id
 
     def _insert_permission_snapshot(
         self,
@@ -1653,131 +434,16 @@ class ImportService:
         policy_version: int,
         policy_id: str,
     ) -> dict[str, str]:
-        snapshot_id = str(uuid.uuid4())
-        snapshot = PermissionService().build_permission_snapshot_payload(
+        return self.repository.insert_permission_snapshot(
+            session,
+            enterprise_id=enterprise_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
             owner_department_id=owner_department_id,
             visibility=visibility,
             permission_version=permission_version,
             policy_version=policy_version,
-        )
-        session.execute(
-            text(
-                """
-                INSERT INTO permission_snapshots(
-                    id, enterprise_id, resource_type, resource_id, permission_version,
-                    policy_id, policy_version, payload_json, payload_hash,
-                    owner_department_id, visibility
-                )
-                VALUES (
-                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :resource_type,
-                    CAST(:resource_id AS uuid), :permission_version,
-                    CAST(:policy_id AS uuid), :policy_version,
-                    CAST(:payload_json AS jsonb), :payload_hash,
-                    CAST(:owner_department_id AS uuid), :visibility
-                )
-                """
-            ),
-            {
-                "id": snapshot_id,
-                "enterprise_id": enterprise_id,
-                "resource_type": resource_type,
-                "resource_id": resource_id,
-                "permission_version": permission_version,
-                "policy_id": policy_id,
-                "policy_version": policy_version,
-                "payload_json": json.dumps(snapshot["payload"], ensure_ascii=False, sort_keys=True),
-                "payload_hash": snapshot["payload_hash"],
-                "owner_department_id": owner_department_id,
-                "visibility": visibility,
-            },
-        )
-        return {"snapshot_id": snapshot_id, "payload_hash": snapshot["payload_hash"]}
-
-    def _insert_document(
-        self,
-        session: Session,
-        *,
-        enterprise_id: str,
-        kb_id: str,
-        folder_id: str | None,
-        document_id: str,
-        title: str,
-        source_type: str,
-        source_uri: str | None,
-        owner_department_id: str,
-        visibility: str,
-        content_hash: str,
-        permission_snapshot_id: str,
-        tags: list[str],
-        actor_user_id: str,
-    ) -> None:
-        session.execute(
-            text(
-                """
-                INSERT INTO documents(
-                    id, enterprise_id, kb_id, folder_id, title, source_type, source_uri,
-                    lifecycle_status, index_status, owner_department_id, visibility,
-                    content_hash, permission_snapshot_id, tags, created_by, updated_by
-                )
-                VALUES (
-                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid), CAST(:kb_id AS uuid),
-                    CAST(:folder_id AS uuid), :title, :source_type, :source_uri,
-                    'draft', 'none', CAST(:owner_department_id AS uuid), :visibility,
-                    :content_hash, CAST(:permission_snapshot_id AS uuid), :tags,
-                    CAST(:actor_user_id AS uuid), CAST(:actor_user_id AS uuid)
-                )
-                """
-            ),
-            {
-                "id": document_id,
-                "enterprise_id": enterprise_id,
-                "kb_id": kb_id,
-                "folder_id": folder_id,
-                "title": title,
-                "source_type": source_type,
-                "source_uri": source_uri,
-                "owner_department_id": owner_department_id,
-                "visibility": visibility,
-                "content_hash": content_hash,
-                "permission_snapshot_id": permission_snapshot_id,
-                "tags": tags,
-                "actor_user_id": actor_user_id,
-            },
-        )
-
-    def _insert_document_version(
-        self,
-        session: Session,
-        *,
-        enterprise_id: str,
-        document_id: str,
-        document_version_id: str,
-        object_key: str | None,
-        content_hash: str,
-        actor_user_id: str,
-    ) -> None:
-        session.execute(
-            text(
-                """
-                INSERT INTO document_versions(
-                    id, enterprise_id, document_id, version_no, object_key,
-                    content_hash, status, created_by
-                )
-                VALUES (
-                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid),
-                    CAST(:document_id AS uuid), 1, :object_key,
-                    :content_hash, 'draft', CAST(:actor_user_id AS uuid)
-                )
-                """
-            ),
-            {
-                "id": document_version_id,
-                "enterprise_id": enterprise_id,
-                "document_id": document_id,
-                "object_key": object_key,
-                "content_hash": content_hash,
-                "actor_user_id": actor_user_id,
-            },
+            policy_id=policy_id,
         )
 
     def _insert_import_job(
@@ -1795,34 +461,18 @@ class ImportService:
         actor_user_id: str,
         initial_stage: str = "validate",
     ) -> None:
-        session.execute(
-            text(
-                """
-                INSERT INTO import_jobs(
-                    id, enterprise_id, job_type, kb_id, document_id, document_version_id,
-                    status, stage, request_json, idempotency_key, max_attempts, created_by
-                )
-                VALUES (
-                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :job_type,
-                    CAST(:kb_id AS uuid), CAST(:document_id AS uuid),
-                    CAST(:document_version_id AS uuid), 'queued', :initial_stage,
-                    CAST(:request_json AS jsonb), :idempotency_key, 3,
-                    CAST(:actor_user_id AS uuid)
-                )
-                """
-            ),
-            {
-                "id": job_id,
-                "enterprise_id": enterprise_id,
-                "job_type": job_type,
-                "kb_id": kb_id,
-                "document_id": document_id,
-                "document_version_id": document_version_id,
-                "request_json": json.dumps(request_json, ensure_ascii=False, sort_keys=True),
-                "idempotency_key": idempotency_key,
-                "actor_user_id": actor_user_id,
-                "initial_stage": initial_stage,
-            },
+        self.repository.insert_import_job(
+            session,
+            enterprise_id=enterprise_id,
+            job_id=job_id,
+            job_type=job_type,
+            kb_id=kb_id,
+            document_id=document_id,
+            document_version_id=document_version_id,
+            request_json=request_json,
+            idempotency_key=idempotency_key,
+            actor_user_id=actor_user_id,
+            initial_stage=initial_stage,
         )
 
     def _load_import_job_row(
@@ -1834,159 +484,16 @@ class ImportService:
         actor_user_id: str | None,
         owner_only: bool,
     ) -> Any:
-        conditions = [
-            "id = CAST(:job_id AS uuid)",
-            "enterprise_id = CAST(:enterprise_id AS uuid)",
-        ]
-        params: dict[str, Any] = {"job_id": job_id, "enterprise_id": enterprise_id}
-        if owner_only:
-            conditions.append("created_by = CAST(:actor_user_id AS uuid)")
-            params["actor_user_id"] = actor_user_id
-        where_sql = " AND ".join(conditions)
-        row = session.execute(
-            text(
-                f"""
-                SELECT
-                    id::text AS job_id,
-                    job_type,
-                    kb_id::text AS kb_id,
-                    document_id::text AS document_id,
-                    document_version_id::text AS document_version_id,
-                    status,
-                    stage,
-                    request_json,
-                    result_json,
-                    error_message
-                FROM import_jobs
-                WHERE {where_sql}
-                """
-            ),
-            params,
-        ).one_or_none()
-        if row is None:
-            raise ImportServiceError(
-                "IMPORT_JOB_NOT_FOUND",
-                "import job was not found",
-                status_code=404,
-                details={"job_id": job_id},
-            )
-        return row._mapping
-
-    def _load_claimed_job(self, session: Session, *, job_id: str, worker_id: str) -> Any:
-        row = session.execute(
-            text(
-                """
-                SELECT
-                    id::text AS job_id,
-                    enterprise_id::text AS enterprise_id,
-                    job_type,
-                    kb_id::text AS kb_id,
-                    document_id::text AS document_id,
-                    document_version_id::text AS document_version_id,
-                    status,
-                    stage,
-                    request_json,
-                    result_json,
-                    error_message,
-                    attempt_count,
-                    max_attempts,
-                    cancel_requested_at
-                FROM import_jobs
-                WHERE id = CAST(:job_id AS uuid)
-                  AND locked_by = :worker_id
-                  AND status = 'running'
-                  AND locked_until > now()
-                """
-            ),
-            {"job_id": job_id, "worker_id": worker_id},
-        ).one_or_none()
-        if row is None:
-            raise ImportServiceError(
-                "IMPORT_JOB_LOCK_REQUIRED",
-                "worker does not hold an active lock for the import job",
-                status_code=409,
-                details={"job_id": job_id, "worker_id": worker_id},
-            )
-        return row._mapping
-
-    def _cancel_claimed_job(self, session: Session, *, row: Any, worker_id: str) -> ImportJob:
-        updated = session.execute(
-            text(
-                """
-                UPDATE import_jobs
-                SET status = 'cancelled',
-                    locked_by = NULL,
-                    locked_until = NULL,
-                    finished_at = now(),
-                    updated_at = now()
-                WHERE id = CAST(:job_id AS uuid)
-                  AND locked_by = :worker_id
-                  AND status = 'running'
-                RETURNING
-                    id::text AS job_id, job_type, kb_id::text AS kb_id,
-                    document_id::text AS document_id,
-                    document_version_id::text AS document_version_id,
-                    status, stage, request_json, result_json, error_message
-                """
-            ),
-            {"job_id": row["job_id"], "worker_id": worker_id},
-        ).one()
-        job = _job_from_mapping(updated._mapping)
-        self._insert_worker_audit_log(
+        return self.repository.load_import_job_row(
             session,
-            enterprise_id=row["enterprise_id"],
-            event_name="import_job.cancelled",
-            resource_id=job.id,
-            summary={"worker_id": worker_id, "stage": job.stage},
+            job_id=job_id,
+            enterprise_id=enterprise_id,
+            actor_user_id=actor_user_id,
+            owner_only=owner_only,
         )
-        return job
-
-    def _succeed_claimed_job(self, session: Session, *, row: Any, worker_id: str) -> ImportJob:
-        updated = session.execute(
-            text(
-                """
-                UPDATE import_jobs
-                SET status = 'success',
-                    stage = 'finished',
-                    result_json = jsonb_build_object('completed_at', now()),
-                    locked_by = NULL,
-                    locked_until = NULL,
-                    finished_at = now(),
-                    updated_at = now()
-                WHERE id = CAST(:job_id AS uuid)
-                  AND locked_by = :worker_id
-                  AND status = 'running'
-                RETURNING
-                    id::text AS job_id, job_type, kb_id::text AS kb_id,
-                    document_id::text AS document_id,
-                    document_version_id::text AS document_version_id,
-                    status, stage, request_json, result_json, error_message
-                """
-            ),
-            {"job_id": row["job_id"], "worker_id": worker_id},
-        ).one()
-        job = _job_from_mapping(updated._mapping)
-        self._insert_worker_audit_log(
-            session,
-            enterprise_id=row["enterprise_id"],
-            event_name="import_job.succeeded",
-            resource_id=job.id,
-            summary={"worker_id": worker_id},
-        )
-        return job
 
     def _job_enterprise_id(self, session: Session, job_id: str) -> str:
-        row = session.execute(
-            text(
-                """
-                SELECT enterprise_id::text AS enterprise_id
-                FROM import_jobs
-                WHERE id = CAST(:job_id AS uuid)
-                """
-            ),
-            {"job_id": job_id},
-        ).one()
-        return str(row._mapping["enterprise_id"])
+        return self.worker_service.job_enterprise_id(session, job_id)
 
     def _insert_audit_log(
         self,
@@ -2003,36 +510,18 @@ class ImportService:
         summary: dict[str, Any],
         error_code: str | None = None,
     ) -> None:
-        request_context = get_request_context()
-        session.execute(
-            text(
-                """
-                INSERT INTO audit_logs(
-                    id, enterprise_id, request_id, trace_id, event_name, actor_type, actor_id,
-                    resource_type, resource_id, action, result, risk_level, summary_json, error_code
-                )
-                VALUES (
-                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :request_id, :trace_id,
-                    :event_name, 'user', :actor_id, :resource_type, :resource_id,
-                    :action, :result, :risk_level, CAST(:summary_json AS jsonb), :error_code
-                )
-                """
-            ),
-            {
-                "id": str(uuid.uuid4()),
-                "enterprise_id": enterprise_id,
-                "request_id": request_context.request_id if request_context else None,
-                "trace_id": request_context.trace_id if request_context else None,
-                "event_name": event_name,
-                "actor_id": actor_id,
-                "resource_type": resource_type,
-                "resource_id": resource_id,
-                "action": action,
-                "result": result,
-                "risk_level": risk_level,
-                "summary_json": json.dumps(summary, ensure_ascii=False, sort_keys=True),
-                "error_code": error_code,
-            },
+        self.audit_writer.write_user_event(
+            session,
+            enterprise_id=enterprise_id,
+            event_name=event_name,
+            actor_id=actor_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            action=action,
+            result=result,
+            risk_level=risk_level,
+            summary=summary,
+            error_code=error_code,
         )
 
     def _insert_worker_audit_log(
@@ -2044,464 +533,22 @@ class ImportService:
         resource_id: str,
         summary: dict[str, Any],
     ) -> None:
-        request_context = get_request_context()
-        session.execute(
-            text(
-                """
-                INSERT INTO audit_logs(
-                    id, enterprise_id, request_id, trace_id, event_name, actor_type, actor_id,
-                    resource_type, resource_id, action, result, risk_level, summary_json
-                )
-                VALUES (
-                    CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :request_id, :trace_id,
-                    :event_name, 'system', :actor_id, 'import_job', :resource_id,
-                    'worker_update', 'success', 'low', CAST(:summary_json AS jsonb)
-                )
-                """
-            ),
-            {
-                "id": str(uuid.uuid4()),
-                "enterprise_id": enterprise_id,
-                "request_id": request_context.request_id if request_context else None,
-                "trace_id": request_context.trace_id if request_context else None,
-                "event_name": event_name,
-                "actor_id": str(summary.get("worker_id", "worker")),
-                "resource_id": resource_id,
-                "summary_json": json.dumps(summary, ensure_ascii=False, sort_keys=True),
-            },
+        self.worker_service.insert_worker_audit_log(
+            session,
+            enterprise_id=enterprise_id,
+            event_name=event_name,
+            resource_id=resource_id,
+            summary=summary,
         )
 
 
-def _normalize_items(*, job_type: str, items: list[DocumentImportItem]) -> list[DocumentImportItem]:
-    if job_type not in {"upload", "url", "metadata_batch"}:
-        raise ImportServiceError(
-            "IMPORT_JOB_TYPE_INVALID",
-            "document import job_type must be upload, url or metadata_batch",
-            status_code=400,
-            details={"job_type": job_type},
-        )
-    if not items:
-        raise ImportServiceError(
-            "IMPORT_ITEMS_REQUIRED",
-            "document import requires at least one item",
-            status_code=400,
-        )
-    normalized: list[DocumentImportItem] = []
-    for index, item in enumerate(items):
-        title = item.title.strip()
-        if not title:
-            raise ImportServiceError(
-                "IMPORT_ITEM_TITLE_REQUIRED",
-                "document import item title is required",
-                status_code=400,
-                details={"item_index": index},
-            )
-        if job_type == "url" and not item.url:
-            raise ImportServiceError(
-                "IMPORT_ITEM_URL_REQUIRED",
-                "url import item requires url",
-                status_code=400,
-                details={"item_index": index},
-            )
-        if job_type == "upload" and item.object_content is None:
-            raise ImportServiceError(
-                "IMPORT_OBJECT_CONTENT_REQUIRED",
-                "upload import item requires raw object content",
-                status_code=400,
-                details={"item_index": index},
-            )
-        normalized.append(
-            DocumentImportItem(
-                title=title,
-                url=item.url.strip() if item.url else None,
-                object_content=item.object_content,
-                content_type=item.content_type,
-                metadata=item.metadata,
-            )
-        )
-    return normalized
-
-
-def _require_scope(actor_context: ImportActorContext | None, required_scope: str) -> None:
-    if actor_context is None or not _has_scope(actor_context.scopes, required_scope):
-        raise ImportServiceError(
-            "IMPORT_SCOPE_REQUIRED",
-            "current user does not include required scope",
-            status_code=403,
-            details={"required_scope": required_scope},
-        )
-
-
-def _ensure_actor_can_import_to_kb(
-    actor_context: ImportActorContext | None,
-    *,
-    knowledge_base: dict[str, Any],
-) -> None:
-    if actor_context is None:
-        return
-    if _actor_can_import_to_kb(actor_context, knowledge_base=knowledge_base):
-        return
-    raise ImportServiceError(
-        "IMPORT_KB_DENIED",
-        "current user cannot import to the requested knowledge base",
-        status_code=403,
-        details={"kb_id": str(knowledge_base["kb_id"])},
-    )
-
-
-def _actor_can_import_to_kb(
-    actor_context: ImportActorContext,
-    *,
-    knowledge_base: dict[str, Any],
-) -> bool:
-    if actor_context.can_import_all_knowledge_bases:
-        return True
-    kb_id = str(knowledge_base["kb_id"])
-    if kb_id in actor_context.knowledge_base_ids:
-        return True
-    if _actor_has_kb_manage_access(actor_context, knowledge_base):
-        return True
-    return False
-
-
-def _actor_can_import_for_default_document_owner(
-    actor_context: ImportActorContext,
-    *,
-    knowledge_base: dict[str, Any],
-    owner_department_id: str,
-    default_document_owner_department_id: str,
-) -> bool:
-    return (
-        owner_department_id == default_document_owner_department_id
-        and _actor_can_import_to_kb(actor_context, knowledge_base=knowledge_base)
-    )
-
-
-def _department_can_query_knowledge_base(
-    knowledge_base: dict[str, Any],
-    department_id: str,
-) -> bool:
-    if knowledge_base["kb_visibility"] == "enterprise":
-        return True
-    return any(
-        rule.get("subject_type") == "department"
-        and rule.get("subject_id") == department_id
-        and rule.get("permission") in {"query", "manage"}
-        for rule in _kb_access_rule_dicts(knowledge_base)
-    )
-
-
-def _actor_has_kb_manage_access(
-    actor_context: ImportActorContext,
-    knowledge_base: dict[str, Any],
-) -> bool:
-    for rule in _kb_access_rule_dicts(knowledge_base):
-        if rule.get("permission") != "manage":
-            continue
-        subject_type = rule.get("subject_type")
-        subject_id = rule.get("subject_id")
-        if subject_type == "user" and subject_id == actor_context.user_id:
-            return True
-        if subject_type == "department" and subject_id in actor_context.department_ids:
-            return True
-        if subject_type == "role" and subject_id in actor_context.role_ids:
-            return True
-    return False
-
-
-def _kb_access_rule_dicts(knowledge_base: dict[str, Any]) -> list[dict[str, str]]:
-    value = knowledge_base.get("access_rules") or []
-    items = json.loads(value) if isinstance(value, str) else value
-    if not isinstance(items, list):
-        return []
-    rules: list[dict[str, str]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        rules.append(
-            {
-                "subject_type": str(item.get("subject_type") or ""),
-                "subject_id": str(item.get("subject_id") or ""),
-                "permission": str(item.get("permission") or ""),
-            }
-        )
-    return rules
-
-
-def _has_scope(scopes: tuple[str, ...], required_scope: str) -> bool:
-    if "*" in scopes or required_scope in scopes:
-        return True
-    prefix = required_scope.split(":", maxsplit=1)[0]
-    return f"{prefix}:*" in scopes
-
-
-def _metadata_tags(metadata: dict[str, Any]) -> list[str]:
-    value = metadata.get("tags")
-    if not isinstance(value, list):
-        return []
-    tags: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        tag = item.strip()
-        if tag and tag not in seen:
-            seen.add(tag)
-            tags.append(tag)
-    return tags
-
-
-def _metadata_source_uri(metadata: dict[str, Any]) -> str | None:
-    filename = metadata.get("filename")
-    if isinstance(filename, str) and filename:
-        return f"upload://{filename}"
-    source_uri = metadata.get("source_uri")
-    return source_uri if isinstance(source_uri, str) and source_uri else None
-
-
-def _metadata_filename(metadata: dict[str, Any]) -> str | None:
-    filename = metadata.get("filename")
-    return filename if isinstance(filename, str) and filename else None
-
-
-def _metadata_text(metadata: dict[str, Any]) -> str | None:
-    for key in ("content", "text", "markdown"):
-        value = metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            return value
-    return None
-
-
-def _request_items(request_json: dict[str, Any]) -> list[dict[str, Any]]:
-    items = request_json.get("items")
-    if not isinstance(items, list):
-        return []
-    return [item for item in items if isinstance(item, dict)]
-
-
-def _item_str(item: dict[str, Any], key: str) -> str | None:
-    value = item.get(key)
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-
-def _item_metadata(item: dict[str, Any]) -> dict[str, Any]:
-    metadata = item.get("metadata")
-    return metadata if isinstance(metadata, dict) else {}
-
-
-def _item_title(item: dict[str, Any]) -> str:
-    title = _item_str(item, "title")
-    return title or "untitled document"
-
-
-def _item_content_type(item: dict[str, Any]) -> str | None:
-    content_type = _item_str(item, "content_type")
-    if content_type:
-        return content_type
-    metadata = _item_metadata(item)
-    value = metadata.get("content_type")
-    return value if isinstance(value, str) and value.strip() else None
-
-
-def _looks_like_object_key(object_key: str) -> bool:
-    lowered = object_key.lower()
-    return not lowered.startswith(("http://", "https://"))
-
-
-def _item_text_content(item: dict[str, Any]) -> str:
-    metadata = item.get("metadata")
-    metadata_text = _metadata_text(metadata if isinstance(metadata, dict) else {})
-    if metadata_text:
-        return metadata_text
-    title = item.get("title")
-    url = item.get("url")
-    parts = [value for value in (title, url) if isinstance(value, str) and value.strip()]
-    return "\n".join(parts) or "empty document"
-
-
-def _build_upload_object_key(
-    *,
-    enterprise_id: str,
-    kb_id: str,
-    document_id: str,
-    filename: str,
-) -> str:
-    safe_name = filename.strip().replace("/", "_") or "document.txt"
-    return f"uploads/{enterprise_id}/{kb_id}/{document_id}/{safe_name}"
-
-
-def _derived_object_key(
-    kind: str,
-    *,
-    enterprise_id: str,
-    document_id: str,
-    document_version_id: str,
-) -> str:
-    return f"derived/{enterprise_id}/{document_id}/{document_version_id}/{kind}.txt"
-
-
-def _chunk_text_object_key(
-    *,
-    enterprise_id: str,
-    document_id: str,
-    document_version_id: str,
-    ordinal: int,
-) -> str:
-    return f"chunks/{enterprise_id}/{document_id}/{document_version_id}/{ordinal:06d}.txt"
-
-
-def _heading_path(item: dict[str, Any]) -> str | None:
-    metadata = item.get("metadata")
-    if isinstance(metadata, dict):
-        heading = metadata.get("heading_path")
-        if isinstance(heading, str) and heading.strip():
-            return heading.strip()
-    title = item.get("title")
-    return title.strip() if isinstance(title, str) and title.strip() else None
-
-
-def _split_plain_text(text_content: str, *, max_chars: int = 1600) -> list[str]:
-    normalized = "\n".join(line.rstrip() for line in text_content.replace("\r\n", "\n").split("\n"))
-    blocks = [block.strip() for block in normalized.split("\n\n") if block.strip()]
-    if not blocks:
-        blocks = [normalized.strip()] if normalized.strip() else ["empty document"]
-
-    chunks: list[str] = []
-    current = ""
-    for block in blocks:
-        if not current:
-            current = block
-            continue
-        if len(current) + len(block) + 2 <= max_chars:
-            current = f"{current}\n\n{block}"
-            continue
-        chunks.extend(_split_long_block(current, max_chars=max_chars))
-        current = block
-    if current:
-        chunks.extend(_split_long_block(current, max_chars=max_chars))
-    return chunks
-
-
-def _split_long_block(block: str, *, max_chars: int) -> list[str]:
-    if len(block) <= max_chars:
-        return [block]
-    return [block[index : index + max_chars].strip() for index in range(0, len(block), max_chars)]
-
-
-def _estimate_token_count(text_content: str) -> int:
-    # P0 没有 tokenizer 端口，先用字符数近似，后续接模型 tokenizer 后替换。
-    return max(1, len(text_content) // 4)
-
-
-def _job_from_mapping(row: Any) -> ImportJob:
-    request_json = _json_mapping(row["request_json"])
-    result_json = _json_mapping(row["result_json"])
-    return ImportJob(
-        id=row["job_id"],
-        kb_id=row["kb_id"],
-        status=row["status"],
-        stage=row["stage"],
-        document_ids=tuple(_document_ids_from_request(request_json, row.get("document_id"))),
-        error_summary=row["error_message"] or result_json.get("error_summary"),
-        job_type=row.get("job_type"),
-    )
-
-
-def _document_ids_from_request(request_json: dict[str, Any], fallback: str | None) -> list[str]:
-    value = request_json.get("document_ids")
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, str)]
-    return [fallback] if fallback else []
-
-
-def _document_version_ids_from_request(
-    request_json: dict[str, Any],
-    fallback: str | None,
-) -> list[str]:
-    value = request_json.get("document_version_ids")
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, str)]
-    return [fallback] if fallback else []
-
-
-def _unique_strings(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if not isinstance(value, str):
-            continue
-        normalized = value.strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        result.append(normalized)
-    return result
-
-
-def _json_mapping(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str) and value:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
-def _infer_file_type(*, filename: str, content_type: str | None) -> str | None:
-    extension = _extension_from_name(filename)
-    if extension and extension in EXTENSION_TO_FILE_TYPE:
-        return EXTENSION_TO_FILE_TYPE[extension]
-    if extension:
-        return None
-    if content_type:
-        normalized_content_type = content_type.lower().split(";")[0].strip()
-        return CONTENT_TYPE_TO_FILE_TYPE.get(normalized_content_type)
-    return None
-
-
-def _extension_from_name(name: str | None) -> str | None:
-    if not name or "." not in name:
-        return None
-    extension = name.rsplit(".", 1)[1].strip().lower()
-    return extension or None
-
-
-def _normalize_allowed_file_types(values: tuple[str, ...]) -> tuple[str, ...]:
-    normalized: list[str] = []
-    for value in values:
-        item = value.strip().lower().lstrip(".")
-        file_type = EXTENSION_TO_FILE_TYPE.get(item, item)
-        if file_type and file_type not in normalized:
-            normalized.append(file_type)
-    return tuple(normalized)
-
-
-def _next_stage(stage: str) -> str | None:
-    try:
-        index = IMPORT_STAGES.index(stage)
-    except ValueError:
-        raise ImportServiceError(
-            "IMPORT_STAGE_INVALID",
-            "import job stage is invalid",
-            status_code=409,
-            details={"stage": stage},
-        ) from None
-    if index >= len(IMPORT_STAGES) - 1:
-        return None
-    return IMPORT_STAGES[index + 1]
-
-
-def _database_error(error_code: str, message: str, exc: SQLAlchemyError) -> ImportServiceError:
-    original = getattr(exc, "orig", None) or exc.__cause__
-    return ImportServiceError(
-        error_code,
-        message,
-        status_code=500,
-        retryable=True,
-        details={
-            "database_error": {
-                "type": exc.__class__.__name__,
-                "driver": original.__class__.__name__ if original is not None else None,
-            }
-        },
-    )
+__all__ = [
+    "CONTENT_TYPE_TO_FILE_TYPE",
+    "DEFAULT_ALLOWED_FILE_TYPES",
+    "DEFAULT_MAX_UPLOAD_BYTES",
+    "EXTENSION_TO_FILE_TYPE",
+    "IMPORT_STAGES",
+    "TERMINAL_STATUSES",
+    "ImportService",
+    "build_indexing_service",
+]

@@ -106,6 +106,12 @@ class AdminDepartmentList:
 
 
 @dataclass(frozen=True)
+class AdminUserDepartmentList:
+    items: list[AdminDepartment]
+    total: int
+
+
+@dataclass(frozen=True)
 class AdminDepartmentOption:
     id: str
     name: str
@@ -226,6 +232,8 @@ class AdminDocument:
     owner_department_id: str
     visibility: str
     folder_id: str | None = None
+    folder_name: str | None = None
+    owner_department_name: str | None = None
     current_version_id: str | None = None
     current_version_no: int | None = None
     tags: tuple[str, ...] = field(default_factory=tuple)
@@ -267,6 +275,12 @@ class AdminIndexVersion:
     chunk_count: int
     created_at: datetime | None = None
     activated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class AdminIndexVersionList:
+    items: list[AdminIndexVersion]
+    total: int
 
 
 @dataclass(frozen=True)
@@ -340,3 +354,9 @@ class AdminRoleBinding:
     scope_id: str | None
     role_code: str | None = None
     role_name: str | None = None
+
+
+@dataclass(frozen=True)
+class AdminRoleBindingList:
+    items: list[AdminRoleBinding]
+    total: int

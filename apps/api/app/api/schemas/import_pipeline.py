@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.schemas.config import PaginationData
+from app.api.schemas.common import PaginationData
 
 
 class DocumentImportItemData(BaseModel):

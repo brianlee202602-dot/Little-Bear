@@ -91,7 +91,7 @@ def test_setup_config_validations_route_returns_validation_result(monkeypatch) -
 
 def test_setup_guard_blocks_business_routes_before_initialization(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.shared.middleware.SetupService.load_state",
+        "app.api.middleware.setup_guard.SetupService.load_state",
         lambda _self: SetupState(
             initialized=False,
             setup_status=SetupStatus.SETUP_REQUIRED,

@@ -11,21 +11,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import (
-    admin,
-    audit,
-    auth,
-    config,
-    health,
-    import_pipeline,
-    knowledge,
-    permissions,
-    query,
-    setup,
-)
+from app.api.middleware import SetupGuardMiddleware
+from app.api.routes import include_api_routes
 from app.modules.setup.startup_service import SetupStartupService
 from app.shared.logging import configure_logging
-from app.shared.middleware import RequestContextMiddleware, SetupGuardMiddleware
+from app.shared.middleware import RequestContextMiddleware
 from app.shared.settings import get_settings
 
 
@@ -52,16 +42,7 @@ def create_app(*, run_startup_checks: bool = True) -> FastAPI:
     # RequestContext 先写入 request_id/trace_id，SetupGuard 再基于初始化状态放行或拒绝。
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(SetupGuardMiddleware)
-    app.include_router(admin.router)
-    app.include_router(audit.router)
-    app.include_router(auth.router)
-    app.include_router(config.router)
-    app.include_router(health.router)
-    app.include_router(import_pipeline.router)
-    app.include_router(knowledge.router)
-    app.include_router(permissions.router)
-    app.include_router(query.router)
-    app.include_router(setup.router)
+    include_api_routes(app)
     return app
 
 
