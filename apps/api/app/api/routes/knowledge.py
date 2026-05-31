@@ -34,6 +34,9 @@ from app.api.presenters.knowledge import (
     document_version_data as _document_version_data,
 )
 from app.api.presenters.knowledge import (
+    folder_data as _folder_data,
+)
+from app.api.presenters.knowledge import (
     knowledge_base_data as _knowledge_base_data,
 )
 from app.api.schemas.common import PaginationData
@@ -43,7 +46,9 @@ from app.api.schemas.knowledge import (
     DocumentListResponse,
     DocumentResponse,
     DocumentVersionListResponse,
+    FolderListResponse,
     KnowledgeBaseListResponse,
+    KnowledgeBaseResponse,
 )
 from app.db.session import session_scope
 from app.modules.auth.errors import AuthServiceError
@@ -96,6 +101,66 @@ async def list_knowledge_bases(
     return KnowledgeBaseListResponse(
         request_id=_request_id(),
         data=[_knowledge_base_data(item) for item in result.items],
+        pagination=PaginationData(page=page, page_size=page_size, total=result.total),
+    )
+
+
+@router.get("/knowledge-bases/{kb_id}", response_model=KnowledgeBaseResponse)
+async def get_knowledge_base(
+    kb_id: str,
+    authorization: str | None = Header(default=None),
+) -> KnowledgeBaseResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = KnowledgeService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="knowledge_base:read")
+            item = service.get_knowledge_base(
+                session,
+                user_id=auth_context.user.id,
+                enterprise_id=auth_context.user.enterprise_id,
+                kb_id=kb_id,
+                request_id=_request_id(),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="knowledge_base_get")
+    except KnowledgeServiceError as exc:
+        return _knowledge_error_response(exc, stage="knowledge_base_get")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="knowledge_base_get")
+    return KnowledgeBaseResponse(request_id=_request_id(), data=_knowledge_base_data(item))
+
+
+@router.get("/knowledge-bases/{kb_id}/folders", response_model=FolderListResponse)
+async def list_folders(
+    kb_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=200),
+    authorization: str | None = Header(default=None),
+) -> FolderListResponse | JSONResponse:
+    token = _extract_bearer_token(authorization)
+    service = KnowledgeService()
+    try:
+        with session_scope() as session:
+            auth_context = _authenticate(session, token, required_scope="knowledge_base:read")
+            result = service.list_folders(
+                session,
+                user_id=auth_context.user.id,
+                enterprise_id=auth_context.user.enterprise_id,
+                kb_id=kb_id,
+                page=page,
+                page_size=page_size,
+                request_id=_request_id(),
+            )
+    except AuthServiceError as exc:
+        return _auth_error_response(exc, stage="folder_list")
+    except KnowledgeServiceError as exc:
+        return _knowledge_error_response(exc, stage="folder_list")
+    except SQLAlchemyError as exc:
+        return _database_error_response(exc, stage="folder_list")
+    return FolderListResponse(
+        request_id=_request_id(),
+        data=[_folder_data(item) for item in result.items],
         pagination=PaginationData(page=page, page_size=page_size, total=result.total),
     )
 

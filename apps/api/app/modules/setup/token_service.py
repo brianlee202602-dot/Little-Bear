@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from app.modules.audit import AuditWriter
 from app.shared.jwt import JwtError, decode_hs256, encode_hs256
 from app.shared.settings import get_settings
 from sqlalchemy import text
@@ -86,7 +87,7 @@ class SetupTokenService:
         token_hash = self.hash_token(token)
 
         # 始终先失效旧 token，保证同一时间只有一个 active setup token。
-        self.revoke_active(session, reason="replaced_by_new_setup_token")
+        revoked_count = self.revoke_active(session, reason="replaced_by_new_setup_token")
         session.execute(
             text(
                 """
@@ -113,6 +114,14 @@ class SetupTokenService:
                 "scopes": list(scopes),
                 "expires_at": expires_at,
             },
+        )
+        self._write_issue_audit(
+            session,
+            setup_token_id=setup_token_id,
+            jwt_jti=jwt_jti,
+            expires_at=expires_at,
+            scopes=scopes,
+            revoked_existing_count=revoked_count,
         )
         return IssuedSetupToken(
             token=token,
@@ -211,8 +220,8 @@ class SetupTokenService:
             {"jwt_jti": token_context.jwt_jti},
         )
 
-    def revoke_active(self, session: Session, *, reason: str) -> None:
-        session.execute(
+    def revoke_active(self, session: Session, *, reason: str) -> int:
+        result = session.execute(
             text(
                 """
                 UPDATE setup_tokens
@@ -231,6 +240,7 @@ class SetupTokenService:
                 """
             )
         )
+        return max(int(result.rowcount or 0), 0)
 
     @staticmethod
     def hash_token(token: str) -> str:
@@ -256,6 +266,36 @@ class SetupTokenService:
                 """
             ),
             {"jwt_jti": jwt_jti},
+        )
+
+    def _write_issue_audit(
+        self,
+        session: Session,
+        *,
+        setup_token_id: str,
+        jwt_jti: str,
+        expires_at: datetime,
+        scopes: tuple[str, ...],
+        revoked_existing_count: int,
+    ) -> None:
+        # 签发审计只记录可追踪元数据，禁止记录 setup JWT 明文或 token hash。
+        AuditWriter().write(
+            session,
+            event_name="setup_token.issued",
+            actor_type="system",
+            actor_id=None,
+            resource_type="setup",
+            resource_id=setup_token_id,
+            action="issue_token",
+            result="success",
+            risk_level="critical",
+            summary={
+                "token_jti": jwt_jti,
+                "expires_at": expires_at.isoformat(),
+                "scopes": list(scopes),
+                "revoked_existing_count": revoked_existing_count,
+                "issued_by": "setup_startup_service",
+            },
         )
 
 

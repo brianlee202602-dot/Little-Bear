@@ -12,6 +12,7 @@ from app.modules.knowledge.schemas import (
     AccessibleDocument,
     AccessibleDocumentListItem,
     AccessibleDocumentVersion,
+    AccessibleFolder,
     AccessibleKnowledgeBase,
 )
 from app.modules.permissions.schemas import PermissionContext
@@ -34,6 +35,16 @@ def knowledge_base_visibility_sql(
 def knowledge_base_from_mapping(row: Any) -> AccessibleKnowledgeBase:
     return AccessibleKnowledgeBase(
         id=str(row["kb_id"]),
+        name=str(row["name"]),
+        status=str(row["status"]),
+    )
+
+
+def folder_from_mapping(row: Any) -> AccessibleFolder:
+    return AccessibleFolder(
+        id=str(row["folder_id"]),
+        kb_id=str(row["kb_id"]),
+        parent_id=optional_str(row.get("parent_id")),
         name=str(row["name"]),
         status=str(row["status"]),
     )
@@ -121,6 +132,7 @@ def database_error(
 # 旧测试和内部模块仍使用下划线 helper；保留别名，但真实归属为本 mapper。
 _knowledge_base_visibility_sql = knowledge_base_visibility_sql
 _knowledge_base_from_mapping = knowledge_base_from_mapping
+_folder_from_mapping = folder_from_mapping
 _document_from_mapping = document_from_mapping
 _document_list_item_from_mapping = document_list_item_from_mapping
 _document_version_from_mapping = document_version_from_mapping
@@ -129,4 +141,3 @@ _optional_str = optional_str
 _optional_int = optional_int
 _json_mapping = json_mapping
 _database_error = database_error
-

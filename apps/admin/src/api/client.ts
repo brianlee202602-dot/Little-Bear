@@ -9,7 +9,7 @@ export interface SetupStateData {
   active_config_present: boolean;
   recovery_setup_allowed: boolean;
   recovery_reason: string | null;
-  system_token_expires_at: string | null;
+  setup_token_expires_at: string | null;
   error_code: string | null;
   error_message: string | null;
 }

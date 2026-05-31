@@ -15,7 +15,7 @@ class SetupStateData(BaseModel):
     active_config_present: bool
     recovery_setup_allowed: bool = False
     recovery_reason: str | None = None
-    system_token_expires_at: str | None = None
+    setup_token_expires_at: str | None = None
     error_code: str | None = None
     error_message: str | None = None
 

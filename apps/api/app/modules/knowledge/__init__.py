@@ -10,6 +10,8 @@ from app.modules.knowledge.schemas import (
     AccessibleDocumentListItem,
     AccessibleDocumentVersion,
     AccessibleDocumentVersionList,
+    AccessibleFolder,
+    AccessibleFolderList,
     AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
 )
@@ -24,6 +26,8 @@ __all__ = [
     "AccessibleDocumentListItem",
     "AccessibleDocumentVersion",
     "AccessibleDocumentVersionList",
+    "AccessibleFolder",
+    "AccessibleFolderList",
     "AccessibleKnowledgeBase",
     "AccessibleKnowledgeBaseList",
     "KnowledgeService",

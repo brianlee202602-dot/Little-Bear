@@ -11,6 +11,7 @@ from app.modules.knowledge.mappers import (
     _document_from_mapping,
     _document_list_item_from_mapping,
     _document_version_from_mapping,
+    _folder_from_mapping,
     _knowledge_base_from_mapping,
     _knowledge_base_visibility_sql,
 )
@@ -19,6 +20,7 @@ from app.modules.knowledge.schemas import (
     AccessibleDocument,
     AccessibleDocumentListItem,
     AccessibleDocumentVersion,
+    AccessibleFolder,
     AccessibleKnowledgeBase,
 )
 from app.modules.permissions.schemas import PermissionContext, PermissionFilter
@@ -89,6 +91,108 @@ class KnowledgeRepository:
                 exc,
             ) from exc
         return [_knowledge_base_from_mapping(row._mapping) for row in rows], int(
+            total_row._mapping["total"]
+        )
+
+    def get_knowledge_base(
+        self,
+        session: Session,
+        *,
+        context: PermissionContext,
+        kb_id: str,
+    ) -> AccessibleKnowledgeBase | None:
+        params: dict[str, Any] = {"enterprise_id": context.enterprise_id, "kb_id": kb_id}
+        access_sql = _knowledge_base_visibility_sql(context, params)
+        conditions = [
+            "kb.enterprise_id = CAST(:enterprise_id AS uuid)",
+            "kb.id = CAST(:kb_id AS uuid)",
+            "kb.deleted_at IS NULL",
+            "kb.status = 'active'",
+        ]
+        if access_sql:
+            conditions.append(access_sql)
+        where_sql = " AND ".join(conditions)
+        try:
+            row = session.execute(
+                text(
+                    f"""
+                    SELECT
+                        kb.id::text AS kb_id,
+                        kb.name,
+                        kb.status
+                    FROM knowledge_bases kb
+                    WHERE {where_sql}
+                    LIMIT 1
+                    """
+                ),
+                params,
+            ).one_or_none()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "KNOWLEDGE_BASE_UNAVAILABLE",
+                "knowledge base cannot be read",
+                exc,
+            ) from exc
+        return _knowledge_base_from_mapping(row._mapping) if row is not None else None
+
+    def list_folders(
+        self,
+        session: Session,
+        *,
+        enterprise_id: str,
+        kb_id: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[AccessibleFolder], int]:
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        params = {
+            "enterprise_id": enterprise_id,
+            "kb_id": kb_id,
+            "limit": page_size,
+            "offset": (page - 1) * page_size,
+        }
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text AS folder_id,
+                        kb_id::text AS kb_id,
+                        parent_id::text AS parent_id,
+                        name,
+                        status
+                    FROM folders
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND kb_id = CAST(:kb_id AS uuid)
+                      AND deleted_at IS NULL
+                      AND status = 'active'
+                    ORDER BY path, name, id
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).all()
+            total_row = session.execute(
+                text(
+                    """
+                    SELECT count(*) AS total
+                    FROM folders
+                    WHERE enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND kb_id = CAST(:kb_id AS uuid)
+                      AND deleted_at IS NULL
+                      AND status = 'active'
+                    """
+                ),
+                params,
+            ).one()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "KNOWLEDGE_FOLDERS_UNAVAILABLE",
+                "folders cannot be read",
+                exc,
+            ) from exc
+        return [_folder_from_mapping(row._mapping) for row in rows], int(
             total_row._mapping["total"]
         )
 

@@ -191,7 +191,7 @@ MVP 的目标不是实现完整平台能力，而是跑通一条可上线验证�
 1. 启动 API、Worker 和模型 Provider Adapter 进程。
 2. 系统只读取数据库连接配置。
 3. 调用 `GET /internal/v1/setup-state`，返回未初始化。
-4. 使用受控 CLI 签发 setup JWT。
+4. 从 API 启动日志复制一次性 setup JWT。
 5. 使用 setup JWT 访问普通业务 API、管理员 API 或服务间 API 被拒绝。
 6. 调用 `POST /internal/v1/setup-config-validations`，按初始化配置 schema 校验完整初始化配置。
 7. 调用 `PUT /internal/v1/setup-initialization` 创建首个系统管理员、默认企业、默认部门、默认角色和 `active_config v1`。

@@ -53,6 +53,8 @@ def test_setup_state_route_wraps_response_with_request_id(monkeypatch) -> None:
     assert payload["data"]["setup_status"] == "setup_required"
     assert payload["data"]["setup_required"] is True
     assert payload["data"]["active_config_present"] is False
+    assert "setup_token_expires_at" in payload["data"]
+    assert "system_token_expires_at" not in payload["data"]
 
 
 def test_setup_config_validations_route_returns_validation_result(monkeypatch) -> None:

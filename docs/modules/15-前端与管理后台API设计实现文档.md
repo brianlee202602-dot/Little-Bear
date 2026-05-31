@@ -35,7 +35,7 @@
 | 管理后台 API | system_admin、department_admin、knowledge_base_admin、security_admin、audit_admin | 用户、组织、知识库、文档、权限、配置、审计、任务管理 |
 | 初始化 API | 初始化页面、受控部署流程 | 仅未初始化或恢复初始化时开放 |
 | 内部服务 API | 后端模块、Worker、模型 Provider Adapter | 不允许浏览器前端直接访问 |
-| 运维 API/CLI | 运维人员、部署平台 | healthcheck、setup token 签发、索引检查、任务重试 |
+| 运维 API/CLI | 运维人员、部署平台 | healthcheck、setup JWT 获取、索引检查、任务重试 |
 
 当前 P0 后端规范路径统一使用 `/internal/v1`。OpenAPI、后端路由、前端 SDK 和测试均以该路径为准。
 
@@ -110,7 +110,7 @@
 - 模型 Provider Adapter 原始 embedding、rerank、chat API。
 - Worker 内部任务领取 API。
 - Qdrant、MinIO、Redis、PostgreSQL。
-- `rag-admin setup-token issue`、`rag-admin setup-token rotate`。
+- `rag-admin setup-token issue`、`rag-admin setup-token rotate` 当前属于 P1 运维 CLI 规划项。
 - 物理删除索引、直接更新索引 payload、直接写权限快照。
 
 ## 4. 初始化 API
@@ -128,7 +128,7 @@ PUT  /internal/v1/setup-initialization
 - `GET /setup-state` 不需要 token，只返回有限初始化状态，不返回 setup token 明文。
 - `POST /setup-config-validations` 创建一次初始化配置校验请求，不写入 active config。
 - `PUT /setup-initialization` 以幂等语义提交初始化目标状态，校验通过后写入首个管理员、默认组织、默认角色和 `active_config v1`。
-- setup JWT 由受控 CLI 或部署平台签发，每次签发都生成新 token，并使旧 token 失效。
+- P0 当前由 API 启动检查在未初始化或恢复初始化时签发 setup JWT，并在受控启动日志中输出一次；P1 再补受控 CLI 或部署平台签发入口。
 - 初始化完成后，配置校验和初始化写接口必须关闭。
 
 ## 5. 认证、会话与当前用户 API
@@ -409,21 +409,28 @@ PATCH /internal/v1/admin/org-sync-jobs/{job_id}
 
 ## 14. 管理后台：角色与权限 API
 
+P0 当前已实现角色列表、角色详情、可分配角色选项和用户角色绑定维护；角色创建、修改、删除为 P1 契约占位。`GET /internal/v1/permission-evaluations` 也是 P1 诊断接口占位，当前管理后台使用查询日志、模型调用日志和权限管理页面完成主要诊断。
+
 ```http
 GET    /internal/v1/admin/roles
-POST   /internal/v1/admin/roles
 GET    /internal/v1/admin/roles/{role_id}
-PATCH  /internal/v1/admin/roles/{role_id}
-DELETE /internal/v1/admin/roles/{role_id}
 
 GET    /internal/v1/admin/users/{user_id}/role-bindings
 POST   /internal/v1/admin/users/{user_id}/role-bindings
 PUT    /internal/v1/admin/users/{user_id}/role-bindings
 DELETE /internal/v1/admin/users/{user_id}/role-bindings/{binding_id}
 
-GET /internal/v1/permission-evaluations
 PUT /internal/v1/knowledge-bases/{kb_id}/permissions
 PUT /internal/v1/documents/{doc_id}/permissions
+```
+
+P1 契约占位，当前后端未挂载：
+
+```http
+POST   /internal/v1/admin/roles
+PATCH  /internal/v1/admin/roles/{role_id}
+DELETE /internal/v1/admin/roles/{role_id}
+GET    /internal/v1/permission-evaluations
 ```
 
 `GET /internal/v1/permission-evaluations` 查询参数：
@@ -453,25 +460,28 @@ GET   /internal/v1/admin/configs
 GET   /internal/v1/admin/configs/{key}
 PUT   /internal/v1/admin/configs/{key}
 GET   /internal/v1/admin/config-versions
+POST  /internal/v1/admin/config-versions
 GET   /internal/v1/admin/config-versions/{version}
+PUT   /internal/v1/admin/config-versions/{version}
 PATCH /internal/v1/admin/config-versions/{version}
-GET   /internal/v1/admin/config-version-diffs
+DELETE /internal/v1/admin/config-versions/{version}
 POST  /internal/v1/admin/config-validations
-POST  /internal/v1/admin/config-rollbacks
 ```
 
 说明：
 
 - 保存配置草稿使用 `PUT /admin/configs/{key}`。
+- 新建配置版本使用 `POST /admin/config-versions`。
+- 编辑配置版本使用 `PUT /admin/config-versions/{version}`，编辑保存不额外生成新版本。
 - 发布配置版本使用 `PATCH /admin/config-versions/{version}` 修改 `status=active`。
-- 回滚配置使用 `POST /admin/config-rollbacks` 创建一次回滚请求。
+- 归档配置版本使用 `DELETE /admin/config-versions/{version}` 或 `PATCH /admin/config-versions/{version}` 修改为 `archived`；这是软归档，不是物理删除。
 - 配置校验使用 `POST /admin/config-validations` 创建一次校验请求。
-- 配置 diff 使用 `GET /admin/config-version-diffs?from=12&to=13`。
+- 独立配置 diff 和通用回滚 API 当前未实现，属于 P1/P2 增强；P0 可通过激活历史非归档版本完成版本切换。
 
 要求：
 
-- 写接口只允许 system_admin 或 security_admin。
-- 高风险配置必须审批。
+- 写接口只允许 system_admin。
+- 高风险配置必须经过显式确认头、schema 校验、依赖校验和审计；完整审批流属于 P1。
 - API 响应不得返回 secret value，只能返回 secret ref 和脱敏摘要。
 
 ## 16. 管理后台：审计与可观测 API
@@ -528,7 +538,14 @@ GET /health/ready
 - `ready` 必须检查数据库连接、初始化状态、active config、ServiceBootstrap 状态和核心迁移版本。
 - healthcheck 不返回 secret、内部拓扑和敏感配置。
 
-以下能力建议通过 CLI 或受控运维入口，不直接开放给浏览器前端：
+P0 当前健康检查直接使用以下 HTTP 接口：
+
+```http
+GET /health/live
+GET /health/ready
+```
+
+以下能力建议通过 CLI 或受控运维入口补齐，不直接开放给浏览器前端；这些 `rag-admin` 命令当前属于 P1/P2 规划项：
 
 ```text
 rag-admin setup-token issue
@@ -543,7 +560,7 @@ rag-admin health check
 
 ## 18. 内部服务 API
 
-模型 Provider Adapter 内部 API：
+模型 Provider Adapter 内部 API。P0 当前不开放这些 HTTP 端点，模型能力以内置 client / adapter 形式被后端模块直接调用；下面接口为 P2 契约占位。
 
 ```http
 POST /internal/v1/model-embeddings

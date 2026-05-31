@@ -21,6 +21,21 @@ class AccessibleKnowledgeBaseList:
 
 
 @dataclass(frozen=True)
+class AccessibleFolder:
+    id: str
+    kb_id: str
+    name: str
+    status: str
+    parent_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AccessibleFolderList:
+    items: list[AccessibleFolder]
+    total: int
+
+
+@dataclass(frozen=True)
 class AccessibleDocument:
     id: str
     title: str
@@ -94,4 +109,3 @@ class AccessibleCitationSource:
     heading_path: str | None
     source_offsets: dict[str, Any] | None
     text_status: str
-

@@ -26,6 +26,8 @@ from app.modules.knowledge.schemas import (
     AccessibleDocument,
     AccessibleDocumentList,
     AccessibleDocumentVersionList,
+    AccessibleFolderList,
+    AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
 )
 from app.modules.knowledge.source_reader import KnowledgeSourceReader
@@ -70,6 +72,44 @@ class KnowledgeService:
             page_size=page_size,
             keyword=keyword,
             status=status,
+            request_id=request_id,
+        )
+
+    def get_knowledge_base(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        enterprise_id: str,
+        kb_id: str,
+        request_id: str | None = None,
+    ) -> AccessibleKnowledgeBase:
+        return self._browser_service().get_knowledge_base(
+            session,
+            user_id=user_id,
+            enterprise_id=enterprise_id,
+            kb_id=kb_id,
+            request_id=request_id,
+        )
+
+    def list_folders(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        enterprise_id: str,
+        kb_id: str,
+        page: int,
+        page_size: int,
+        request_id: str | None = None,
+    ) -> AccessibleFolderList:
+        return self._browser_service().list_folders(
+            session,
+            user_id=user_id,
+            enterprise_id=enterprise_id,
+            kb_id=kb_id,
+            page=page,
+            page_size=page_size,
             request_id=request_id,
         )
 

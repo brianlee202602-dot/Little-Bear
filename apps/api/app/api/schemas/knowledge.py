@@ -26,6 +26,31 @@ class KnowledgeBaseListResponse(BaseModel):
     pagination: PaginationData
 
 
+class KnowledgeBaseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: KnowledgeBaseData
+
+
+class FolderData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kb_id: str
+    parent_id: str | None = None
+    name: str
+    status: Literal["active", "disabled", "archived"]
+
+
+class FolderListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    data: list[FolderData]
+    pagination: PaginationData
+
+
 class DocumentData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -47,7 +47,7 @@ class SetupState:
     service_bootstrap_ready: bool = False
     recovery_setup_allowed: bool = False
     recovery_reason: str | None = None
-    system_token_expires_at: str | None = None
+    setup_token_expires_at: str | None = None
     error_code: str | None = None
     error_message: str | None = None
 
@@ -78,7 +78,7 @@ class SetupState:
             "active_config_present": self.active_config_present,
             "recovery_setup_allowed": self.recovery_setup_allowed,
             "recovery_reason": self.recovery_reason,
-            "system_token_expires_at": self.system_token_expires_at,
+            "setup_token_expires_at": self.setup_token_expires_at,
         }
         if self.error_code:
             data["error_code"] = self.error_code

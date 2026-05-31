@@ -8,6 +8,7 @@ from app.api.schemas.knowledge import (
     DocumentData,
     DocumentListItemData,
     DocumentVersionData,
+    FolderData,
     KnowledgeBaseData,
 )
 from app.modules.knowledge import (
@@ -16,6 +17,7 @@ from app.modules.knowledge import (
     AccessibleDocument,
     AccessibleDocumentListItem,
     AccessibleDocumentVersion,
+    AccessibleFolder,
     AccessibleKnowledgeBase,
 )
 
@@ -23,6 +25,16 @@ from app.modules.knowledge import (
 def knowledge_base_data(item: AccessibleKnowledgeBase) -> KnowledgeBaseData:
     return KnowledgeBaseData(
         id=item.id,
+        name=item.name,
+        status=item.status,
+    )
+
+
+def folder_data(item: AccessibleFolder) -> FolderData:
+    return FolderData(
+        id=item.id,
+        kb_id=item.kb_id,
+        parent_id=item.parent_id,
         name=item.name,
         status=item.status,
     )
@@ -89,4 +101,3 @@ def citation_source_data(item: AccessibleCitationSource) -> CitationSourceData:
         source_offsets=item.source_offsets,
         text_status=item.text_status,
     )
-

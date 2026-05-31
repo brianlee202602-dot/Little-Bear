@@ -2003,6 +2003,7 @@ paths:
       tags: [AdminPermission]
       summary: Evaluate resource permission
       operationId: getPermissionEvaluation
+      x-implementation-stage: P1
       x-token-type: access
       x-required-scope: permission:evaluate
       x-audit-required: true
@@ -2571,6 +2572,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal create embeddings
       operationId: createModelEmbeddings
+      x-implementation-stage: P2
       x-token-type: service
       x-required-scope: model_gateway:invoke
       x-audit-required: true
@@ -2595,6 +2597,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal rerank documents
       operationId: createModelReranking
+      x-implementation-stage: P2
       x-token-type: service
       x-required-scope: model_gateway:invoke
       x-audit-required: true
@@ -2619,6 +2622,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal create chat completion
       operationId: createModelChatCompletion
+      x-implementation-stage: P2
       x-token-type: service
       x-required-scope: model_gateway:invoke
       x-audit-required: true
@@ -2643,6 +2647,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal list model catalog
       operationId: getModelCatalog
+      x-implementation-stage: P2
       x-token-type: service
       x-required-scope: model_gateway:read
       responses:
@@ -2660,6 +2665,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal model gateway health
       operationId: getModelHealth
+      x-implementation-stage: P2
       x-token-type: service
       x-required-scope: model_gateway:read
       responses:
@@ -3160,15 +3166,29 @@ components:
           $ref: "#/components/schemas/RequestId"
         data:
           type: object
-          required: [initialized, setup_status]
+          required: [initialized, setup_status, setup_required, active_config_present]
           properties:
             initialized:
               type: boolean
             setup_status:
               $ref: "#/components/schemas/SetupStatus"
-            system_token_expires_at:
+            active_config_version:
+              type: [integer, "null"]
+            setup_required:
+              type: boolean
+            active_config_present:
+              type: boolean
+            recovery_setup_allowed:
+              type: boolean
+            recovery_reason:
+              type: [string, "null"]
+            setup_token_expires_at:
               type: [string, "null"]
               format: date-time
+            error_code:
+              type: [string, "null"]
+            error_message:
+              type: [string, "null"]
     SetupConfigValidationResponse:
       type: object
       required: [request_id, data]

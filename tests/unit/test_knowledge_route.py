@@ -13,6 +13,8 @@ from app.modules.knowledge import (
     AccessibleDocumentListItem,
     AccessibleDocumentVersion,
     AccessibleDocumentVersionList,
+    AccessibleFolder,
+    AccessibleFolderList,
     AccessibleKnowledgeBase,
     AccessibleKnowledgeBaseList,
 )
@@ -122,6 +124,94 @@ def test_list_knowledge_bases_route_requires_read_scope(monkeypatch) -> None:
     assert "kb_visibility" not in payload
     assert "default_document_visibility" not in payload
     assert "policy_version" not in payload
+
+
+def test_get_knowledge_base_route_requires_read_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def get_knowledge_base(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AccessibleKnowledgeBase(
+            id=kwargs["kb_id"],
+            name="制度知识库",
+            status="active",
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(AUTH_TARGET, authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.knowledge.KnowledgeService.get_knowledge_base",
+        get_knowledge_base,
+    )
+
+    response = TestClient(_create_test_app()).get(
+        "/internal/v1/knowledge-bases/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        headers={"authorization": "Bearer access.jwt", "x-request-id": "req_kb_get"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "knowledge_base:read"
+    assert seen["kb_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    assert response.json()["request_id"] == "req_kb_get"
+    payload = response.json()["data"]
+    assert payload == {
+        "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "name": "制度知识库",
+        "status": "active",
+    }
+
+
+def test_list_folders_route_requires_read_scope(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def authenticate(_self, _session, *, required_scope, **_kwargs):
+        seen["required_scope"] = required_scope
+        return _auth_context()
+
+    def list_folders(_self, _session, **kwargs):
+        seen.update(kwargs)
+        return AccessibleFolderList(
+            items=[
+                AccessibleFolder(
+                    id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    kb_id=kwargs["kb_id"],
+                    parent_id=None,
+                    name="制度文件",
+                    status="active",
+                )
+            ],
+            total=1,
+        )
+
+    _open_business_api(monkeypatch)
+    monkeypatch.setattr("app.api.routes.knowledge.session_scope", lambda: _FakeSession())
+    monkeypatch.setattr(AUTH_TARGET, authenticate)
+    monkeypatch.setattr(
+        "app.api.routes.knowledge.KnowledgeService.list_folders",
+        list_folders,
+    )
+
+    response = TestClient(_create_test_app()).get(
+        "/internal/v1/knowledge-bases/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/folders"
+        "?page=2&page_size=10",
+        headers={"authorization": "Bearer access.jwt"},
+    )
+
+    assert response.status_code == 200
+    assert seen["required_scope"] == "knowledge_base:read"
+    assert seen["kb_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    assert seen["page"] == 2
+    assert seen["page_size"] == 10
+    payload = response.json()["data"][0]
+    assert payload["name"] == "制度文件"
+    assert payload["parent_id"] is None
+    assert "path" not in payload
+    assert response.json()["pagination"] == {"page": 2, "page_size": 10, "total": 1}
 
 
 def test_list_documents_route_requires_document_read_scope(monkeypatch) -> None:

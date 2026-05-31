@@ -8,14 +8,12 @@ from app.main import create_app
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 CONTRACT_PATH = Path("docs/contracts/openapi.yaml")
 
-# OpenAPI 中已经冻结、但当前后端尚未挂载的 P0/P1 契约。后续每实现一个接口，
+# OpenAPI 中已经登记、但当前后端尚未挂载的 P1/P2 契约占位。后续每实现一个接口，
 # 都应从这里删除对应项，让测试成为开发进度的细颗粒提醒。
 EXPECTED_CONTRACT_ONLY_OPERATIONS = {
     ("/internal/v1/admin/roles", "POST"),
     ("/internal/v1/admin/roles/{role_id}", "DELETE"),
     ("/internal/v1/admin/roles/{role_id}", "PATCH"),
-    ("/internal/v1/knowledge-bases/{kb_id}", "GET"),
-    ("/internal/v1/knowledge-bases/{kb_id}/folders", "GET"),
     ("/internal/v1/model-catalog", "GET"),
     ("/internal/v1/model-chat-completions", "POST"),
     ("/internal/v1/model-embeddings", "POST"),
@@ -35,6 +33,32 @@ def test_contract_only_operations_match_tracked_gap() -> None:
     contract_only = _contract_operations() - _actual_operations()
 
     assert contract_only == EXPECTED_CONTRACT_ONLY_OPERATIONS
+
+
+def test_contract_only_operations_are_marked_as_future_stage() -> None:
+    contract = yaml.safe_load(CONTRACT_PATH.read_text(encoding="utf-8"))
+    paths = contract.get("paths") or {}
+    missing_stage: set[tuple[str, str]] = set()
+    for path, method in EXPECTED_CONTRACT_ONLY_OPERATIONS:
+        operation = (paths.get(path) or {}).get(method.lower()) or {}
+        if operation.get("x-implementation-stage") not in {"P1", "P2"}:
+            missing_stage.add((path, method))
+
+    assert missing_stage == set()
+
+
+def test_setup_state_contract_uses_current_setup_jwt_fields() -> None:
+    contract = yaml.safe_load(CONTRACT_PATH.read_text(encoding="utf-8"))
+    schema = contract["components"]["schemas"]["SetupStateResponse"]["properties"]["data"]
+    properties = schema["properties"]
+
+    assert {"setup_required", "active_config_present", "setup_token_expires_at"} <= set(
+        properties
+    )
+    assert "system_token_expires_at" not in properties
+    assert {"initialized", "setup_status", "setup_required", "active_config_present"} <= set(
+        schema["required"]
+    )
 
 
 def _actual_operations() -> set[tuple[str, str]]:
