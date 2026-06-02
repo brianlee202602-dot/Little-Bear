@@ -1,0 +1,125 @@
+.auth-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: #18202a;
+  background: #f3f5f7;
+}
+
+.login-card {
+  width: min(460px, 100%);
+  display: grid;
+  gap: 22px;
+  padding: 28px;
+  background: #ffffff;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+}
+
+.login-card__header {
+  display: grid;
+  gap: 8px;
+}
+
+.auth-copy {
+  margin: 0;
+  color: #667182;
+}
+
+.login-form {
+  display: grid;
+  gap: 16px;
+}
+
+.admin-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  color: #18202a;
+  background: #f3f5f7;
+}
+
+.admin-sidebar {
+  background: #20252d;
+  color: #f4f6f8;
+  padding: 24px 20px;
+  display: grid;
+  align-content: start;
+  gap: 22px;
+  border-right: 1px solid #303744;
+}
+
+.admin-nav {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-nav__item {
+  width: 100%;
+  border: 1px solid #3a4350;
+  border-radius: 8px;
+  background: transparent;
+  color: #d6dce5;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-nav__item--active {
+  border-color: #80b6a4;
+  background: #2a403a;
+  color: #ffffff;
+}
+
+.admin-workspace {
+  min-width: 0;
+  padding: 24px;
+  display: grid;
+  align-content: start;
+  gap: 20px;
+}
+
+.admin-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 16px;
+}
+
+.admin-toolbar h2 {
+  margin: 0;
+}
+
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.user-menu > div {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
+.user-menu span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.panel--wide {
+  grid-column: 1 / -1;
+}
+
+.panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

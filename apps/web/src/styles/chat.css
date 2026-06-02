@@ -1,0 +1,260 @@
+.chat-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  background: #ffffff;
+  color: #171717;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+.sidebar {
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  display: grid;
+  grid-template-rows: auto minmax(150px, 1fr) minmax(180px, auto) auto;
+  gap: 14px;
+  border-right: 1px solid #e5e5e5;
+  background: #f7f7f5;
+  padding: 18px 10px 12px;
+  overflow: hidden;
+}
+
+.brand-row,
+.chat-topbar,
+.account-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.brand-row {
+  padding: 0 10px;
+}
+
+.eyebrow {
+  color: #737373;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+h1 {
+  margin-top: 2px;
+  font-size: 23px;
+  line-height: 1.2;
+}
+
+.icon-button {
+  width: 36px;
+  height: 36px;
+  border: 1px solid #d4d4d4;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  color: #171717;
+  cursor: pointer;
+  font: inherit;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.muted {
+  color: #737373;
+  font-size: 12px;
+}
+
+.text-button {
+  border: 0;
+  background: transparent;
+  color: #404040;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 2px 0;
+}
+
+.text-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.kb-load-more {
+  margin: 6px;
+  text-align: left;
+}
+
+.account-area {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.account-card {
+  min-width: 0;
+  justify-content: start;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #167f67;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.account-card strong,
+.account-card span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-card span {
+  color: #737373;
+  font-size: 12px;
+}
+
+.chat-panel {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: #ffffff;
+}
+
+.chat-topbar {
+  min-height: 64px;
+  border-bottom: 1px solid #eeeeee;
+  padding: 12px 24px;
+}
+
+.chat-topbar > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.scope-badge {
+  color: #737373;
+  font-size: 13px;
+}
+
+.chat-topbar strong {
+  font-size: 15px;
+}
+
+.query-options {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid #dedede;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.segmented button {
+  min-width: 64px;
+  border: 0;
+  border-right: 1px solid #dedede;
+  background: #ffffff;
+  color: #525252;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 12px;
+}
+
+.segmented button:last-child {
+  border-right: 0;
+}
+
+.segmented button.active {
+  background: #111111;
+  color: #ffffff;
+}
+
+.small-input {
+  display: inline-grid;
+  grid-template-columns: auto 64px;
+  align-items: center;
+  gap: 6px;
+  color: #737373;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.small-input input {
+  height: 36px;
+}
+
+input[type="number"] {
+  width: 100%;
+  border: 1px solid #d4d4d4;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #171717;
+  font: inherit;
+  line-height: 1.5;
+  outline: none;
+}
+
+input[type="number"] {
+  padding: 9px 11px;
+}
+
+input:focus {
+  border-color: #9ca3af;
+  box-shadow: 0 0 0 3px rgba(17, 17, 17, 0.08);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@media (max-width: 920px) {
+  .chat-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    height: auto;
+    position: static;
+    grid-template-rows: auto auto auto auto;
+    border-right: 0;
+    border-bottom: 1px solid #e5e5e5;
+  }
+
+  .chat-topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .query-options {
+    justify-content: flex-start;
+  }
+}

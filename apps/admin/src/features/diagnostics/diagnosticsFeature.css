@@ -1,0 +1,225 @@
+.diagnostics-pane {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.resource-section {
+  min-width: 0;
+  border-top: 1px solid #e7ebf0;
+  padding-top: 16px;
+  display: grid;
+  gap: 18px;
+}
+
+.resource-section--document-manager {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.resource-block {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.index-ops-panel {
+  padding-top: 12px;
+  border-top: 1px solid #e7ebf0;
+}
+
+.index-health-list {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.index-health-card {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.index-health-card--selected {
+  border-color: #8ec5b1;
+  background: #f7fcfa;
+}
+
+.index-health-card__header {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+}
+
+.index-health-card__header > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.index-health-card__header strong,
+.index-health-card__header span,
+.index-health-metric dd {
+  overflow-wrap: anywhere;
+}
+
+.index-health-card__header strong {
+  color: #1d2935;
+  font-size: 15px;
+}
+
+.index-health-card__header > div > span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.index-health-metrics {
+  min-width: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.index-health-metric {
+  min-width: 0;
+  border: 1px solid #eef1f5;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.index-health-metric dt {
+  margin: 0;
+  color: #667182;
+  font-size: 12px;
+}
+
+.index-health-metric dd {
+  margin: 0;
+  color: #1d2935;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.index-ops-layout {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.index-ops-composite {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.48fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.index-ops-selector {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.index-ops-actions-stack {
+  min-width: 0;
+  border-left: 1px solid #eef1f5;
+  padding-left: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.index-ops-action-panel {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.index-ops-action-panel + .index-ops-action-panel {
+  border-top: 1px solid #eef1f5;
+  padding-top: 14px;
+}
+
+.index-ops-action-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(112px, auto);
+  align-items: center;
+  gap: 10px;
+}
+
+.index-ops-card {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.index-ops-card--restore {
+  grid-column: 1 / -1;
+}
+
+.index-ops-card header,
+.index-ops-selector header,
+.index-ops-action-panel header {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 10px;
+}
+
+.index-ops-card h5,
+.index-ops-selector h5,
+.index-ops-action-panel h5 {
+  margin: 0;
+  color: #1d2935;
+  font-size: 14px;
+}
+
+.index-ops-card p,
+.index-ops-selector p,
+.index-ops-action-panel p {
+  margin: 4px 0 0;
+  color: #667182;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.index-ops-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.index-ops-card--restore .index-ops-row {
+  grid-template-columns: minmax(160px, 0.45fr) minmax(220px, 0.55fr);
+}
+
+.index-ops-row--actions {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}

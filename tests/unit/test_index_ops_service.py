@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from app.adapters.qdrant import QdrantCollectionInfo, QdrantSnapshotInfo
+from app.modules.indexing.collection_health_repository import IndexCollectionHealthRepository
 from app.modules.indexing.errors import IndexingServiceError
 from app.modules.indexing.ops_service import IndexOpsService
 
@@ -76,6 +77,40 @@ class _FakeQdrantInspector:
             }
         )
         return True
+
+
+def test_collection_health_repository_keeps_cte_separator() -> None:
+    session = _FakeSession()
+    session.rows = [
+        _Row(
+            {
+                "collection_name": "little_bear_p0",
+                "db_index_version_count": 1,
+                "active_index_version_count": 1,
+                "pending_delete_index_version_count": 0,
+                "failed_index_version_count": 0,
+                "active_ref_count": 5,
+                "draft_ref_count": 0,
+                "deleted_ref_count": 0,
+                "pending_delete_ref_count": 0,
+                "active_ref_mismatch_count": 0,
+                "total_count": 1,
+            }
+        )
+    ]
+
+    items, total = IndexCollectionHealthRepository().load_collection_rows(
+        session,
+        enterprise_id="33333333-3333-3333-3333-333333333333",
+        limit=20,
+        offset=0,
+    )
+
+    sql = session.executed[0][0]
+    assert "),\n                    collection_health AS" in sql
+    assert ")\n                    collection_health AS" not in sql
+    assert total == 1
+    assert items[0]["collection_name"] == "little_bear_p0"
 
 
 def test_index_ops_service_reports_collection_health() -> None:

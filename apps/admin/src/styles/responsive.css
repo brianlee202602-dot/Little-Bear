@@ -1,0 +1,206 @@
+@media (max-width: 1200px) {
+  .admin-shell,
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-sidebar,
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid #303744;
+  }
+
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .config-secondary-grid,
+  .config-version-strip,
+  .summary.document-detail-summary,
+  .index-health-metrics,
+  .document-version-index-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .index-ops-composite {
+    grid-template-columns: 1fr;
+  }
+
+  .index-ops-actions-stack {
+    border-top: 1px solid #eef1f5;
+    border-left: 0;
+    padding-top: 14px;
+    padding-left: 0;
+  }
+
+  .config-versions {
+    padding: 14px;
+  }
+
+  .entity-table__row--header {
+    display: none;
+  }
+
+  .entity-table--departments .entity-table__row,
+  .entity-table--users .entity-table__row,
+  .entity-table--configs .entity-table__row,
+  .entity-table--knowledge .entity-table__row,
+  .entity-table--folders .entity-table__row,
+  .entity-table--documents .entity-table__row,
+  .entity-table--imports .entity-table__row,
+  .entity-table--index-jobs .entity-table__row,
+  .entity-table--index-health .entity-table__row,
+  .entity-table--snapshots .entity-table__row,
+  .entity-table--query-logs .entity-table__row,
+  .entity-table--model-calls .entity-table__row {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .upload-panel,
+  .upload-panel__main {
+    grid-template-columns: 1fr;
+  }
+
+  .row-actions {
+    justify-content: flex-start;
+  }
+
+  .pagination-bar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .flow-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .admin-workspace,
+  .workspace {
+    padding: 16px;
+  }
+
+  .admin-toolbar,
+  .toolbar,
+  .action-bar {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .panel__header,
+  .panel__actions,
+  .list-filter,
+  .list-filter--imports,
+  .list-filter--documents,
+  .list-filter--knowledge,
+  .list-filter--diagnostics,
+  .list-filter--index-ops,
+  .list-filter--index-restore,
+  .list-filter--model-calls,
+  .list-filter__fields,
+  .index-ops-layout,
+  .index-ops-composite,
+  .index-ops-row,
+  .index-ops-action-row,
+  .index-ops-card--restore .index-ops-row,
+  .selector-search,
+  .modal__header,
+  .modal__footer,
+  .modal__body--split {
+    grid-template-columns: 1fr;
+  }
+
+  .index-ops-card--restore {
+    grid-column: auto;
+  }
+
+  .panel__header,
+  .panel__actions,
+  .modal__header,
+  .modal__footer {
+    display: grid;
+    justify-items: stretch;
+  }
+
+  .list-filter__actions {
+    justify-content: stretch;
+  }
+
+  .list-filter__button {
+    width: 100%;
+  }
+
+  .pagination-bar,
+  .pagination-bar__controls {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .pagination-bar__controls button,
+  .pagination-bar__controls select {
+    width: 100%;
+  }
+
+  .control--compact {
+    width: 100%;
+  }
+
+  .modal-backdrop {
+    padding: 12px;
+  }
+
+  .modal {
+    max-height: calc(100vh - 24px);
+  }
+
+  .modal__body--document-details {
+    padding-right: 18px;
+  }
+
+  .user-menu {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .user-menu > div {
+    justify-items: start;
+  }
+
+  .flow-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .checkbox-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .field,
+  .field--full {
+    grid-column: auto;
+  }
+
+  .summary__row {
+    grid-template-columns: 1fr;
+  }
+
+  .summary dd {
+    text-align: left;
+  }
+
+  .action-bar__buttons {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+}

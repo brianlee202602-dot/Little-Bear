@@ -15,7 +15,8 @@ Little Bear 是面向企业内部知识检索与问答的 RAG 系统工作区，
 - `packages/shared-contracts`：前后端共享契约包。
 - `packages/frontend-sdk`：前端 API SDK 包。
 - `packages/ui`：共享 UI 包。
-- `docs`：架构、模块、OpenAPI、数据库、权限、状态机、测试和运维文档。
+- `docs`：当前成熟项目文档，存放经过实现校对的架构设计、功能说明和开发约束。
+- `design_docs_history`：历史设计文档归档，包含旧架构、模块、OpenAPI、数据库、权限、状态机、测试和运维文档。
 - `tests`：单元、集成、契约和端到端测试目录。
 
 ## 技术栈
@@ -173,8 +174,8 @@ Python 质量工具以 `pyproject.toml` 为准：
 ## 前端编码规范
 
 - 使用 Vue 3 Composition API 与 TypeScript。
-- API 调用集中在各应用 `src/api/client.ts` 或共享 SDK 中，组件不要散落拼接后端 URL。
-- 管理后台和普通前端的 DTO 必须匹配 `docs/contracts/openapi.yaml` 和后端 `api/schemas`；字段命名保持后端契约原名。
+- API 调用集中在各应用 `src/api/<domain>.ts` 或共享 SDK 中，组件不要散落拼接后端 URL。
+- 管理后台和普通前端的 DTO 必须匹配 `design_docs_history/contracts/openapi.yaml` 和后端 `api/schemas`；字段命名保持后端契约原名。
 - 认证统一使用 `Authorization: Bearer <jwt>`。
 - 前端不得持久化或展示 secret value、完整 token、密码、完整 prompt 或未脱敏敏感原文。
 - 错误展示应使用后端返回的 `error_code`、`message`、`request_id` 或 `debug_id`，不要吞掉结构化错误。
@@ -183,17 +184,17 @@ Python 质量工具以 `pyproject.toml` 为准：
 
 ## API 与契约规范
 
-- OpenAPI 契约文件是 `docs/contracts/openapi.yaml`。
-- 权限矩阵是 `docs/contracts/权限矩阵.md`。
-- 审计事件字典是 `docs/contracts/审计事件字典.md`。
-- 状态机设计是 `docs/contracts/状态机设计.md`。
-- 配置 schema 是 `docs/contracts/config.schema.json` 和 `docs/contracts/config-schema.md`。
-- 数据库 schema 设计是 `docs/contracts/database-schema.md`。
+- OpenAPI 契约文件是 `design_docs_history/contracts/openapi.yaml`。
+- 权限矩阵是 `design_docs_history/contracts/权限矩阵.md`。
+- 审计事件字典是 `design_docs_history/contracts/审计事件字典.md`。
+- 状态机设计是 `design_docs_history/contracts/状态机设计.md`。
+- 配置 schema 是 `design_docs_history/contracts/config.schema.json` 和 `design_docs_history/contracts/config-schema.md`。
+- 数据库 schema 设计是 `design_docs_history/contracts/database-schema.md`。
 
 任何 API 非兼容变更必须同步更新：
 
 - 后端实现。
-- `docs/contracts/openapi.yaml`。
+- `design_docs_history/contracts/openapi.yaml`。
 - 权限矩阵。
 - 审计事件字典。
 - P0 测试用例。
@@ -353,16 +354,18 @@ make PYTHON=.venv/bin/python release-smoke-p0
 
 ## 文档同步要求
 
-变更前优先阅读相关文档：
+变更前优先阅读相关文档；当前成熟文档优先读 `docs/`，历史契约和旧模块说明暂读 `design_docs_history/`：
 
-- 总体架构：`docs/架构设计文档.md`
-- 公共实现约束：`docs/modules/00-公共实现约束.md`
-- 后端模块边界：`docs/architecture/backend-module-boundaries.md`
-- 本地开发：`docs/development/本地开发环境.md`
-- 测试计划：`docs/testing/测试计划.md`
-- 部署发布：`docs/operations/部署与发布检查清单.md`
+- 管理后台前端架构：`docs/frontend/管理后台前端架构设计书.md`
+- 查询前端架构：`docs/frontend/查询前端架构设计书.md`
+- 总体架构：`design_docs_history/架构设计文档.md`
+- 公共实现约束：`design_docs_history/modules/00-公共实现约束.md`
+- 后端模块边界：`design_docs_history/architecture/backend-module-boundaries.md`
+- 本地开发：`design_docs_history/development/本地开发环境.md`
+- 测试计划：`design_docs_history/testing/测试计划.md`
+- 部署发布：`design_docs_history/operations/部署与发布检查清单.md`
 
-涉及模块实现时，同时阅读对应 `docs/modules/<编号>-*.md`。代码、测试、OpenAPI、权限矩阵、状态机、审计字典和前端 SDK 必须保持一致；不允许只改实现不改契约。
+涉及模块实现时，同时阅读对应 `design_docs_history/modules/<编号>-*.md`。代码、测试、OpenAPI、权限矩阵、状态机、审计字典和前端 SDK 必须保持一致；不允许只改实现不改契约。
 
 ## Git 与工作区要求
 

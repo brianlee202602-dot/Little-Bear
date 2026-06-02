@@ -1,0 +1,58 @@
+.form-grid--compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 16px;
+}
+
+.form-grid--modal {
+  padding: 0;
+}
+
+.admin-list-panel {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+}
+
+.pagination-bar--compact {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.list-filter .control {
+  box-sizing: border-box;
+  min-height: 43px;
+}
+
+.list-filter .field {
+  grid-column: auto;
+}
+
+.list-filter--imports .list-filter__fields {
+  grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(140px, 180px));
+}
+
+.list-filter--documents .list-filter__fields {
+  grid-template-columns: minmax(180px, 240px);
+}
+
+.list-filter--knowledge .list-filter__fields {
+  grid-template-columns: minmax(260px, 1fr) minmax(180px, 240px);
+}
+
+.list-filter--diagnostics .list-filter__fields {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.list-filter--index-ops .list-filter__fields {
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.7fr) minmax(190px, 0.75fr);
+}
+
+.list-filter--index-restore .list-filter__fields {
+  grid-template-columns: minmax(260px, 1.2fr) minmax(130px, 0.45fr) minmax(160px, 0.6fr) minmax(260px, 1fr);
+}
+
+.list-filter--model-calls .list-filter__fields {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}

@@ -1,6 +1,10 @@
 # Little Bear
 
-Little Bear 是一个面向企业内部知识检索与问答场景的 RAG 系统工作区。当前仓库已整理设计文档，并搭好了后端 API、Worker、Vue3 普通前端和 Vue3 管理后台的最小骨架。
+更新时间：2026-06-02
+
+Little Bear 是一个面向企业内部知识检索与问答场景的 RAG 系统工作区。当前仓库已完成 RAG 主链路、导入索引 Worker、普通用户查询前端、管理后台核心功能、P0 验收入口，以及后端模块化重构的主要收口工作；前端已完成查询端和管理后台 P0-P13 模块化拆分与样式收口，P14 管理后台大文件二次拆分已继续完成文档弹窗、setup flow、用户表单、角色绑定、配置表单处理、知识库 runtime 和用户 runtime 的职责迁移。
+
+本文只记录项目定位、启动方式、开发约定和当前已完成能力，不承载后续推进说明或任务排期。
 
 ## 目录结构
 
@@ -18,7 +22,8 @@ packages/
 
 infra/
 tests/
-docs/
+docs/                  当前成熟项目文档
+design_docs_history/   历史设计文档归档
 ```
 
 ## 现有基础设施
@@ -154,7 +159,7 @@ make PYTHON=.venv/bin/python smoke-p0-record
 make PYTHON=.venv/bin/python query-regression-p0
 ```
 
-默认查询回归样例位于 `docs/examples/query-regression.p0.jsonl`。真实验收时应复制并替换为当前业务知识库的问题、预期引用和必要关键词；执行记录默认写入 `artifacts/`，不会提交到仓库。
+默认查询回归样例当前归档于 `design_docs_history/examples/query-regression.p0.jsonl`。真实验收时应复制并替换为当前业务知识库的问题、预期引用和必要关键词；执行记录默认写入 `artifacts/`，不会提交到仓库。
 
 发布前可以使用当前非破坏性 P0 验收目标串联 smoke 记录和查询回归：
 
@@ -171,11 +176,17 @@ make PYTHON=.venv/bin/python release-smoke-p0
 - 项目代码中的注释、docstring 和面向开发者的说明默认使用中文。
 - 注释优先解释设计意图、权限边界、事务边界、幂等、降级和安全限制，不重复描述显而易见的代码行为。
 - 错误码、API 字段、数据库字段、配置 key、scope、枚举值和第三方协议术语保持契约中的原始名称。
+- 每次代码更新都必须同步更新本 README 中的当前状态或相关说明；后端、前端、脚本、迁移、契约和文档对齐类变更都应同步维护这里的项目说明，避免 README 与实现进度脱节。
 
 ## 当前状态
 
-- 设计文档和工程契约已收敛，包含 MVP、OpenAPI、数据库 Schema、权限矩阵、状态机、审计事件字典和测试计划。
+- 文档目录已重新分层：`docs/` 用于存放经过实现校对的成熟项目文档，旧 `docs` 已整体归档为 `design_docs_history/`，用于保留历史设计、模块计划、联调记录和旧契约文档。
+- 运行时配置 Schema 读取、OpenAPI 契约单测、查询回归默认数据集和初始化示例配置路径已同步到 `design_docs_history/`，避免目录重命名后测试与脚本继续读取旧路径。
+- 设计文档和工程契约已收敛，历史归档中保留 MVP、OpenAPI、数据库 Schema、权限矩阵、状态机、审计事件字典和测试计划。
+- 文档与实现已完成一轮对照整改：OpenAPI 已挂载接口与契约差异被测试跟踪，P1/P2 contract-only 接口已在文档中标注阶段边界。
 - 后端控制面已初步落地：初始化、setup JWT、active config、Secret Store、认证会话、配置管理、用户/部门/角色绑定管理、审计查询和健康检查。
+- 后端接口层公共能力已收敛：认证、request_id / trace_id、分页、结构化错误响应、ServiceError 基类和对象存储 runtime 已抽为公共依赖或共享模块。
+- 后端模块化重构已完成 P0-P5 主要任务：Admin、Auth、Audit、Config、Import Pipeline、Indexing、Knowledge、Permission、Query、Setup 等模块已按 service / repository / runtime / writer / presenter 等边界拆分；历史 `core.py` 中间兼容文件已删除，当前 `apps/api/app/modules` 下不再保留 `*core.py`。
 - 数据库迁移已覆盖 P0 大部分核心表：配置、认证、组织、权限、知识库、文档、索引、导入任务、审计、查询日志和模型调用日志。
 - 管理后台已接入 setup、登录、配置、用户、部门、角色绑定、审计查询和知识库运营页面；知识库页面已支持知识库 CRUD、文件夹 CRUD、指定文件夹上传、文档列表、文档版本、chunk 预览以及知识库 / 文档权限变更。
 - Permission Service 核心已落地；管理端知识库、文件夹和文档元数据管理已接入权限边界。
@@ -183,12 +194,26 @@ make PYTHON=.venv/bin/python release-smoke-p0
 - Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、MinIO/S3 对象存储交接、PDF / DOCX / UTF-8 文本 / Markdown parse-clean-chunk、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入、active index 发布，以及权限变更后的索引 payload 刷新任务。
 - Query Service 非流式链路已落地：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、rerank provider、Permission Service filter、候选 gate、Context Builder、LLM provider、citation 校验、query_logs、model_call_logs 和高风险 query audit 写入；rerank、LLM 不可用或 citation 校验失败时结构化降级。
 - Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、provider token 级流式答案、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、服务端历史会话同步、多轮消息展示、会话删除、降级状态、request_id 和 trace_id 展示。
+- 普通用户查询前端已完成模块化拆分和工作区运行态下沉，并新增 `docs/frontend/查询前端架构设计书.md` 作为团队开发架构说明：`App.vue` 只挂载 `ChatWorkspace.vue`，跨域编排迁入 `useChatWorkspaceRuntime.ts`；HTTP 层、认证会话、会话列表、知识库选择、聊天输入、流式查询执行、消息列表、来源片段预览和浏览器存储已拆入 `apps/web/src/features`、`apps/web/src/components`、`apps/web/src/utils` 和 `apps/web/src/api`。`useQueryStream` 已改为依赖会话窄接口，SSE 事件已补 runtime guard，避免弱类型事件直接写入消息状态。
+- 普通用户查询前端已修复历史会话消息排序：刷新页面、切换会话和加载历史消息时，会按时间线归一化消息顺序；同一轮问答使用 `createdAt + debugId` 聚组，并保证用户提问显示在对应回答上方。
+- 管理后台前端已完成 P0-P4 模块化重构：公共 HTTP 层、通用工具、基础组件、后台外壳、菜单权限、初始化页面、配置管理、部门管理、用户管理和角色绑定已拆入 `apps/admin/src/features`、`apps/admin/src/components`、`apps/admin/src/composables` 和 `apps/admin/src/app`；配置、部门、用户相关请求和状态已分别迁移到对应 composable。
+- 管理后台知识库管理前端已完成 P5 拆分：知识库主列表页、知识库操作弹窗、文件夹操作弹窗、文档管理弹窗、文件夹管理面板、文档权限 / 版本片段弹窗已抽入 `apps/admin/src/features/knowledge`；知识库列表、详情、权限、文件夹、文档、导入上传、版本片段、批量索引等主要操作逻辑已迁入 `useKnowledgeBaseAdmin.ts`；`apps/admin/src/App.vue` 已从约 14102 行降至约 7654 行。
+- 管理后台运维诊断审计前端已完成 P6 拆分：索引运维、Qdrant 快照、查询日志、查询详情、模型调用日志、模型调用详情和配置审计日志已抽入 `apps/admin/src/features/diagnostics` 与 `apps/admin/src/features/audit`；诊断请求状态已迁入 `useDiagnostics.ts`，配置审计请求状态已迁入 `useAuditLogs.ts`，降级原因短中文描述和诊断状态 tone 已迁入 `apps/admin/src/utils/status.ts`；`apps/admin/src/App.vue` 当前约 6337 行。
+- 前端 API client 已完成 P7 收口：普通查询端 API 已拆为 `auth`、`knowledge`、`documents`、`conversations`、`query`、`health` 和 `types` 模块，页面和 composable 已直接 import 具体 API 模块，不再保留 `apps/web/src/api/client.ts` 兼容聚合入口；管理后台 API 已拆为 `setup`、`auth`、`config`、`audit`、`diagnostics`、`departments`、`users`、`roles`、`knowledgeBases`、`folders`、`documents`、`imports`、`indexOps` 及各领域类型模块，管理后台不再保留 `apps/admin/src/api/client.ts` / `apps/admin/src/api/types.ts` 兼容聚合入口。
+- 前端样式已完成 P8 收口：普通查询端 `App.vue` 已移除大块 scoped style，样式拆入 `apps/web/src/styles/tokens.css`、`base.css` 和 `chat.css`；管理后台 `App.vue` 已移除全局 style，样式拆入 `apps/admin/src/styles/tokens.css`、`base.css`、`layout.css`、`ui-controls.css`、`list-filter-layouts.css`、`entity-tables.css`、`modals.css`、`pickers.css`、`setup-layout.css`、`setup-forms.css`、`setup-feedback.css` 和 `responsive.css`；旧的列表筛选和分页全局规则已按组件结构调整，并已通过 mock 运行态截图验证查询端、管理后台主页面和代表性弹窗在桌面宽度下无横向溢出、无离屏按钮、无 console error。
+- 管理后台启动与认证已完成 P9 深拆：`apps/admin/src/App.vue` 只挂载 `AdminRoot`，登录页迁入 `apps/admin/src/app/LoginPage.vue`，setup-state / active view / 路径同步、管理员会话 token / 登录恢复 / 退出、tab 切换分别迁入 `useAdminBootstrap.ts`、`useAdminSession.ts` 和 `useAdminNavigation.ts`；本轮已通过管理后台 typecheck 和 build。
+- 管理后台 setup 域已完成 P10 深拆：初始化表单、payload、后端校验、初始化提交、字段更新和页面派生状态已迁入 `apps/admin/src/features/setup/useSetupFlow.ts`；本地确定性校验迁入 `setupValidation.ts`，结构化错误 / bootstrap check / database error 提取迁入 `setupErrors.ts`；`SetupPage.vue` 已改为消费单一 setup flow。
+- 管理后台用户、部门和角色绑定已完成 P11 深拆：部门弹窗表单与可操作状态迁入 `useDepartmentModals.ts`，用户新增 / 编辑 / 删除 / 密码重置状态迁入 `useUserModals.ts`，用户部门绑定分页和主部门替换确认迁入 `useUserDepartmentBindings.ts`，角色候选、作用域默认选择和高风险确认迁入 `useUserRoleBindings.ts`；部门与角色展示文案迁入 `departmentDisplay.ts` / `userDisplay.ts`；`DepartmentManagementPanel.vue` 和 `UserManagementPanel.vue` 负责组装列表与弹窗。
+- 管理后台知识库域已完成 P12 深拆：知识库 / 文件夹 / 文档权限 / 上传 / 索引重建 modal 与表单状态迁入 `useKnowledgeModals.ts`，父知识库权限校验和 ACL 规则构建迁入 `useKnowledgePermissions.ts`，文档详情、版本 / chunk、批量重建和索引清理选择迁入 `useDocumentSelection.ts`，知识库 / 文件夹 / 文档 / 导入任务 / 索引版本 / chunk 展示文案迁入 `knowledgeDisplay.ts`；`KnowledgeBaseAdminContainer.vue` 负责组装知识库列表与相关弹窗。
+- 管理后台展示工具与上下文已完成 P13 收口：状态文案、tone、布尔值、耗时、token 用量、审计时间、短 ID、分页、结构化错误和集合去重已分别迁入 `apps/admin/src/utils/display.ts`、`date.ts`、`pagination.ts`、`errors.ts` 和 `collections.ts`；audit、diagnostics、knowledge、department、user 页面 model 已改为各 feature 内部的命名上下文类型，`apps/admin/src/features` 与 `apps/admin/src/app` 下不再使用 `Record<string, any>` 页面 ctx。
+- 管理后台知识库管理 composable 已完成大文件二次拆分：`apps/admin/src/features/knowledge/useKnowledgeBaseAdmin.ts` 当前约 199 行，只负责组装 options、import jobs、documents、folders、records、upload、refresh 和 access selection 子域；知识库刷新编排、记录 CRUD、上传导入、访问部门勾选已分别迁入 `useKnowledgeBaseAdminRefresh.ts`、`useKnowledgeBaseRecords.ts`、`useKnowledgeBaseUpload.ts` 和 `useKnowledgeBaseAccessSelection.ts`，并已通过 `npm run typecheck:admin` 与 `npm run build:admin`。
+- 管理后台根组件已完成运行态迁移：`apps/admin/src/app/AdminRoot.vue` 当前约 55 行，只负责 loading、登录、dashboard 和 setup 顶层视图分支；原根组件中的认证、setup、能力、导航迁入 `useAdminAppRuntime.ts`，dashboard tab 与页面容器挂载迁入 `AdminDashboard.vue`；配置、部门、用户、知识库、诊断等业务域运行态已迁入各自 `features/<domain>/<Domain>Feature.vue`，旧 app 级 `adminContexts.ts`、`useAdminDomainContexts.ts`、`contexts/knowledgeContext.ts` 和 `useAdminDisplayLookups.ts` 已删除。
+- 管理后台构建入口已完成首轮按需加载优化：`featureRegistry.ts` 中配置、部门、用户、知识库和诊断 feature 已改为 `defineAsyncComponent` 动态 import，`AdminRoot.vue` 中初始化 `SetupPage` 也已改为动态加载；管理后台首包不再同步打入所有业务页面。异步加载后已将 `.panel`、`.button`、`.field`、`.control`、`.summary`、`.tone` 等通用 UI 样式接入全局 `ui-controls.css`，避免继续依赖 setup 页面静态导入带来的样式副作用。
+- 管理后台前端架构专项重构已完成 P0-P12 前端代码门禁：已新增 `docs/frontend/管理后台前端架构设计书.md`，用于记录团队开发架构约束；`AdminRoot.vue` 已 provide session、capability、navigation 和 typed event bus，`AdminDashboard.vue` 已通过 provider 获取 shell 运行态；新增 `featureRegistry.ts` 与 `AdminFeatureOutlet.vue`，dashboard 不再硬编码具体业务页面；部门、配置、诊断、用户、知识库管理页已迁入各自 `features/<domain>/<Domain>Feature.vue` 自持运行态；根运行态已重命名为 `useAdminAppRuntime.ts` 并收缩为 app lifecycle / session / capability / navigation / setup 状态，不再 import 业务域 runtime 或 feature display helper；P10 已移除 app outlet legacy `ctx`、知识库组件 `ctx` 命名、诊断 / 配置 / 用户 / 知识库 action 的显式 `any` option bag，并完成用户管理与知识库管理聚合 model、知识库文档 / 知识库记录 action 聚合点的明确类型建模；P11 已将配置、诊断、知识库文档和 setup 专属样式改为由 feature 入口加载，全局样式只保留 tokens、base、layout、通用筛选布局、通用表格、modal、选择器和响应式规则；P12 已通过 `npm run typecheck:admin`、`npm run build:admin`、架构约束扫描和生产预览首页 200 验证。当前 `apps/admin/src/app`、`features`、`components`、`composables`、`utils` 范围内显式 `any` 扫描无命中。
+- 管理后台已从“模板拆分”进入“状态所有权迁移”：部门域列表、部门 options、搜索表单、分页、busy、feedback 和部门弹窗表单已迁入 `apps/admin/src/features/departments/useDepartmentAdminRuntime.ts`；用户域列表、用户详情、用户搜索分页、用户弹窗、部门绑定、角色绑定和用户 CRUD action 已迁入 `apps/admin/src/features/users/useUserAdminRuntime.ts`；知识库、文件夹、文档、导入任务、失败索引任务、文档批量选择、知识库权限和文档权限运行态已迁入 `apps/admin/src/features/knowledge/useKnowledgeAdminRuntime.ts`，并继续拆出 `useKnowledgeAdminState.ts`、`useKnowledgeDerivedState.ts`、`useKnowledgeFailedIndexJobs.ts`、`useKnowledgeDocumentIndexState.ts`、`useKnowledgeAdminReset.ts` 和 `knowledgeDepartmentLookup.ts`。`AdminRoot.vue` 不再直接创建或清空部门 / 用户 / 知识库域状态，只消费领域 runtime 暴露的状态和动作。
+- 管理后台配置与诊断 composable 已完成大文件拆分：`useConfigManagement.ts` 只保留配置列表、弹窗和版本状态编排，配置表单回填、配置 section 合并和值类型兜底已分别迁入 `configFormHydration.ts`、`configSectionMerge.ts` 和 `configValueCoercion.ts`，配置版本 API action 迁入 `useConfigVersionActions.ts`；`useDiagnostics.ts` 当前约 327 行，索引运维动作迁入 `useIndexDiagnostics.ts`，Qdrant 快照 / 恢复 / 重建索引动作迁入 `useIndexSnapshotDiagnostics.ts`，查询日志 / 模型调用日志动作迁入 `useLogDiagnostics.ts`。
+- 管理后台知识库多模式弹窗和大型 CSS 已完成第一轮拆分：`KnowledgeBaseModal.vue` 当前约 334 行，新增知识库、上传、重建索引、删除模式分别迁入 `KnowledgeBaseCreateForm.vue`、`KnowledgeBaseUploadForm.vue`、`KnowledgeBaseIndexRebuildPanel.vue` 和 `KnowledgeBaseDeletePanel.vue`；`operations.css` 和 `setup-controls.css` 兼容 facade 已删除，入口样式改为直接 import `entity-tables.css`、`modals.css`、`pickers.css`、`setup-layout.css`、`setup-forms.css` 和 `setup-feedback.css`。
+- 管理后台 P14 已继续完成剩余大文件拆分：`setupDefaults.ts` 过渡 facade 已删除，初始化模型、默认值和 payload builder 分别由 `setupModel.ts`、`setupDefaultValues.ts` 和 `setupPayloadBuilder.ts` 直接提供；`setupFields.ts` 已按字段类型、基础初始化、模型切片和策略高级拆分；`useSetupFlow.ts` 已进一步拆为 setup 状态容器、派生状态、远程动作、字段写入和状态文案模块；`useUsers.ts` 已拆为账号、部门归属和角色绑定动作；`useUserAdminRuntime.ts` 已迁出用户域刷新、弹窗动作和基础状态；`useUserRoleBindings.ts` 已迁出角色候选、作用域默认选择和绑定刷新；`UserFormModal.vue` 已拆为新增、编辑、删除三个子表单；`KnowledgeBaseListPage.vue` 已迁出导入任务 / 失败索引任务区；`DocumentPermissionModal.vue` 已拆为权限编辑、文档版本、索引版本、Chunk 预览和详情壳组件；`useKnowledgeBaseRecords.ts` 已迁出知识库 modal、索引动作、CRUD action 和记录映射；`useKnowledgeDocuments.ts` 已迁出文档加载和文档索引动作；`useKnowledgeAdminRuntime.ts` 已迁出知识库 runtime 派生切片；`useKnowledgePermissions.ts` 已迁出权限类型和 ACL 规则。管理后台 feature 文件当前已无超过 450 行的大文件。
+- 管理后台文档详情弹窗已完成版本区展示收口：文档版本、索引版本和 Chunk 预览在单页数据时不再显示无效分页控件，文档版本卡片与索引版本面板的网格比例已调整，避免刷新后出现窄列分页挤压和元素排列失衡。
+- 管理后台索引运维健康检查已补齐仓储层 SQL 回归防护：`/internal/v1/admin/index-health` 的 collection health 查询已修复 CTE 分隔错误，避免刷新索引健康列表时因 SQL 语法异常返回 `INDEX_HEALTH_UNAVAILABLE`。
 - 已新增 P0 主链路 smoke 脚本、脱敏执行记录和查询回归数据集入口；`employee` 内置角色已补齐 `knowledge_base:read` 初始化模板和存量迁移。
-- 当前版本暂不纳入复杂版式 / OCR 解析、查询改写、索引自动修复和在线评测平台；这些能力保留为后续增强项，不作为当前投产门禁。
-- 当前开发进度详见根目录 `开发进度追踪.md`。
-
-建议下一步按以下顺序推进：
-
-1. 补齐当前环境 `.env` 中的生产必填项，尤其是数据库、JWT、Secret Store、MinIO、Qdrant、模型 provider 和前端 API 地址。
-2. 启动 Docker / API / Worker 后执行 `make test`、前端构建、`make pg-backup` 和 `make release-smoke-p0`，并保存 `artifacts/` 下的验收记录。
-3. 按 `docs/operations/部署与发布检查清单.md` 完成写入型人工验收：文档上传、导入 Worker、索引重建、权限收紧、删除阻断、查询诊断日志和恢复演练。

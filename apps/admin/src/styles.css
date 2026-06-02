@@ -1,26 +1,9 @@
-:root {
-  font-family: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  color: #18202a;
-  background: #f3f5f7;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-}
-
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
+@import "./styles/tokens.css";
+@import "./styles/base.css";
+@import "./styles/layout.css";
+@import "./styles/ui-controls.css";
+@import "./styles/list-filter-layouts.css";
+@import "./styles/entity-tables.css";
+@import "./styles/modals.css";
+@import "./styles/pickers.css";
+@import "./styles/responsive.css";

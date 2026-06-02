@@ -1,0 +1,147 @@
+.shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  color: #18202a;
+  background: #f3f5f7;
+}
+
+.sidebar {
+  background: #20252d;
+  color: #f4f6f8;
+  padding: 24px 20px;
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  border-right: 1px solid #303744;
+}
+
+.sidebar__block {
+  display: grid;
+  gap: 12px;
+}
+
+.brand {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  color: #98a4b5;
+}
+
+.title {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.section-title {
+  margin: 0;
+  font-size: 14px;
+  color: #d6dce5;
+}
+
+.check-counter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.section-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.section-checks li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #d6dce5;
+  font-size: 13px;
+}
+
+.stack {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace {
+  min-width: 0;
+  padding: 24px;
+  display: grid;
+  gap: 20px;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 16px;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: #667182;
+}
+
+.toolbar h2,
+.panel h3 {
+  margin: 0;
+}
+
+.flow-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.flow-step {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  background: #ffffff;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+}
+
+.flow-step span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+  min-height: 0;
+}
+
+.editor,
+.rail {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.panel__header {
+  padding: 16px 18px;
+  border-bottom: 1px solid #e7ebf0;
+  background: #fbfcfd;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}

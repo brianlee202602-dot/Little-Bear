@@ -1,0 +1,164 @@
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: start;
+  gap: 14px 16px;
+  padding: 18px;
+}
+
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 14px 16px;
+  padding: 0 18px 18px;
+}
+
+.checkbox-grid > .field {
+  grid-column: auto;
+}
+
+.field {
+  min-width: 0;
+  grid-column: span 3;
+  display: grid;
+  grid-template-rows: auto minmax(35px, auto) auto auto;
+  align-content: start;
+  gap: 8px;
+}
+
+.field--full {
+  grid-column: 1 / -1;
+}
+
+.checkbox-list {
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 12px 4px 0;
+  color: #263241;
+  font-size: 13px;
+}
+
+.field__label {
+  font-size: 13px;
+  color: #516072;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field__hint {
+  margin: 0;
+  color: #6c7788;
+  font-size: 12px;
+  line-height: 1.45;
+  min-height: 35px;
+  overflow-wrap: anywhere;
+}
+
+.field__hint--empty {
+  visibility: hidden;
+}
+
+.required-mark {
+  color: #7a4b14;
+  background: #fff6e9;
+  border: 1px solid #ead9bd;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+.field--checkbox {
+  padding: 12px 14px;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #fafbfd;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.field--checkbox > span {
+  min-width: 0;
+  color: #1d2935;
+  line-height: 1.4;
+  overflow-wrap: break-word;
+  white-space: normal;
+}
+
+.field--checkbox .field__hint {
+  grid-column: 2 / -1;
+}
+
+.field--checkbox .field-issues {
+  grid-column: 2 / -1;
+}
+
+.control {
+  width: 100%;
+  border: 1px solid #cdd5df;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #18202a;
+  padding: 10px 12px;
+  font: inherit;
+}
+
+.control--compact {
+  width: auto;
+  min-width: 82px;
+  padding: 6px 10px;
+}
+
+.config-json-editor {
+  min-height: 320px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.control:focus {
+  outline: 2px solid #8ec5b1;
+  outline-offset: 1px;
+  border-color: #8ec5b1;
+}
+
+.field--error .control {
+  border-color: #d08383;
+}
+
+.field--warning .control {
+  border-color: #d9bd75;
+}
+
+.field-issues {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.field-issue {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.field-issue--error {
+  color: #9a2f2f;
+}
+
+.field-issue--warning {
+  color: #7a4b14;
+}

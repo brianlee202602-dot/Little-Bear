@@ -46,7 +46,7 @@ class IndexCollectionHealthRepository:
                         LEFT JOIN chunk_index_refs cir ON cir.index_version_id = iv.id
                         WHERE iv.enterprise_id = CAST(:enterprise_id AS uuid)
                         GROUP BY iv.id, iv.collection_name, iv.status, iv.chunk_count
-                    )
+                    ),
                     collection_health AS (
                         SELECT
                             collection_name,

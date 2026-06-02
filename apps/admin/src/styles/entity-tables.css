@@ -1,0 +1,151 @@
+.batch-action-bar {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 12px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.entity-table {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.entity-table__row {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px 14px;
+  display: grid;
+  gap: 12px;
+  align-items: center;
+}
+
+.entity-table--departments .entity-table__row {
+  grid-template-columns: minmax(240px, 1.6fr) minmax(110px, 0.7fr) minmax(90px, 0.6fr) minmax(140px, 0.8fr);
+}
+
+.entity-table--users .entity-table__row {
+  grid-template-columns: minmax(180px, 1.1fr) minmax(105px, 0.55fr) minmax(190px, 1.25fr) minmax(190px, 1.2fr) minmax(240px, 1.35fr);
+}
+
+.entity-table--configs .entity-table__row {
+  grid-template-columns: minmax(130px, 0.65fr) minmax(100px, 0.45fr) minmax(150px, 0.7fr) minmax(150px, 0.7fr) minmax(220px, 1.2fr) minmax(220px, 1fr);
+}
+
+.entity-table--knowledge .entity-table__row {
+  grid-template-columns: minmax(220px, 1.2fr) minmax(90px, 0.4fr) minmax(150px, 0.7fr) minmax(160px, 0.7fr) minmax(430px, auto);
+}
+
+.entity-table--folders .entity-table__row {
+  grid-template-columns: minmax(220px, 1.35fr) minmax(100px, 0.5fr) minmax(180px, 0.9fr) minmax(150px, 0.75fr);
+}
+
+.entity-table--documents .entity-table__row {
+  grid-template-columns: minmax(220px, 1.25fr) minmax(120px, 0.6fr) minmax(100px, 0.5fr) minmax(110px, 0.55fr) minmax(190px, 0.9fr) minmax(150px, 0.75fr) minmax(190px, 0.9fr);
+}
+
+.entity-table--documents-selectable .entity-table__row {
+  grid-template-columns: 44px minmax(220px, 1.25fr) minmax(120px, 0.6fr) minmax(100px, 0.5fr) minmax(110px, 0.55fr) minmax(190px, 0.9fr) minmax(150px, 0.75fr) minmax(190px, 0.9fr);
+}
+
+.entity-table--imports .entity-table__row {
+  grid-template-columns: minmax(220px, 1.2fr) minmax(100px, 0.5fr) minmax(160px, 0.8fr) minmax(100px, 0.5fr) minmax(130px, 0.65fr) minmax(140px, 0.7fr) minmax(160px, 0.8fr);
+}
+
+.entity-table--index-jobs .entity-table__row {
+  grid-template-columns: 44px minmax(220px, 1.2fr) minmax(160px, 0.8fr) minmax(130px, 0.65fr) minmax(140px, 0.7fr) minmax(180px, 0.9fr);
+}
+
+.entity-table--index-health .entity-table__row {
+  grid-template-columns: minmax(220px, 1.2fr) minmax(170px, 0.8fr) minmax(160px, 0.75fr) minmax(230px, 1fr) minmax(180px, 0.9fr);
+}
+
+.entity-table--snapshots .entity-table__row {
+  grid-template-columns: minmax(240px, 1.2fr) minmax(90px, 0.4fr) minmax(180px, 0.8fr) minmax(180px, 0.8fr);
+}
+
+.entity-table--query-logs .entity-table__row {
+  grid-template-columns: minmax(220px, 1.1fr) minmax(190px, 0.95fr) minmax(130px, 0.65fr) minmax(90px, 0.45fr) minmax(150px, 0.75fr) minmax(100px, 0.5fr);
+}
+
+.entity-table--model-calls .entity-table__row {
+  grid-template-columns: minmax(190px, 1.2fr) minmax(150px, 0.85fr) minmax(140px, 0.75fr) minmax(90px, 0.45fr) minmax(150px, 0.75fr) minmax(96px, 0.45fr);
+}
+
+.entity-table__row--header {
+  border-color: transparent;
+  background: #eef2f5;
+  color: #516072;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.entity-table__row--selected {
+  border-color: #8ec5b1;
+  background: #f4fbf8;
+}
+
+.entity-main,
+.entity-cell {
+  min-width: 0;
+}
+
+.entity-main {
+  display: grid;
+  gap: 4px;
+}
+
+.entity-main strong,
+.entity-main span,
+.entity-cell {
+  overflow-wrap: anywhere;
+}
+
+.entity-main span,
+.entity-cell,
+.empty-inline {
+  color: #667182;
+  font-size: 12px;
+}
+
+.badge-list {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.badge {
+  max-width: 100%;
+  border: 1px solid #d8dee6;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #445163;
+  padding: 4px 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.row-actions {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.row-actions--dense {
+  justify-content: flex-start;
+}
+
+.row-actions--knowledge {
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}

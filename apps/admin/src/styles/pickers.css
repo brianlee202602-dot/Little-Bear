@@ -1,0 +1,104 @@
+.role-picker,
+.option-picker {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.selector-search {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  margin-top: 8px;
+}
+
+.selector-search--stacked {
+  margin: 0 0 8px;
+}
+
+.option-picker__grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.role-option,
+.option-card {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.role-option {
+  color: #1d2935;
+  overflow-wrap: anywhere;
+}
+
+.option-card {
+  min-height: 48px;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 10px 12px;
+  color: #1d2935;
+  overflow-wrap: anywhere;
+}
+
+.option-card span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.option-card small {
+  color: #2f7d66;
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .option-picker__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.role-binding-list {
+  display: grid;
+  gap: 10px;
+}
+
+.role-binding-row {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+}
+
+.role-binding-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.role-binding-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.role-binding-row strong {
+  overflow-wrap: anywhere;
+}
+
+.role-binding-row span {
+  margin: 0;
+  color: #667182;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
