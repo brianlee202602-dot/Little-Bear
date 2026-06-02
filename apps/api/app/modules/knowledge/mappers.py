@@ -127,17 +127,3 @@ def database_error(
         retryable=True,
         details={"error_type": exc.__class__.__name__},
     )
-
-
-# 旧测试和内部模块仍使用下划线 helper；保留别名，但真实归属为本 mapper。
-_knowledge_base_visibility_sql = knowledge_base_visibility_sql
-_knowledge_base_from_mapping = knowledge_base_from_mapping
-_folder_from_mapping = folder_from_mapping
-_document_from_mapping = document_from_mapping
-_document_list_item_from_mapping = document_list_item_from_mapping
-_document_version_from_mapping = document_version_from_mapping
-_chunk_from_mapping = chunk_from_mapping
-_optional_str = optional_str
-_optional_int = optional_int
-_json_mapping = json_mapping
-_database_error = database_error

@@ -80,6 +80,21 @@ def _open_business_api(monkeypatch) -> None:
     )
 
 
+def _patch_admin_route_session_scope(monkeypatch) -> None:
+    for module_name in (
+        "admin_users",
+        "admin_departments",
+        "admin_knowledge",
+        "admin_documents",
+        "admin_index_ops",
+        "admin_roles",
+    ):
+        monkeypatch.setattr(
+            f"app.api.routes.{module_name}.session_scope",
+            lambda: _FakeSession(),
+        )
+
+
 def _auth_context() -> AuthContext:
     user = AuthUser(
         id="user_1",
@@ -248,13 +263,13 @@ def test_admin_user_list_route_requires_user_read_scope(monkeypatch) -> None:
         return _auth_context()
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     def list_users(_self, _session, **kwargs):
         seen.update(kwargs)
         return AdminUserList(items=[_admin_user_list_item()], total=1)
 
-    monkeypatch.setattr("app.api.routes.admin.AdminService.list_users", list_users)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.list_users", list_users)
 
     client = TestClient(_create_test_app())
     response = client.get(
@@ -285,12 +300,12 @@ def test_admin_user_create_passes_high_risk_confirmation(monkeypatch) -> None:
         return _admin_user()
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.create_user", create_user)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.create_user", create_user)
 
     client = TestClient(_create_test_app())
     response = client.post(
@@ -337,9 +352,9 @@ def test_department_list_route_requires_org_read_scope(monkeypatch) -> None:
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
-    monkeypatch.setattr("app.api.routes.admin.AdminService.list_departments", list_departments)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.list_departments", list_departments)
 
     client = TestClient(_create_test_app())
     response = client.get(
@@ -380,10 +395,10 @@ def test_department_options_route_returns_minimal_selector_fields(monkeypatch) -
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_department_options",
+        "app.modules.admin.service.AdminService.list_department_options",
         list_department_options,
     )
 
@@ -428,9 +443,12 @@ def test_department_create_route_requires_org_manage_scope(monkeypatch) -> None:
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
-    monkeypatch.setattr("app.api.routes.admin.AdminService.create_department", create_department)
+    monkeypatch.setattr(
+        "app.modules.admin.service.AdminService.create_department",
+        create_department,
+    )
 
     client = TestClient(_create_test_app())
     response = client.post(
@@ -473,10 +491,10 @@ def test_knowledge_base_list_route_requires_manage_scope(monkeypatch) -> None:
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_knowledge_bases",
+        "app.modules.admin.service.AdminService.list_knowledge_bases",
         list_knowledge_bases,
     )
 
@@ -521,10 +539,10 @@ def test_knowledge_base_options_route_returns_minimal_selector_fields(monkeypatc
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_knowledge_base_options",
+        "app.modules.admin.service.AdminService.list_knowledge_base_options",
         list_knowledge_base_options,
     )
 
@@ -565,13 +583,13 @@ def test_knowledge_base_create_route_passes_confirmation_header(monkeypatch) -> 
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.create_knowledge_base",
+        "app.modules.admin.service.AdminService.create_knowledge_base",
         create_knowledge_base,
     )
 
@@ -612,10 +630,10 @@ def test_knowledge_base_get_route_requires_manage_scope(monkeypatch) -> None:
         return _knowledge_base()
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.get_knowledge_base",
+        "app.modules.admin.service.AdminService.get_knowledge_base",
         get_knowledge_base,
     )
 
@@ -651,13 +669,13 @@ def test_knowledge_base_patch_route_passes_visibility_confirmation(monkeypatch) 
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.patch_knowledge_base",
+        "app.modules.admin.service.AdminService.patch_knowledge_base",
         patch_knowledge_base,
     )
 
@@ -691,13 +709,13 @@ def test_knowledge_base_delete_route_returns_accepted_job(monkeypatch) -> None:
         return AdminAcceptedResult(accepted=True, job_id="job_1")
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.delete_knowledge_base",
+        "app.modules.admin.service.AdminService.delete_knowledge_base",
         delete_knowledge_base,
     )
 
@@ -728,9 +746,9 @@ def test_folder_list_route_requires_folder_manage_scope(monkeypatch) -> None:
         return type("FolderList", (), {"items": [_folder()], "total": 1})()
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
-    monkeypatch.setattr("app.api.routes.admin.AdminService.list_folders", list_folders)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.list_folders", list_folders)
 
     client = TestClient(_create_test_app())
     response = client.get(
@@ -766,10 +784,10 @@ def test_folder_options_route_returns_minimal_selector_fields(monkeypatch) -> No
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_folder_options",
+        "app.modules.admin.service.AdminService.list_folder_options",
         list_folder_options,
     )
 
@@ -805,12 +823,12 @@ def test_folder_create_route_passes_parent_id(monkeypatch) -> None:
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.create_folder", create_folder)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.create_folder", create_folder)
 
     client = TestClient(_create_test_app())
     response = client.post(
@@ -838,9 +856,9 @@ def test_folder_get_route_requires_folder_manage_scope(monkeypatch) -> None:
         return _folder()
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
-    monkeypatch.setattr("app.api.routes.admin.AdminService.get_folder", get_folder)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.get_folder", get_folder)
 
     client = TestClient(_create_test_app())
     response = client.get(
@@ -868,12 +886,12 @@ def test_folder_patch_route_passes_status(monkeypatch) -> None:
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.patch_folder", patch_folder)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.patch_folder", patch_folder)
 
     client = TestClient(_create_test_app())
     response = client.patch(
@@ -896,12 +914,12 @@ def test_folder_delete_route_returns_accepted_job(monkeypatch) -> None:
         return AdminAcceptedResult(accepted=True, job_id="job_folder_1")
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.delete_folder", delete_folder)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.delete_folder", delete_folder)
 
     client = TestClient(_create_test_app())
     response = client.delete(
@@ -927,9 +945,9 @@ def test_document_list_route_requires_document_manage_scope(monkeypatch) -> None
         return AdminDocumentList(items=[_document()], total=1)
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
-    monkeypatch.setattr("app.api.routes.admin.AdminService.list_documents", list_documents)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.list_documents", list_documents)
 
     client = TestClient(_create_test_app())
     response = client.get(
@@ -971,9 +989,9 @@ def test_document_get_route_requires_document_manage_scope(monkeypatch) -> None:
         return _document()
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
-    monkeypatch.setattr("app.api.routes.admin.AdminService.get_document", get_document)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.get_document", get_document)
 
     client = TestClient(_create_test_app())
     response = client.get(
@@ -1010,10 +1028,10 @@ def test_document_versions_route_requires_document_manage_scope(monkeypatch) -> 
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_document_versions",
+        "app.modules.admin.service.AdminService.list_document_versions",
         list_document_versions,
     )
 
@@ -1058,10 +1076,10 @@ def test_document_chunks_route_requires_document_manage_scope(monkeypatch) -> No
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_document_chunks",
+        "app.modules.admin.service.AdminService.list_document_chunks",
         list_document_chunks,
     )
 
@@ -1113,11 +1131,10 @@ def test_document_preview_route_requires_document_manage_scope(monkeypatch) -> N
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
-    monkeypatch.setattr("app.api.routes.admin._object_storage_or_none", lambda _session: None)
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.get_document_preview",
+        "app.modules.admin.service.AdminService.get_document_preview",
         get_document_preview,
     )
 
@@ -1166,10 +1183,10 @@ def test_document_index_versions_route_requires_document_index_scope(monkeypatch
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_document_index_versions",
+        "app.modules.admin.service.AdminService.list_document_index_versions",
         list_document_index_versions,
     )
 
@@ -1202,10 +1219,10 @@ def test_document_index_job_route_requires_confirmation(monkeypatch) -> None:
         return AdminAcceptedResult(accepted=True, job_id="job_1")
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.create_document_index_rebuild_job",
+        "app.modules.admin.service.AdminService.create_document_index_rebuild_job",
         create_document_index_rebuild_job,
     )
 
@@ -1234,10 +1251,10 @@ def test_index_job_route_passes_batch_payload_and_confirmation(monkeypatch) -> N
         return AdminAcceptedResult(accepted=True, job_id="job_batch_1")
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.create_index_rebuild_job",
+        "app.modules.admin.service.AdminService.create_index_rebuild_job",
         create_index_rebuild_job,
     )
 
@@ -1268,10 +1285,10 @@ def test_index_version_cleanup_job_route_passes_payload_and_confirmation(monkeyp
         return AdminAcceptedResult(accepted=True, job_id="job_cleanup_1")
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.create_index_version_cleanup_job",
+        "app.modules.admin.service.AdminService.create_index_version_cleanup_job",
         create_index_version_cleanup_job,
     )
 
@@ -1325,10 +1342,10 @@ def test_index_health_route_requires_document_index_scope(monkeypatch) -> None:
             )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.build_index_ops_service",
+        "app.api.routes.admin_index_ops.build_index_ops_service",
         lambda _session: _FakeIndexOpsService(),
     )
 
@@ -1382,10 +1399,10 @@ def test_index_collection_snapshot_routes_require_document_index_scope(monkeypat
             )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.build_index_ops_service",
+        "app.api.routes.admin_index_ops.build_index_ops_service",
         lambda _session: _FakeIndexOpsService(),
     )
 
@@ -1429,10 +1446,10 @@ def test_index_collection_snapshot_recover_route_requires_confirmation(monkeypat
             )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.build_index_ops_service",
+        "app.api.routes.admin_index_ops.build_index_ops_service",
         lambda _session: _FakeIndexOpsService(),
     )
 
@@ -1466,10 +1483,10 @@ def test_index_collection_rebuild_route_requires_confirmation(monkeypatch) -> No
         return AdminAcceptedResult(accepted=True, job_id="job_collection_1")
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.create_collection_index_rebuild_job",
+        "app.modules.admin.service.AdminService.create_collection_index_rebuild_job",
         create_collection_index_rebuild_job,
     )
 
@@ -1507,12 +1524,12 @@ def test_document_patch_route_passes_visibility_confirmation(monkeypatch) -> Non
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.patch_document", patch_document)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.patch_document", patch_document)
 
     client = TestClient(_create_test_app())
     response = client.patch(
@@ -1547,12 +1564,12 @@ def test_document_delete_route_returns_accepted_job(monkeypatch) -> None:
         return AdminAcceptedResult(accepted=True, job_id="job_doc_1")
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.delete_document", delete_document)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.delete_document", delete_document)
 
     client = TestClient(_create_test_app())
     response = client.delete(
@@ -1579,9 +1596,9 @@ def test_department_get_route_requires_org_read_scope(monkeypatch) -> None:
         return _admin_department()
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
-    monkeypatch.setattr("app.api.routes.admin.AdminService.get_department", get_department)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.get_department", get_department)
 
     client = TestClient(_create_test_app())
     response = client.get(
@@ -1609,12 +1626,12 @@ def test_department_patch_route_passes_actor_context(monkeypatch) -> None:
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.patch_department", patch_department)
+    monkeypatch.setattr("app.modules.admin.service.AdminService.patch_department", patch_department)
 
     client = TestClient(_create_test_app())
     response = client.patch(
@@ -1637,12 +1654,15 @@ def test_department_delete_route_passes_confirmation_header(monkeypatch) -> None
         seen.update(kwargs)
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.delete_department", delete_department)
+    monkeypatch.setattr(
+        "app.modules.admin.service.AdminService.delete_department",
+        delete_department,
+    )
 
     client = TestClient(_create_test_app())
     response = client.delete(
@@ -1671,10 +1691,10 @@ def test_user_departments_list_route_requires_org_read_scope(monkeypatch) -> Non
         return AdminUserDepartmentList(items=[_admin_department()], total=1)
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_user_departments",
+        "app.modules.admin.service.AdminService.list_user_departments",
         list_user_departments,
     )
 
@@ -1711,13 +1731,13 @@ def test_user_departments_replace_route_passes_confirmation_header(monkeypatch) 
         ]
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.replace_user_departments",
+        "app.modules.admin.service.AdminService.replace_user_departments",
         replace_user_departments,
     )
 
@@ -1749,10 +1769,10 @@ def test_role_list_route_requires_role_read_scope(monkeypatch) -> None:
         return _auth_context()
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_roles",
+        "app.modules.admin.service.AdminService.list_roles",
         lambda _self, _session, **_kwargs: AdminRoleList(
             items=[
                 AdminRoleListItem(
@@ -1806,10 +1826,10 @@ def test_assignable_role_options_route_returns_risk_level(monkeypatch) -> None:
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
     monkeypatch.setattr(
-        "app.api.routes.admin.AdminService.list_assignable_role_options",
+        "app.modules.admin.service.AdminService.list_assignable_role_options",
         list_assignable_role_options,
     )
 
@@ -1844,12 +1864,15 @@ def test_role_binding_replace_passes_confirmation_header(monkeypatch) -> None:
         return [_binding()]
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.replace_role_bindings", replace_bindings)
+    monkeypatch.setattr(
+        "app.modules.admin.service.AdminService.replace_role_bindings",
+        replace_bindings,
+    )
 
     client = TestClient(_create_test_app())
     response = client.put(
@@ -1881,9 +1904,12 @@ def test_role_binding_list_route_supports_pagination(monkeypatch) -> None:
         return AdminRoleBindingList(items=[_binding()], total=1)
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(AUTH_TARGET, authenticate)
-    monkeypatch.setattr("app.api.routes.admin.AdminService.list_role_bindings", list_role_bindings)
+    monkeypatch.setattr(
+        "app.modules.admin.service.AdminService.list_role_bindings",
+        list_role_bindings,
+    )
 
     client = TestClient(_create_test_app())
     response = client.get(
@@ -1911,12 +1937,15 @@ def test_role_binding_create_returns_structured_admin_error(monkeypatch) -> None
         )
 
     _open_business_api(monkeypatch)
-    monkeypatch.setattr("app.api.routes.admin.session_scope", lambda: _FakeSession())
+    _patch_admin_route_session_scope(monkeypatch)
     monkeypatch.setattr(
         AUTH_TARGET,
         lambda _self, _session, **_kwargs: _auth_context(),
     )
-    monkeypatch.setattr("app.api.routes.admin.AdminService.create_role_bindings", create_binding)
+    monkeypatch.setattr(
+        "app.modules.admin.service.AdminService.create_role_bindings",
+        create_binding,
+    )
 
     client = TestClient(_create_test_app())
     response = client.post(

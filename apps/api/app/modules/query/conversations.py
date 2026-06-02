@@ -1,25 +1,14 @@
 """普通用户查询会话持久化服务。
 
-该模块保留 route-facing facade 和旧导入路径；SQL、消息生命周期和映射逻辑分别下沉到
-conversation_repository、conversation_messages 和 conversation_mappers。
+SQL、消息生命周期和映射逻辑分别下沉到 conversation_repository、
+conversation_messages 和 conversation_mappers。
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
-from app.modules.query.conversation_mappers import (
-    _citations_from_json,
-    _citations_json,
-    _confidence_or_none,
-    _conversation_database_error,
-    _conversation_not_found,
-    _conversation_summary_from_mapping,
-    _datetime_or_none,
-    _message_from_mapping,
-    _message_status,
-    _normalize_title,
-)
+from app.modules.query.conversation_mappers import conversation_not_found
 from app.modules.query.conversation_messages import QueryConversationMessageService
 from app.modules.query.conversation_models import (
     QueryConversationDetail,
@@ -124,7 +113,7 @@ class QueryConversationService:
             conversation_id=conversation_id,
         )
         if result == "not_found":
-            raise _conversation_not_found(conversation_id)
+            raise conversation_not_found(conversation_id)
 
     def prepare_query_messages(
         self,
@@ -210,7 +199,7 @@ class QueryConversationService:
             conversation_id=conversation_id,
         )
         if conversation is None:
-            raise _conversation_not_found(conversation_id)
+            raise conversation_not_found(conversation_id)
         return conversation
 
 
@@ -221,15 +210,4 @@ __all__ = [
     "QueryConversationSummary",
     "QueryConversationWriteContext",
     "QueryMessage",
-    "_citations_from_json",
-    "_citations_json",
-    "_confidence_or_none",
-    "_conversation_database_error",
-    "_conversation_not_found",
-    "_conversation_summary_from_mapping",
-    "_datetime_or_none",
-    "_message_from_mapping",
-    "_message_status",
-    "_normalize_title",
 ]
-

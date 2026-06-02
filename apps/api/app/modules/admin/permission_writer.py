@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 
 class AdminPermissionWriterMixin:
-    """Compatibility mixin exposing historical AdminService permission writes."""
+    """管理后台权限规则、快照和资源策略写入 helper。"""
 
     def _replace_knowledge_base_access_rules(
         self,

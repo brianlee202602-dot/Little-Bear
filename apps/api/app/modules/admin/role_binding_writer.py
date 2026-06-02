@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 
 class AdminRoleBindingWriterMixin:
-    """Compatibility mixin exposing historical AdminService role write helpers."""
+    """管理后台用户部门成员关系和角色绑定写入 helper。"""
 
     def _insert_department_membership(
         self,

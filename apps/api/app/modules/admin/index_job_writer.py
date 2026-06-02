@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 
 class AdminIndexJobWriterMixin:
-    """Compatibility mixin exposing historical AdminService index job writes."""
+    """管理后台索引删除、权限刷新和重建任务写入 helper。"""
 
     def _enqueue_index_delete_job(
         self,

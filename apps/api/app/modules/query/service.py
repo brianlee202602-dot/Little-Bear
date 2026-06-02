@@ -63,9 +63,8 @@ from sqlalchemy.orm import Session
 class QueryService:
     """Route-facing query service.
 
-    Public query orchestration remains compatible with the original implementation,
-    while SQL reads, permission gating/rerank, and log writes are delegated to
-    narrower services.
+    Query planning, retrieval, permission gating, answer generation and log writes
+    are delegated to narrower collaborators behind this stable service boundary.
     """
 
     def __init__(

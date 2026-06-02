@@ -29,7 +29,6 @@ from app.api.routes.admin_shared import (
     _admin_error_response,
     _auth_error_response,
     _authenticate,
-    _compat,
     _database_error_response,
     _extract_bearer_token,
     _folder_data,
@@ -38,6 +37,7 @@ from app.api.routes.admin_shared import (
     _knowledge_base_list_item_data,
     _knowledge_base_option_data,
     _request_id,
+    session_scope,
     status,
 )
 
@@ -55,7 +55,7 @@ async def list_knowledge_bases(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="knowledge_base:manage")
             result = service.list_knowledge_bases(
                 session,
@@ -92,7 +92,7 @@ async def list_knowledge_base_options(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="knowledge_base:manage")
             result = service.list_knowledge_base_options(
                 session,
@@ -129,7 +129,7 @@ async def create_knowledge_base(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="knowledge_base:manage")
             knowledge_base = service.create_knowledge_base(
                 session,
@@ -176,7 +176,7 @@ async def get_knowledge_base(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="knowledge_base:manage")
             knowledge_base = service.get_knowledge_base(
                 session,
@@ -206,7 +206,7 @@ async def patch_knowledge_base(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="knowledge_base:manage")
             knowledge_base = service.patch_knowledge_base(
                 session,
@@ -251,7 +251,7 @@ async def delete_knowledge_base(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="knowledge_base:manage")
             result = service.delete_knowledge_base(
                 session,
@@ -280,7 +280,7 @@ async def list_folders(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="folder:manage")
             result = service.list_folders(
                 session,
@@ -318,7 +318,7 @@ async def list_folder_options(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="folder:manage")
             result = service.list_folder_options(
                 session,
@@ -356,7 +356,7 @@ async def create_folder(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="folder:manage")
             folder = service.create_folder(
                 session,
@@ -384,7 +384,7 @@ async def get_folder(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="folder:manage")
             folder = service.get_folder(
                 session,
@@ -410,7 +410,7 @@ async def patch_folder(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="folder:manage")
             folder = service.patch_folder(
                 session,
@@ -445,7 +445,7 @@ async def delete_folder(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="folder:manage")
             result = service.delete_folder(
                 session,

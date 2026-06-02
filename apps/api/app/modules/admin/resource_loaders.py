@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 
 class AdminResourceLoaderMixin:
-    """Compatibility mixin exposing historical AdminService resource loaders."""
+    """管理后台领域服务共享的资源读取 helper。"""
 
     def _load_user_row(
         self,

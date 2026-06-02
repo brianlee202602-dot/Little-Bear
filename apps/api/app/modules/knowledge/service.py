@@ -2,23 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
 
 from app.modules.knowledge.access_control import KnowledgeAccessGuard
 from app.modules.knowledge.browser_service import KnowledgeBrowserService
 from app.modules.knowledge.document_reader import KnowledgeDocumentReader
-from app.modules.knowledge.mappers import (
-    _chunk_from_mapping,
-    _database_error,
-    _document_from_mapping,
-    _document_list_item_from_mapping,
-    _document_version_from_mapping,
-    _json_mapping,
-    _knowledge_base_from_mapping,
-    _knowledge_base_visibility_sql,
-    _optional_int,
-    _optional_str,
-)
 from app.modules.knowledge.repository import KnowledgeRepository
 from app.modules.knowledge.schemas import (
     AccessibleChunkList,
@@ -33,8 +21,11 @@ from app.modules.knowledge.schemas import (
 from app.modules.knowledge.source_reader import KnowledgeSourceReader
 from app.modules.permissions import PermissionService
 from app.modules.permissions.schemas import PermissionContext
+from app.modules.storage.runtime import build_object_storage
 from app.modules.storage.service import ObjectStorage
 from sqlalchemy.orm import Session
+
+ObjectStorageFactory = Callable[[Session], ObjectStorage | None]
 
 
 class KnowledgeService:
@@ -45,10 +36,12 @@ class KnowledgeService:
         *,
         permission_service: PermissionService | None = None,
         object_storage: ObjectStorage | None = None,
+        object_storage_factory: ObjectStorageFactory | None = None,
         repository: KnowledgeRepository | None = None,
     ) -> None:
         self.permission_service = permission_service or PermissionService()
         self.object_storage = object_storage
+        self._object_storage_factory = object_storage_factory or _default_object_storage
         self._repository = repository or KnowledgeRepository()
         self._access_guard = KnowledgeAccessGuard(self.permission_service)
 
@@ -220,20 +213,6 @@ class KnowledgeService:
             request_id=request_id,
         )
 
-    def _source_from_mapping(self, row: Any) -> AccessibleCitationSource:
-        return self._source_reader().source_from_mapping(row)
-
-    def _read_source_text(
-        self,
-        *,
-        object_key: str | None,
-        text_preview: str,
-    ) -> tuple[str, str]:
-        return self._source_reader().read_source_text(
-            object_key=object_key,
-            text_preview=text_preview,
-        )
-
     def _permission_context(
         self,
         session: Session,
@@ -303,19 +282,14 @@ class KnowledgeService:
             access_guard=self._access_guard,
             repository=self._repository,
             object_storage=self.object_storage,
+            object_storage_factory=self._object_storage_factory,
         )
+
+
+def _default_object_storage(session: Session) -> ObjectStorage | None:
+    return build_object_storage(session, required=False)
 
 
 __all__ = [
     "KnowledgeService",
-    "_chunk_from_mapping",
-    "_database_error",
-    "_document_from_mapping",
-    "_document_list_item_from_mapping",
-    "_document_version_from_mapping",
-    "_json_mapping",
-    "_knowledge_base_from_mapping",
-    "_knowledge_base_visibility_sql",
-    "_optional_int",
-    "_optional_str",
 ]

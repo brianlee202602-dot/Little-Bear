@@ -181,17 +181,22 @@ make PYTHON=.venv/bin/python release-smoke-p0
 ## 当前状态
 
 - 文档目录已重新分层：`docs/` 用于存放经过实现校对的成熟项目文档，旧 `docs` 已整体归档为 `design_docs_history/`，用于保留历史设计、模块计划、联调记录和旧契约文档。
-- 运行时配置 Schema 读取、OpenAPI 契约单测、查询回归默认数据集和初始化示例配置路径已同步到 `design_docs_history/`，避免目录重命名后测试与脚本继续读取旧路径。
-- 设计文档和工程契约已收敛，历史归档中保留 MVP、OpenAPI、数据库 Schema、权限矩阵、状态机、审计事件字典和测试计划。
+- 已新增 `docs/backend/后端架构设计书.md` 和 `docs/backend/后端接口文档.md`，按当前代码实现整理 API、Worker、模块边界、配置密钥、权限、导入索引、查询链路、审计观测、当前实现边界和接口用途说明。
+- 运行时配置 Schema 读取和 OpenAPI 契约单测已同步到 `docs/contracts/`；查询回归默认数据集和初始化示例配置路径继续使用历史归档中的测试示例。
+- 设计文档和工程契约已收敛，成熟 OpenAPI、数据库 Schema、配置 Schema、权限矩阵、状态机和审计事件字典已迁入 `docs/contracts/`；历史归档中继续保留 MVP、旧模块计划和旧测试计划。
 - 文档与实现已完成一轮对照整改：OpenAPI 已挂载接口与契约差异被测试跟踪，P1/P2 contract-only 接口已在文档中标注阶段边界。
 - 后端控制面已初步落地：初始化、setup JWT、active config、Secret Store、认证会话、配置管理、用户/部门/角色绑定管理、审计查询和健康检查。
 - 后端接口层公共能力已收敛：认证、request_id / trace_id、分页、结构化错误响应、ServiceError 基类和对象存储 runtime 已抽为公共依赖或共享模块。
+- 后端 route 层对象存储 runtime 泄漏已收敛：普通用户 citation 来源读取和管理后台文档预览不再由 route 构建 `ObjectStorage`，改由 `KnowledgeService` / `AdminService` 在领域服务内按当前 session 解析对象存储运行时，route 继续只负责认证、参数、分页、错误映射和 service 调用。
+- 后端 admin / query / audit 中的 compatibility / legacy 语义残留已清理：相关 facade 和 mixin 已标定为正式的 route-facing、diagnostics-facing 或领域 helper 边界，不再以历史兼容层描述。
 - 后端模块化重构已完成 P0-P5 主要任务：Admin、Auth、Audit、Config、Import Pipeline、Indexing、Knowledge、Permission、Query、Setup 等模块已按 service / repository / runtime / writer / presenter 等边界拆分；历史 `core.py` 中间兼容文件已删除，当前 `apps/api/app/modules` 下不再保留 `*core.py`。
+- 后端重构期兼容冗余已完成一轮清理：管理后台子路由不再通过聚合路由 `_compat()` 回跳共享依赖，`admin` / `config` / `query` / `import_pipeline` 聚合路由只保留 router 挂载职责；`ConfigRepository` 聚合兼容仓储、`ConfigService` 私有兼容代理、`ImportDocumentWriter.owner` 回调桥、query / knowledge / setup 下划线 mapper/helper 兼容别名，以及 admin 侧旧权限变更服务入口已删除，权限策略修改统一由 `modules.permissions.PermissionAdminService` 承担。
 - 数据库迁移已覆盖 P0 大部分核心表：配置、认证、组织、权限、知识库、文档、索引、导入任务、审计、查询日志和模型调用日志。
 - 管理后台已接入 setup、登录、配置、用户、部门、角色绑定、审计查询和知识库运营页面；知识库页面已支持知识库 CRUD、文件夹 CRUD、指定文件夹上传、文档列表、文档版本、chunk 预览以及知识库 / 文档权限变更。
 - Permission Service 核心已落地；管理端知识库、文件夹和文档元数据管理已接入权限边界。
+- 权限安全回归测试已补强：跨部门候选、access block、旧索引版本、deleted / draft / pending_delete 非 active 状态、source 回源权限过滤和 citation unauthorized 降级均已纳入单元测试防回退范围。
 - 文档详情、文档版本、chunk 来源、普通用户文档预览，以及知识库 / 文档独立权限变更 API 已补齐。
-- Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、MinIO/S3 对象存储交接、PDF / DOCX / UTF-8 文本 / Markdown parse-clean-chunk、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入、active index 发布，以及权限变更后的索引 payload 刷新任务。
+- Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、过期 `running` 任务锁接管、非持锁推进拒绝、失败重试恢复、MinIO/S3 对象存储交接、PDF / DOCX / UTF-8 文本 / Markdown parse-clean-chunk、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入、active index 发布，以及权限变更后的索引 payload 刷新任务。
 - Query Service 非流式链路已落地：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、rerank provider、Permission Service filter、候选 gate、Context Builder、LLM provider、citation 校验、query_logs、model_call_logs 和高风险 query audit 写入；rerank、LLM 不可用或 citation 校验失败时结构化降级。
 - Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、provider token 级流式答案、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、服务端历史会话同步、多轮消息展示、会话删除、降级状态、request_id 和 trace_id 展示。
 - 普通用户查询前端已完成模块化拆分和工作区运行态下沉，并新增 `docs/frontend/查询前端架构设计书.md` 作为团队开发架构说明：`App.vue` 只挂载 `ChatWorkspace.vue`，跨域编排迁入 `useChatWorkspaceRuntime.ts`；HTTP 层、认证会话、会话列表、知识库选择、聊天输入、流式查询执行、消息列表、来源片段预览和浏览器存储已拆入 `apps/web/src/features`、`apps/web/src/components`、`apps/web/src/utils` 和 `apps/web/src/api`。`useQueryStream` 已改为依赖会话窄接口，SSE 事件已补 runtime guard，避免弱类型事件直接写入消息状态。

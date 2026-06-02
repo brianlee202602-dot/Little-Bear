@@ -138,6 +138,32 @@ def test_build_filter_generates_qdrant_and_sql_permission_conditions() -> None:
     } in permission_filter.qdrant_filter["must"]
 
 
+def test_build_filter_fail_closed_on_stale_index_adds_permission_version_guards() -> None:
+    context = _permission_context(permission_version=43)
+
+    permission_filter = PermissionService().build_filter(
+        context,
+        kb_ids=["55555555-5555-5555-5555-555555555555"],
+        active_index_version_ids=["66666666-6666-6666-6666-666666666666"],
+        required_scope="rag:query",
+        fail_closed_on_stale_index=True,
+    )
+
+    assert permission_filter.params["permission_version"] == 43
+    assert {"key": "permission_version", "range": {"gte": 43}} in (
+        permission_filter.qdrant_filter["must"]
+    )
+    assert "kie.indexed_permission_version >= :permission_version" in (
+        permission_filter.keyword_where_sql
+    )
+    assert "cir.indexed_permission_version >= :permission_version" in (
+        permission_filter.keyword_where_sql
+    )
+    assert "cir.indexed_permission_version >= :permission_version" in (
+        permission_filter.metadata_where_sql
+    )
+
+
 def test_build_filter_without_departments_only_allows_enterprise_visibility() -> None:
     context = _permission_context(department_ids=())
 
@@ -189,6 +215,40 @@ def test_gate_candidate_rejects_other_department_and_access_block() -> None:
     assert other_department.error_code == "PERM_DENIED"
     assert blocked.allowed is False
     assert blocked.error_code == "PERM_ACCESS_BLOCKED"
+
+
+def test_gate_candidate_rejects_stale_index_version() -> None:
+    result = PermissionService().gate_candidate(
+        _permission_context(),
+        _candidate(index_version_id="66666666-6666-6666-6666-666666666666"),
+        active_index_version_ids=("99999999-9999-9999-9999-999999999999",),
+    )
+
+    assert result.allowed is False
+    assert result.error_code == "PERM_VERSION_STALE"
+
+
+@pytest.mark.parametrize(
+    ("candidate_kwargs", "detail_key"),
+    [
+        ({"document_lifecycle_status": "deleted"}, "document_lifecycle_status"),
+        ({"document_index_status": "draft"}, "document_index_status"),
+        ({"chunk_status": "deleted"}, "chunk_status"),
+        ({"visibility_state": "pending_delete"}, "visibility_state"),
+    ],
+)
+def test_gate_candidate_rejects_deleted_blocked_or_non_active_states(
+    candidate_kwargs: dict[str, str],
+    detail_key: str,
+) -> None:
+    result = PermissionService().gate_candidate(
+        _permission_context(),
+        _candidate(**candidate_kwargs),
+    )
+
+    assert result.allowed is False
+    assert result.error_code == "PERM_ACCESS_BLOCKED"
+    assert detail_key in result.details
 
 
 def test_validate_visibility_policy_rejects_unsupported_acl_and_invalid_visibility() -> None:
@@ -254,6 +314,11 @@ def _candidate(
     *,
     visibility: str = "department",
     owner_department_id: str = DEPARTMENT_ID,
+    document_lifecycle_status: str = "active",
+    document_index_status: str = "indexed",
+    chunk_status: str = "active",
+    visibility_state: str = "active",
+    index_version_id: str = "66666666-6666-6666-6666-666666666666",
     indexed_permission_version: int = 42,
     access_blocked: bool = False,
 ) -> CandidateMetadata:
@@ -264,7 +329,11 @@ def _candidate(
         chunk_id="88888888-8888-8888-8888-888888888888",
         owner_department_id=owner_department_id,
         visibility=visibility,
-        index_version_id="66666666-6666-6666-6666-666666666666",
+        document_lifecycle_status=document_lifecycle_status,
+        document_index_status=document_index_status,
+        chunk_status=chunk_status,
+        visibility_state=visibility_state,
+        index_version_id=index_version_id,
         indexed_permission_version=indexed_permission_version,
         access_blocked=access_blocked,
     )

@@ -6,14 +6,14 @@ from typing import Any
 
 from app.modules.knowledge.errors import KnowledgeServiceError
 from app.modules.knowledge.mappers import (
-    _chunk_from_mapping,
-    _database_error,
-    _document_from_mapping,
-    _document_list_item_from_mapping,
-    _document_version_from_mapping,
-    _folder_from_mapping,
-    _knowledge_base_from_mapping,
-    _knowledge_base_visibility_sql,
+    chunk_from_mapping,
+    database_error,
+    document_from_mapping,
+    document_list_item_from_mapping,
+    document_version_from_mapping,
+    folder_from_mapping,
+    knowledge_base_from_mapping,
+    knowledge_base_visibility_sql,
 )
 from app.modules.knowledge.schemas import (
     AccessibleChunk,
@@ -59,7 +59,7 @@ class KnowledgeRepository:
             params["keyword"] = f"%{keyword.strip()}%"
         if status and status != "active":
             conditions.append("FALSE")
-        resource_sql = _knowledge_base_visibility_sql(context, params)
+        resource_sql = knowledge_base_visibility_sql(context, params)
         if resource_sql:
             conditions.append(resource_sql)
         where_sql = " AND ".join(conditions)
@@ -85,12 +85,12 @@ class KnowledgeRepository:
                 params,
             ).one()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_BASES_UNAVAILABLE",
                 "knowledge bases cannot be read",
                 exc,
             ) from exc
-        return [_knowledge_base_from_mapping(row._mapping) for row in rows], int(
+        return [knowledge_base_from_mapping(row._mapping) for row in rows], int(
             total_row._mapping["total"]
         )
 
@@ -102,7 +102,7 @@ class KnowledgeRepository:
         kb_id: str,
     ) -> AccessibleKnowledgeBase | None:
         params: dict[str, Any] = {"enterprise_id": context.enterprise_id, "kb_id": kb_id}
-        access_sql = _knowledge_base_visibility_sql(context, params)
+        access_sql = knowledge_base_visibility_sql(context, params)
         conditions = [
             "kb.enterprise_id = CAST(:enterprise_id AS uuid)",
             "kb.id = CAST(:kb_id AS uuid)",
@@ -128,12 +128,12 @@ class KnowledgeRepository:
                 params,
             ).one_or_none()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_BASE_UNAVAILABLE",
                 "knowledge base cannot be read",
                 exc,
             ) from exc
-        return _knowledge_base_from_mapping(row._mapping) if row is not None else None
+        return knowledge_base_from_mapping(row._mapping) if row is not None else None
 
     def list_folders(
         self,
@@ -187,12 +187,12 @@ class KnowledgeRepository:
                 params,
             ).one()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_FOLDERS_UNAVAILABLE",
                 "folders cannot be read",
                 exc,
             ) from exc
-        return [_folder_from_mapping(row._mapping) for row in rows], int(
+        return [folder_from_mapping(row._mapping) for row in rows], int(
             total_row._mapping["total"]
         )
 
@@ -253,12 +253,12 @@ class KnowledgeRepository:
                 params,
             ).one()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_DOCUMENTS_UNAVAILABLE",
                 "documents cannot be read",
                 exc,
             ) from exc
-        return [_document_list_item_from_mapping(row._mapping) for row in rows], int(
+        return [document_list_item_from_mapping(row._mapping) for row in rows], int(
             total_row._mapping["total"]
         )
 
@@ -292,12 +292,12 @@ class KnowledgeRepository:
                 params,
             ).one_or_none()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_DOCUMENT_UNAVAILABLE",
                 "document cannot be read",
                 exc,
             ) from exc
-        return _document_from_mapping(row._mapping) if row is not None else None
+        return document_from_mapping(row._mapping) if row is not None else None
 
     def list_document_versions(
         self,
@@ -345,12 +345,12 @@ class KnowledgeRepository:
                 {"enterprise_id": enterprise_id, "document_id": document_id},
             ).one()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_DOCUMENT_VERSIONS_UNAVAILABLE",
                 "document versions cannot be read",
                 exc,
             ) from exc
-        return [_document_version_from_mapping(row._mapping) for row in rows], int(
+        return [document_version_from_mapping(row._mapping) for row in rows], int(
             total_row._mapping["total"]
         )
 
@@ -420,12 +420,12 @@ class KnowledgeRepository:
                 params,
             ).one()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_CHUNKS_UNAVAILABLE",
                 "document chunks cannot be read",
                 exc,
             ) from exc
-        return [_chunk_from_mapping(row._mapping) for row in rows], int(
+        return [chunk_from_mapping(row._mapping) for row in rows], int(
             total_row._mapping["total"]
         )
 
@@ -468,7 +468,7 @@ class KnowledgeRepository:
                 params,
             ).one_or_none()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_SOURCE_UNAVAILABLE",
                 "source cannot be read",
                 exc,
@@ -496,7 +496,7 @@ class KnowledgeRepository:
                 {"enterprise_id": enterprise_id, "kb_ids": list(kb_ids)},
             ).all()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_INDEX_UNAVAILABLE",
                 "active index versions cannot be read",
                 exc,
@@ -525,7 +525,7 @@ class KnowledgeRepository:
                 {"enterprise_id": enterprise_id, "document_id": document_id},
             ).one_or_none()
         except SQLAlchemyError as exc:
-            raise _database_error(
+            raise database_error(
                 "KNOWLEDGE_DOCUMENT_UNAVAILABLE",
                 "document cannot be read",
                 exc,

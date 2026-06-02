@@ -24,13 +24,13 @@ from app.api.routes.admin_shared import (
     _auth_error_response,
     _authenticate,
     _binding_input,
-    _compat,
     _database_error_response,
     _extract_bearer_token,
     _request_id,
     _role_binding_data,
     _role_data,
     _role_list_item_data,
+    session_scope,
     status,
 )
 
@@ -49,7 +49,7 @@ async def list_roles(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="role:read")
             result = service.list_roles(
                 session,
@@ -85,7 +85,7 @@ async def list_assignable_role_options(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="role:read")
             result = service.list_assignable_role_options(
                 session,
@@ -117,7 +117,7 @@ async def get_role(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="role:read")
             role = service.get_role(session, role_id, enterprise_id=auth_context.user.enterprise_id)
     except AuthServiceError as exc:
@@ -139,7 +139,7 @@ async def list_user_role_bindings(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="role:read")
             bindings = service.list_role_bindings(
                 session,
@@ -176,7 +176,7 @@ async def create_user_role_bindings(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="role:manage")
             bindings = service.create_role_bindings(
                 session,
@@ -214,7 +214,7 @@ async def replace_user_role_bindings(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="role:manage")
             bindings = service.replace_role_bindings(
                 session,
@@ -256,7 +256,7 @@ async def delete_user_role_binding(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="role:manage")
             service.revoke_role_binding(
                 session,

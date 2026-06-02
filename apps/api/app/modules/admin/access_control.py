@@ -30,7 +30,7 @@ class RoleBindingInput:
 
 
 class AdminAccessControlMixin:
-    """Compatibility mixin exposing historical AdminService access helpers."""
+    """管理后台领域服务共享的访问控制 helper。"""
 
     def _ensure_actor_can_access_user(
         self,

@@ -26,13 +26,13 @@ from app.api.routes.admin_shared import (
     _admin_error_response,
     _auth_error_response,
     _authenticate,
-    _compat,
     _database_error_response,
     _document_data,
     _document_list_item_data,
     _document_version_data,
     _extract_bearer_token,
     _request_id,
+    session_scope,
     status,
 )
 
@@ -53,7 +53,7 @@ async def list_documents(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:manage")
             result = service.list_documents(
                 session,
@@ -85,7 +85,7 @@ async def get_document(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:manage")
             document = service.get_document(
                 session,
@@ -112,7 +112,7 @@ async def list_document_versions(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:manage")
             versions = service.list_document_versions(
                 session,
@@ -147,7 +147,7 @@ async def list_document_chunks(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:manage")
             chunks = service.list_document_chunks(
                 session,
@@ -180,10 +180,10 @@ async def get_document_preview(
     authorization: str | None = Header(default=None),
 ) -> AdminDocumentPreviewResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
+    service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:manage")
-            service = AdminService(object_storage=_compat()._object_storage_or_none(session))
             preview = service.get_document_preview(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
@@ -216,7 +216,7 @@ async def patch_document(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:manage")
             document = service.patch_document(
                 session,
@@ -256,7 +256,7 @@ async def delete_document(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:manage")
             result = service.delete_document(
                 session,
@@ -273,4 +273,3 @@ async def delete_document(
     except SQLAlchemyError as exc:
         return _database_error_response(exc, stage="admin_document_delete")
     return AcceptedResponse(request_id=_request_id(), data=_accepted_data(result))
-

@@ -23,7 +23,6 @@ from app.modules.config.constants import (
 from app.modules.config.dependency_validator import ConfigDependencyValidator
 from app.modules.config.publisher import ConfigPublisher
 from app.modules.config.reader import ConfigReader
-from app.modules.config.repository import ConfigRepository
 from app.modules.config.schemas import (
     ActiveConfigSnapshot,
     ConfigItem,
@@ -32,7 +31,6 @@ from app.modules.config.schemas import (
     ConfigVersion,
     ConfigVersionList,
 )
-from app.modules.config.utils import write_config_audit
 from app.modules.config.version_service import ConfigVersionService
 from sqlalchemy.orm import Session
 
@@ -42,7 +40,6 @@ class ConfigService:
 
     def __init__(self, *, cache: ConfigCache | None = None) -> None:
         self.cache = cache or GLOBAL_CONFIG_CACHE
-        self.repository = ConfigRepository()
         self.read_repository = ConfigReadRepository()
         self.state_repository = ConfigStateRepository()
         self.version_repository = ConfigVersionRepository()
@@ -244,104 +241,6 @@ class ConfigService:
             version=version,
             actor_user_id=actor_user_id,
         )
-
-    # Compatibility delegates for existing tests/extensions that patched private helpers.
-    def _load_active_config_version(self, session: Session) -> int | None:
-        return self.state_repository.load_active_config_version(session)
-
-    def _assert_initialized(self, session: Session) -> None:
-        self.state_repository.assert_initialized(session)
-
-    def _load_active_config_row(self, session: Session, version: int) -> dict[str, Any]:
-        return self.read_repository.load_active_config_row(session, version)
-
-    def _load_config_version_row(
-        self,
-        session: Session,
-        version: int,
-        *,
-        for_update: bool = False,
-    ) -> dict[str, Any]:
-        return self.version_repository.load_config_version_row(
-            session,
-            version,
-            for_update=for_update,
-        )
-
-    def _load_config_payload_row(
-        self,
-        session: Session,
-        version: int,
-        *,
-        for_update: bool = False,
-    ) -> dict[str, Any]:
-        return self.version_repository.load_config_payload_row(
-            session,
-            version,
-            for_update=for_update,
-        )
-
-    def _load_config_version_payload_row(
-        self,
-        session: Session,
-        version: int,
-        *,
-        for_update: bool = False,
-    ) -> dict[str, Any]:
-        return self.version_repository.load_config_version_payload_row(
-            session,
-            version,
-            for_update=for_update,
-        )
-
-    def _run_dependency_validation(
-        self,
-        session: Session,
-        *,
-        config: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self.dependency_validator.run_dependency_validation(session, config=config)
-
-    def _persist_bootstrap_state(self, session: Session, *, bootstrap_result: Any | None) -> None:
-        self.dependency_validator.persist_bootstrap_state(
-            session,
-            bootstrap_result=bootstrap_result,
-        )
-
-    def _insert_audit_log(
-        self,
-        session: Session,
-        *,
-        event_name: str,
-        action: str,
-        result: str,
-        actor_id: str | None,
-        resource_id: str | None,
-        risk_level: str,
-        config_version: int | None,
-        summary: dict[str, Any],
-        error_code: str | None = None,
-    ) -> None:
-        write_config_audit(
-            session,
-            event_name=event_name,
-            action=action,
-            result=result,
-            actor_id=actor_id,
-            resource_id=resource_id,
-            risk_level=risk_level,
-            config_version=config_version,
-            summary=summary,
-            error_code=error_code,
-        )
-
-    def _validate_metadata(
-        self,
-        row: dict[str, Any],
-        config: dict[str, Any],
-        version: int,
-    ) -> None:
-        self.reader.validate_metadata(row, config, version)
 
 
 __all__ = [

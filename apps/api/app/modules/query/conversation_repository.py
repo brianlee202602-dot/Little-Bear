@@ -6,11 +6,11 @@ import uuid
 from typing import Literal
 
 from app.modules.query.conversation_mappers import (
-    _citations_json,
-    _conversation_database_error,
-    _conversation_summary_from_mapping,
-    _message_from_mapping,
-    _normalize_title,
+    citations_json,
+    conversation_database_error,
+    conversation_summary_from_mapping,
+    message_from_mapping,
+    normalize_title,
 )
 from app.modules.query.conversation_models import QueryConversationSummary, QueryMessage
 from app.modules.query.errors import QueryServiceError
@@ -75,13 +75,13 @@ class QueryConversationRepository:
                 params,
             ).one()
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_CONVERSATION_LIST_FAILED",
                 "query conversations cannot be listed",
                 exc,
             ) from exc
         return (
-            tuple(_conversation_summary_from_mapping(dict(row._mapping)) for row in rows),
+            tuple(conversation_summary_from_mapping(dict(row._mapping)) for row in rows),
             int(total_row._mapping["total"]),
         )
 
@@ -95,7 +95,7 @@ class QueryConversationRepository:
         kb_ids: tuple[str, ...],
     ) -> QueryConversationSummary:
         conversation_id = str(uuid.uuid4())
-        normalized_title = _normalize_title(title)
+        normalized_title = normalize_title(title)
         try:
             row = session.execute(
                 text(
@@ -128,12 +128,12 @@ class QueryConversationRepository:
                 },
             ).one()
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_CONVERSATION_CREATE_FAILED",
                 "query conversation cannot be created",
                 exc,
             ) from exc
-        return _conversation_summary_from_mapping(dict(row._mapping))
+        return conversation_summary_from_mapping(dict(row._mapping))
 
     def load_owned_active_conversation(
         self,
@@ -170,12 +170,12 @@ class QueryConversationRepository:
                 },
             ).one_or_none()
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_CONVERSATION_READ_FAILED",
                 "query conversation cannot be read",
                 exc,
             ) from exc
-        return _conversation_summary_from_mapping(dict(row._mapping)) if row is not None else None
+        return conversation_summary_from_mapping(dict(row._mapping)) if row is not None else None
 
     def list_messages(
         self,
@@ -244,13 +244,13 @@ class QueryConversationRepository:
                 },
             ).one()
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_CONVERSATION_READ_FAILED",
                 "query conversation cannot be read",
                 exc,
             ) from exc
         return (
-            tuple(_message_from_mapping(dict(row._mapping)) for row in rows),
+            tuple(message_from_mapping(dict(row._mapping)) for row in rows),
             int(total_row._mapping["total"]),
         )
 
@@ -302,7 +302,7 @@ class QueryConversationRepository:
                 },
             ).one_or_none()
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_CONVERSATION_DELETE_FAILED",
                 "query conversation cannot be deleted",
                 exc,
@@ -330,7 +330,7 @@ class QueryConversationRepository:
                 {"conversation_id": conversation_id, "kb_ids": list(kb_ids)},
             )
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_MESSAGE_CREATE_FAILED",
                 "query conversation messages cannot be created",
                 exc,
@@ -376,7 +376,7 @@ class QueryConversationRepository:
                 },
             )
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_MESSAGE_CREATE_FAILED",
                 "query conversation messages cannot be created",
                 exc,
@@ -420,7 +420,7 @@ class QueryConversationRepository:
                 },
             )
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_MESSAGE_CREATE_FAILED",
                 "query conversation messages cannot be created",
                 exc,
@@ -463,7 +463,7 @@ class QueryConversationRepository:
                     "message_id": message_id,
                     "content": content,
                     "status": status,
-                    "citations_json": _citations_json(citations),
+                    "citations_json": citations_json(citations),
                     "confidence": confidence,
                     "degraded": degraded,
                     "degrade_reason": degrade_reason,
@@ -481,7 +481,7 @@ class QueryConversationRepository:
             conversation_id = str(row._mapping["conversation_id"])
             self.touch_conversation(session, conversation_id=conversation_id)
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_MESSAGE_UPDATE_FAILED",
                 "query assistant message cannot be updated",
                 exc,
@@ -501,7 +501,7 @@ class QueryConversationRepository:
                 {"conversation_id": conversation_id},
             )
         except SQLAlchemyError as exc:
-            raise _conversation_database_error(
+            raise conversation_database_error(
                 "QUERY_MESSAGE_UPDATE_FAILED",
                 "query assistant message cannot be updated",
                 exc,

@@ -43,7 +43,7 @@ class _AnswerFinalization:
 
 
 class QueryOrchestrator:
-    """Orchestrate query workflows outside the legacy core implementation."""
+    """编排查询计划构建、答案生成收束和查询审计写入。"""
 
     def __init__(self, service: Any) -> None:
         self._service = service

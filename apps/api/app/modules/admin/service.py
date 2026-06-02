@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import app.modules.admin.access_control as admin_access_control
@@ -14,7 +15,6 @@ from app.modules.admin.index_job_writer import AdminIndexJobWriterMixin
 from app.modules.admin.index_ops_service import AdminIndexOpsService
 from app.modules.admin.index_target_reader import AdminIndexTargetReader
 from app.modules.admin.knowledge_bases_service import AdminKnowledgeBasesService
-from app.modules.admin.permission_admin_service import AdminPermissionService
 from app.modules.admin.permission_guard import AdminPermissionGuardMixin
 from app.modules.admin.permission_version_reader import AdminPermissionVersionReader
 from app.modules.admin.permission_writer import AdminPermissionWriterMixin
@@ -26,7 +26,11 @@ from app.modules.admin.roles_service import AdminRolesService
 from app.modules.admin.state_writer import AdminStateWriterMixin
 from app.modules.admin.users_service import AdminUsersService
 from app.modules.auth.password_service import PasswordService
+from app.modules.storage.runtime import build_object_storage
 from app.modules.storage.service import ObjectStorage
+from sqlalchemy.orm import Session
+
+ObjectStorageFactory = Callable[[Session], ObjectStorage | None]
 
 
 class AdminService(
@@ -42,7 +46,7 @@ class AdminService(
     """Route-facing admin facade.
 
     Domain workflows live in the dedicated admin services. Shared admin helpers
-    are composed here directly instead of through a transitional core module.
+    are composed here as the stable route-facing boundary for admin routes.
     """
 
     def __init__(
@@ -50,12 +54,14 @@ class AdminService(
         *,
         password_service: PasswordService | None = None,
         object_storage: ObjectStorage | None = None,
+        object_storage_factory: ObjectStorageFactory | None = None,
         role_binding_reader: AdminRoleBindingReader | None = None,
         permission_version_reader: AdminPermissionVersionReader | None = None,
         index_target_reader: AdminIndexTargetReader | None = None,
     ) -> None:
         self.password_service = password_service or PasswordService()
         self.object_storage = object_storage
+        self._object_storage_factory = object_storage_factory or _default_object_storage
         self.role_binding_reader = role_binding_reader or AdminRoleBindingReader()
         self.permission_version_reader = (
             permission_version_reader or AdminPermissionVersionReader()
@@ -179,12 +185,6 @@ class AdminService(
     def create_index_version_cleanup_job(self, *args: Any, **kwargs: Any) -> Any:
         return self._index_ops().create_index_version_cleanup_job(*args, **kwargs)
 
-    def replace_knowledge_base_permissions(self, *args: Any, **kwargs: Any) -> Any:
-        return self._permissions().replace_knowledge_base_permissions(*args, **kwargs)
-
-    def replace_document_permissions(self, *args: Any, **kwargs: Any) -> Any:
-        return self._permissions().replace_document_permissions(*args, **kwargs)
-
     def list_roles(self, *args: Any, **kwargs: Any) -> Any:
         return self._roles().list_roles(*args, **kwargs)
 
@@ -224,11 +224,17 @@ class AdminService(
     def _index_ops(self) -> AdminIndexOpsService:
         return AdminIndexOpsService(self)
 
-    def _permissions(self) -> AdminPermissionService:
-        return AdminPermissionService(self)
-
     def _roles(self) -> AdminRolesService:
         return AdminRolesService(self)
+
+    def object_storage_for(self, session: Session) -> ObjectStorage | None:
+        if self.object_storage is not None:
+            return self.object_storage
+        return self._object_storage_factory(session)
+
+
+def _default_object_storage(session: Session) -> ObjectStorage | None:
+    return build_object_storage(session, required=False)
 
 
 __all__ = [

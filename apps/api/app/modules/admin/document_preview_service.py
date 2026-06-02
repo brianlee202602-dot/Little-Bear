@@ -41,6 +41,7 @@ from app.modules.admin.utils import (
     _optional_str,
 )
 from app.modules.permissions.errors import PermissionServiceError
+from app.modules.storage.service import ObjectStorage
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -123,17 +124,27 @@ class AdminDocumentPreviewService:
                 "document preview cannot be read",
                 exc,
             ) from exc
+        object_storage = self._core_service.object_storage_for(session)
         return AdminDocumentPreview(
             doc_id=document.id,
             title=document.title,
-            chunks=tuple(self._admin_preview_chunk_from_mapping(row._mapping) for row in rows),
+            chunks=tuple(
+                self._admin_preview_chunk_from_mapping(row._mapping, object_storage=object_storage)
+                for row in rows
+            ),
             total=int(total_row._mapping["total"]),
         )
 
-    def _admin_preview_chunk_from_mapping(self, row: Any) -> AdminDocumentPreviewChunk:
+    def _admin_preview_chunk_from_mapping(
+        self,
+        row: Any,
+        *,
+        object_storage: ObjectStorage | None,
+    ) -> AdminDocumentPreviewChunk:
         text_preview = str(row["text_preview"])
         object_key = _optional_str(row.get("text_object_key"))
         text, text_status = self._read_preview_text(
+            object_storage,
             object_key=object_key,
             text_preview=text_preview,
         )
@@ -154,15 +165,17 @@ class AdminDocumentPreviewService:
 
     def _read_preview_text(
         self,
+        object_storage: ObjectStorage | None,
         *,
         object_key: str | None,
         text_preview: str,
     ) -> tuple[str, str]:
-        if not object_key or self._core_service.object_storage is None:
+        if not object_key:
+            return text_preview, "preview_only"
+        if object_storage is None:
             return text_preview, "preview_only"
         try:
-            content = self._core_service.object_storage.get_object(object_key=object_key)
+            content = object_storage.get_object(object_key=object_key)
         except (KeyError, OSError):
             return text_preview, "object_unavailable"
         return content.decode("utf-8", errors="replace"), "object"
-

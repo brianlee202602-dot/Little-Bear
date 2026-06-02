@@ -8,8 +8,8 @@ from typing import Any
 
 from app.modules.setup.contracts import (
     SetupInitializationError,
-    _role_scope_type,
-    _role_scopes,
+    role_scope_type,
+    role_scopes,
 )
 from app.modules.setup.service import SetupStatus
 from sqlalchemy import text
@@ -263,8 +263,8 @@ class SetupInitializationRepository:
                     "enterprise_id": enterprise_id,
                     "code": role_code,
                     "name": role_code.replace("_", " ").title(),
-                    "scope_type": _role_scope_type(role_code),
-                    "scopes": _role_scopes(role_code),
+                    "scope_type": role_scope_type(role_code),
+                    "scopes": role_scopes(role_code),
                     "admin_user_id": admin_user_id,
                 },
             )

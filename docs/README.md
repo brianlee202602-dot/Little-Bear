@@ -6,8 +6,18 @@
 
 ## 当前文档
 
+- [后端架构设计书](backend/后端架构设计书.md)
+- [后端接口文档](backend/后端接口文档.md)
 - [管理后台前端架构设计书](frontend/管理后台前端架构设计书.md)
 - [查询前端架构设计书](frontend/查询前端架构设计书.md)
+- [工程契约索引](contracts/README.md)
+- [OpenAPI 契约](contracts/openapi.yaml)
+- [配置 Schema](contracts/config.schema.json)
+- [配置 Schema 说明](contracts/config-schema.md)
+- [数据库 Schema](contracts/database-schema.md)
+- [权限矩阵](contracts/权限矩阵.md)
+- [审计事件字典](contracts/审计事件字典.md)
+- [状态机设计](contracts/状态机设计.md)
 
 ## 目录规划
 

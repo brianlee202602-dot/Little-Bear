@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 
 class AdminStateWriterMixin:
-    """Compatibility mixin exposing historical AdminService state writes."""
+    """管理后台权限、组织、会话和审计状态写入 helper。"""
 
     def _bump_permission_version(self, session: Session, enterprise_id: str) -> int:
         row = session.execute(

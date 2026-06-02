@@ -24,13 +24,13 @@ from app.api.routes.admin_shared import (
     _admin_error_response,
     _auth_error_response,
     _authenticate,
-    _compat,
     _database_error_response,
     _department_data,
     _extract_bearer_token,
     _request_id,
     _user_data,
     _user_list_item_data,
+    session_scope,
     status,
 )
 
@@ -48,7 +48,7 @@ async def list_users(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="user:read")
             result = service.list_users(
                 session,
@@ -81,7 +81,7 @@ async def create_user(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="user:manage")
             user = service.create_user(
                 session,
@@ -113,7 +113,7 @@ async def get_user(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="user:read")
             user = service.get_user(
                 session,
@@ -140,7 +140,7 @@ async def patch_user(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="user:manage")
             user = service.patch_user(
                 session,
@@ -170,7 +170,7 @@ async def delete_user(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="user:manage")
             service.delete_user(
                 session,
@@ -199,7 +199,7 @@ async def list_user_departments(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="org:read")
             departments = service.list_user_departments(
                 session,
@@ -232,7 +232,7 @@ async def replace_user_departments(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="org:manage")
             departments = service.replace_user_departments(
                 session,
@@ -272,7 +272,7 @@ async def reset_user_password(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="user:manage")
             service.reset_user_password(
                 session,
@@ -301,7 +301,7 @@ async def unlock_user(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="user:manage")
             service.unlock_user(
                 session,

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from app.modules.import_pipeline import request_items as _request_helpers
 from app.modules.import_pipeline.errors import ImportServiceError
 from app.modules.import_pipeline.schemas import DocumentImportItem
@@ -17,14 +15,10 @@ class ImportDocumentWriter:
 
     def __init__(
         self,
-        owner: Any | None = None,
         *,
-        object_storage: ObjectStorage | None = None,
+        object_storage: ObjectStorage,
     ) -> None:
-        self.owner = owner
-        self.object_storage = object_storage or getattr(owner, "object_storage", None)
-        if self.object_storage is None:
-            raise ValueError("ImportDocumentWriter requires object storage")
+        self.object_storage = object_storage
 
     def store_upload_object(
         self,
@@ -155,12 +149,6 @@ class ImportDocumentWriter:
                 "actor_user_id": actor_user_id,
             },
         )
-
-    def write_draft_chunks(self, session: Session, *, row: Any) -> None:
-        if self.owner is None:
-            raise RuntimeError("draft chunk write still requires compatibility owner")
-        self.owner._write_draft_chunks(session, row=row)
-
 
 def _build_upload_object_key(
     *,

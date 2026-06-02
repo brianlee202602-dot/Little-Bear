@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 
 class AdminFolderDocumentCounterMixin:
-    """Compatibility mixin exposing historical AdminService folder counters."""
+    """管理后台文件夹关联文档计数 helper。"""
 
     def _count_folder_documents(
         self,

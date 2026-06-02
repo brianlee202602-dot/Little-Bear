@@ -12,15 +12,9 @@ from app.modules.secrets.service import SecretStoreError, SecretStoreService
 from app.modules.setup.bootstrap_service import ServiceBootstrapService
 from app.modules.setup.config_publisher import SetupConfigPublisher
 from app.modules.setup.contracts import (
-    BUILTIN_ROLE_NAMES,
-    MODEL_PROVIDER_SECRET_FIELDS,
     SetupInitializationError,
     SetupInitializationResult,
     SetupValidationResult,
-    _issue,
-    _role_scope_type,
-    _role_scopes,
-    _setup_schema_error_code,
 )
 from app.modules.setup.initialization_audit import SetupInitializationAuditWriter
 from app.modules.setup.organization_initializer import SetupOrganizationInitializer
@@ -461,8 +455,6 @@ class SetupInitializationService:
 
 
 __all__ = [
-    "BUILTIN_ROLE_NAMES",
-    "MODEL_PROVIDER_SECRET_FIELDS",
     "ConfigSchemaValidator",
     "PasswordHasher",
     "SecretStoreError",
@@ -475,8 +467,4 @@ __all__ = [
     "SetupTokenContext",
     "SetupTokenService",
     "SetupValidationResult",
-    "_issue",
-    "_role_scope_type",
-    "_role_scopes",
-    "_setup_schema_error_code",
 ]

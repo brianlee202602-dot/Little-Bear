@@ -175,7 +175,7 @@ Python 质量工具以 `pyproject.toml` 为准：
 
 - 使用 Vue 3 Composition API 与 TypeScript。
 - API 调用集中在各应用 `src/api/<domain>.ts` 或共享 SDK 中，组件不要散落拼接后端 URL。
-- 管理后台和普通前端的 DTO 必须匹配 `design_docs_history/contracts/openapi.yaml` 和后端 `api/schemas`；字段命名保持后端契约原名。
+- 管理后台和普通前端的 DTO 必须匹配 `docs/contracts/openapi.yaml` 和后端 `api/schemas`；字段命名保持后端契约原名。
 - 认证统一使用 `Authorization: Bearer <jwt>`。
 - 前端不得持久化或展示 secret value、完整 token、密码、完整 prompt 或未脱敏敏感原文。
 - 错误展示应使用后端返回的 `error_code`、`message`、`request_id` 或 `debug_id`，不要吞掉结构化错误。
@@ -184,17 +184,17 @@ Python 质量工具以 `pyproject.toml` 为准：
 
 ## API 与契约规范
 
-- OpenAPI 契约文件是 `design_docs_history/contracts/openapi.yaml`。
-- 权限矩阵是 `design_docs_history/contracts/权限矩阵.md`。
-- 审计事件字典是 `design_docs_history/contracts/审计事件字典.md`。
-- 状态机设计是 `design_docs_history/contracts/状态机设计.md`。
-- 配置 schema 是 `design_docs_history/contracts/config.schema.json` 和 `design_docs_history/contracts/config-schema.md`。
-- 数据库 schema 设计是 `design_docs_history/contracts/database-schema.md`。
+- OpenAPI 契约文件是 `docs/contracts/openapi.yaml`。
+- 权限矩阵是 `docs/contracts/权限矩阵.md`。
+- 审计事件字典是 `docs/contracts/审计事件字典.md`。
+- 状态机设计是 `docs/contracts/状态机设计.md`。
+- 配置 schema 是 `docs/contracts/config.schema.json` 和 `docs/contracts/config-schema.md`。
+- 数据库 schema 设计是 `docs/contracts/database-schema.md`。
 
 任何 API 非兼容变更必须同步更新：
 
 - 后端实现。
-- `design_docs_history/contracts/openapi.yaml`。
+- `docs/contracts/openapi.yaml`。
 - 权限矩阵。
 - 审计事件字典。
 - P0 测试用例。

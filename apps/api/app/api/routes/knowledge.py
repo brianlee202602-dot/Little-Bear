@@ -56,7 +56,6 @@ from app.modules.knowledge import (
     KnowledgeService,
     KnowledgeServiceError,
 )
-from app.modules.storage import ObjectStorage, build_object_storage
 
 router = APIRouter(prefix="/internal/v1", tags=["knowledge"])
 
@@ -311,10 +310,10 @@ async def get_document_source(
     authorization: str | None = Header(default=None),
 ) -> CitationSourceResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
+    service = KnowledgeService()
     try:
         with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:read")
-            service = KnowledgeService(object_storage=_object_storage_or_none(session))
             source = service.get_document_source(
                 session,
                 user_id=auth_context.user.id,
@@ -330,7 +329,3 @@ async def get_document_source(
     except SQLAlchemyError as exc:
         return _database_error_response(exc, stage="document_source")
     return CitationSourceResponse(request_id=_request_id(), data=_citation_source_data(source))
-
-
-def _object_storage_or_none(session: object) -> ObjectStorage | None:
-    return build_object_storage(session, required=False)  # type: ignore[arg-type]

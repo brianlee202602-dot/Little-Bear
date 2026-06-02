@@ -1282,6 +1282,56 @@ def test_get_document_preview_reads_full_chunk_text_from_object_storage(monkeypa
     assert params["offset"] == 0
 
 
+def test_get_document_preview_resolves_object_storage_inside_service(monkeypatch) -> None:
+    storage = InMemoryObjectStorage({"chunks/doc_1/chunk_1.txt": "完整制度正文".encode()})
+    factory_sessions: list[object] = []
+
+    def object_storage_factory(session):
+        factory_sessions.append(session)
+        return storage
+
+    service = AdminService(object_storage_factory=object_storage_factory)
+    session = _FakeSession()
+    session.results = [
+        _Result(
+            all_rows=[
+                _Row(
+                    {
+                        "chunk_id": "chunk_1",
+                        "document_id": "44444444-4444-4444-4444-444444444444",
+                        "document_version_id": "77777777-7777-7777-7777-777777777777",
+                        "text_object_key": "chunks/doc_1/chunk_1.txt",
+                        "text_preview": "制度正文",
+                        "heading_path": None,
+                        "source_offsets": None,
+                        "page_start": None,
+                        "page_end": None,
+                        "status": "active",
+                        "ordinal": 1,
+                    }
+                )
+            ]
+        ),
+        _Result(one=_Row({"total": 1})),
+    ]
+    monkeypatch.setattr(service, "get_document", lambda *_args, **_kwargs: _document())
+
+    preview = service.get_document_preview(
+        session,
+        enterprise_id=_ENTERPRISE_ID,
+        doc_id="44444444-4444-4444-4444-444444444444",
+        actor_context=AdminActorContext(
+            user_id=_ACTOR_USER_ID,
+            scopes=("document:manage",),
+            can_manage_all_knowledge_bases=True,
+        ),
+    )
+
+    assert factory_sessions == [session]
+    assert preview.chunks[0].text == "完整制度正文"
+    assert preview.chunks[0].text_status == "object"
+
+
 def test_list_document_index_versions_filters_by_document(monkeypatch) -> None:
     service = AdminService()
     session = _FakeSession()
@@ -1528,130 +1578,6 @@ def test_create_index_rebuild_job_rejects_conflicting_targets() -> None:
         )
 
     assert exc_info.value.error_code == "ADMIN_INDEX_REBUILD_TARGET_CONFLICT"
-
-
-def test_replace_document_permissions_requires_permission_manage_scope() -> None:
-    actor = AdminActorContext(
-        user_id=_ACTOR_USER_ID,
-        scopes=("document:manage",),
-        can_manage_all_knowledge_bases=True,
-    )
-
-    with pytest.raises(AdminServiceError) as exc_info:
-        AdminService().replace_document_permissions(
-            _FakeSession(),
-            enterprise_id=_ENTERPRISE_ID,
-            actor_user_id=_ACTOR_USER_ID,
-            doc_id="44444444-4444-4444-4444-444444444444",
-            visibility="department",
-            owner_department_id=None,
-            confirmed=True,
-            actor_context=actor,
-        )
-
-    assert exc_info.value.error_code == "ADMIN_SCOPE_REQUIRED"
-    assert exc_info.value.details["required_scope"] == "permission:manage"
-
-
-def test_replace_document_permissions_delegates_to_document_patch(monkeypatch) -> None:
-    service = AdminService()
-    seen: dict[str, object] = {}
-
-    def patch_document(_session, **kwargs):
-        seen.update(kwargs)
-        return _document(visibility="enterprise", policy_version=4)
-
-    monkeypatch.setattr(service, "patch_document", patch_document)
-    monkeypatch.setattr(service, "_load_resource_permission_version", lambda *_args, **_kwargs: 18)
-
-    policy = service.replace_document_permissions(
-        _FakeSession(),
-        enterprise_id=_ENTERPRISE_ID,
-        actor_user_id=_ACTOR_USER_ID,
-        doc_id="44444444-4444-4444-4444-444444444444",
-        visibility="enterprise",
-        owner_department_id="22222222-2222-2222-2222-222222222222",
-        confirmed=True,
-            actor_context=AdminActorContext(
-                user_id=_ACTOR_USER_ID,
-                scopes=("permission:manage",),
-                can_manage_all_knowledge_bases=True,
-            ),
-    )
-
-    assert policy.resource_type == "document"
-    assert policy.visibility == "enterprise"
-    assert policy.permission_version == 18
-    assert seen["confirmed_visibility_expand"] is True
-    assert "document:manage" in seen["actor_context"].scopes
-
-
-def test_replace_knowledge_base_permissions_writes_snapshot_and_audit(monkeypatch) -> None:
-    service = AdminService()
-    session = _FakeSession()
-    current = AdminKnowledgeBase(
-        id="55555555-5555-5555-5555-555555555555",
-        name="制度知识库",
-        status="active",
-        owner_department_id="22222222-2222-2222-2222-222222222222",
-        kb_visibility="department_acl",
-        default_document_visibility="department",
-        default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
-        access_rules=(
-            _department_kb_access_rule("22222222-2222-2222-2222-222222222222"),
-        ),
-        policy_version=3,
-    )
-    monkeypatch.setattr(service, "_load_knowledge_base", lambda *_args, **_kwargs: current)
-    monkeypatch.setattr(
-        service,
-        "_resolve_department",
-        lambda *_args, **_kwargs: AdminDepartment(
-            id="22222222-2222-2222-2222-222222222222",
-            code="engineering",
-            name="研发部",
-            status="active",
-        ),
-    )
-    monkeypatch.setattr(service, "_bump_permission_version", lambda *_args: 19)
-    monkeypatch.setattr(
-        service,
-        "_replace_resource_policy",
-        lambda *_args, **_kwargs: "99999999-9999-9999-9999-999999999999",
-    )
-    monkeypatch.setattr(
-        service,
-        "_insert_permission_snapshot",
-        lambda *_args, **_kwargs: {"snapshot_id": "snapshot_1", "payload_hash": "hash_1"},
-    )
-    audits: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        service,
-        "_insert_audit_log",
-        lambda _session, **kwargs: audits.append(kwargs),
-    )
-
-    policy = service.replace_knowledge_base_permissions(
-        session,
-        enterprise_id=_ENTERPRISE_ID,
-        actor_user_id=_ACTOR_USER_ID,
-        kb_id=current.id,
-        kb_visibility="enterprise",
-        default_document_visibility="department",
-        default_document_owner_department_id="22222222-2222-2222-2222-222222222222",
-        access_rules=[],
-        confirmed=True,
-        actor_context=AdminActorContext(
-            user_id=_ACTOR_USER_ID,
-            scopes=("permission:manage",),
-            can_manage_all_knowledge_bases=True,
-        ),
-    )
-
-    assert policy.resource_type == "knowledge_base"
-    assert policy.permission_version == 19
-    assert any("UPDATE knowledge_bases" in statement for statement, _params in session.executed)
-    assert audits[0]["event_name"] == "knowledge_base.permission_replaced"
 
 
 def test_patch_document_requires_confirmation_when_visibility_expands(monkeypatch) -> None:

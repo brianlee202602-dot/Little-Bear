@@ -27,7 +27,6 @@ from app.api.routes.admin_shared import (
     _admin_error_response,
     _auth_error_response,
     _authenticate,
-    _compat,
     _database_error_response,
     _extract_bearer_token,
     _index_collection_health_data,
@@ -36,6 +35,8 @@ from app.api.routes.admin_shared import (
     _index_version_data,
     _indexing_error_response,
     _request_id,
+    build_index_ops_service,
+    session_scope,
     status,
 )
 
@@ -52,7 +53,7 @@ async def list_document_index_versions(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:index")
             versions = service.list_document_index_versions(
                 session,
@@ -88,7 +89,7 @@ async def create_document_index_job(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:index")
             result = service.create_document_index_rebuild_job(
                 session,
@@ -115,9 +116,9 @@ async def get_index_health(
 ) -> IndexHealthResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:index")
-            collections = _compat().build_index_ops_service(session).list_collection_health(
+            collections = build_index_ops_service(session).list_collection_health(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
                 page=page,
@@ -157,9 +158,9 @@ async def list_index_collection_snapshots(
 ) -> IndexCollectionSnapshotListResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:index")
-            snapshots = _compat().build_index_ops_service(session).list_collection_snapshots(
+            snapshots = build_index_ops_service(session).list_collection_snapshots(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
                 collection_name=collection_name,
@@ -190,9 +191,9 @@ async def create_index_collection_snapshot(
 ) -> IndexCollectionSnapshotResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:index")
-            snapshot = _compat().build_index_ops_service(session).create_collection_snapshot(
+            snapshot = build_index_ops_service(session).create_collection_snapshot(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
                 actor_user_id=auth_context.user.id,
@@ -224,9 +225,9 @@ async def recover_index_collection_snapshot(
 ) -> IndexCollectionOperationResponse | JSONResponse:
     token = _extract_bearer_token(authorization)
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:index")
-            result = _compat().build_index_ops_service(session).recover_collection_snapshot(
+            result = build_index_ops_service(session).recover_collection_snapshot(
                 session,
                 enterprise_id=auth_context.user.enterprise_id,
                 actor_user_id=auth_context.user.id,
@@ -261,7 +262,7 @@ async def create_index_collection_rebuild_job(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:index")
             result = service.create_collection_index_rebuild_job(
                 session,
@@ -293,7 +294,7 @@ async def create_index_job(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:index")
             result = service.create_index_rebuild_job(
                 session,
@@ -326,7 +327,7 @@ async def create_index_version_cleanup_job(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="document:index")
             result = service.create_index_version_cleanup_job(
                 session,

@@ -129,16 +129,3 @@ def conversation_database_error(
         details={"error_type": exc.__class__.__name__},
     )
 
-
-# 兼容旧测试和导入路径。
-_conversation_summary_from_mapping = conversation_summary_from_mapping
-_message_from_mapping = message_from_mapping
-_citations_json = citations_json
-_citations_from_json = citations_from_json
-_normalize_title = normalize_title
-_message_status = message_status
-_confidence_or_none = confidence_or_none
-_datetime_or_none = datetime_or_none
-_conversation_not_found = conversation_not_found
-_conversation_database_error = conversation_database_error
-

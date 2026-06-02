@@ -104,7 +104,6 @@ from app.modules.auth.schemas import AuthContext
 from app.modules.indexing import build_index_ops_service
 from app.modules.indexing.errors import IndexingServiceError
 from app.modules.indexing.schemas import *
-from app.modules.storage import ObjectStorage, build_object_storage
 
 _auth_error_response = service_error_response
 _admin_error_response = service_error_response
@@ -114,13 +113,6 @@ _database_error_response = partial(
     error_code="ADMIN_DATABASE_ERROR",
     message="admin database operation failed",
 )
-
-
-def _compat():
-    from app.api.routes import admin as compat
-
-    return compat
-
 
 def _actor_context(auth_context: AuthContext) -> AdminActorContext:
     knowledge_base_ids = tuple(
@@ -152,10 +144,6 @@ def _binding_input(item) -> RoleBindingInput:
         scope_type=item.scope_type,
         scope_id=item.scope_id,
     )
-
-
-def _object_storage_or_none(session: object) -> ObjectStorage | None:
-    return build_object_storage(session, required=False)  # type: ignore[arg-type]
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

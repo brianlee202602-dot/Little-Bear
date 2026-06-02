@@ -113,10 +113,3 @@ def role_scopes(role_code: str) -> list[str]:
     }
     return scopes_by_role.get(role_code, [])
 
-
-# 旧测试和部分模块仍导入下划线 helper；这里保留名称兼容，但真实定义归属本文件。
-_issue = issue
-_setup_schema_error_code = setup_schema_error_code
-_role_scope_type = role_scope_type
-_role_scopes = role_scopes
-

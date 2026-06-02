@@ -50,8 +50,13 @@ class ImportWorkerService:
                     WITH candidate AS (
                         SELECT id
                         FROM import_jobs
-                        WHERE status IN ('queued', 'retrying')
-                          AND (next_retry_at IS NULL OR next_retry_at <= :now)
+                        WHERE (
+                            (
+                                status IN ('queued', 'retrying')
+                                AND (next_retry_at IS NULL OR next_retry_at <= :now)
+                            )
+                            OR status = 'running'
+                          )
                           AND (locked_until IS NULL OR locked_until < :now)
                         ORDER BY created_at ASC
                         LIMIT 1

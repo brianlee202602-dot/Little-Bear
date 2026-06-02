@@ -22,13 +22,13 @@ from app.api.routes.admin_shared import (
     _admin_error_response,
     _auth_error_response,
     _authenticate,
-    _compat,
     _database_error_response,
     _department_data,
     _department_list_item_data,
     _department_option_data,
     _extract_bearer_token,
     _request_id,
+    session_scope,
     status,
 )
 
@@ -46,7 +46,7 @@ async def list_departments(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="org:read")
             result = service.list_departments(
                 session,
@@ -80,7 +80,7 @@ async def list_department_options(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="org:read")
             result = service.list_department_options(
                 session,
@@ -115,7 +115,7 @@ async def create_department(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="org:manage")
             department = service.create_department(
                 session,
@@ -142,7 +142,7 @@ async def get_department(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="org:read")
             department = service.get_department(
                 session,
@@ -167,7 +167,7 @@ async def patch_department(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="org:manage")
             department = service.patch_department(
                 session,
@@ -200,7 +200,7 @@ async def delete_department(
     token = _extract_bearer_token(authorization)
     service = AdminService()
     try:
-        with _compat().session_scope() as session:
+        with session_scope() as session:
             auth_context = _authenticate(session, token, required_scope="org:manage")
             service.delete_department(
                 session,

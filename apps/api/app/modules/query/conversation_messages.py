@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from app.modules.query.conversation_mappers import _conversation_not_found
+from app.modules.query.conversation_mappers import conversation_not_found
 from app.modules.query.conversation_models import QueryConversationWriteContext
 from app.modules.query.conversation_repository import QueryConversationRepository
 from app.modules.query.schemas import QueryCitation
@@ -38,7 +38,7 @@ class QueryConversationMessageService:
                 conversation_id=conversation_id,
             )
             if conversation is None:
-                raise _conversation_not_found(conversation_id)
+                raise conversation_not_found(conversation_id)
         else:
             conversation = self._repository.create_conversation(
                 session,

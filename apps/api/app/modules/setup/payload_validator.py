@@ -9,8 +9,8 @@ from app.modules.config.errors import ConfigServiceError
 from app.modules.setup.contracts import (
     BUILTIN_ROLE_NAMES,
     SetupValidationResult,
-    _issue,
-    _setup_schema_error_code,
+    issue,
+    setup_schema_error_code,
 )
 from app.shared.json_utils import as_dict
 
@@ -41,8 +41,8 @@ class SetupPayloadValidator:
             issues = self._schema_validator_factory().validate_setup_payload(payload)
         except ConfigServiceError as exc:
             errors.append(
-                _issue(
-                    _setup_schema_error_code(exc.error_code),
+                issue(
+                    setup_schema_error_code(exc.error_code),
                     "$",
                     exc.message,
                     retryable=exc.retryable,
@@ -50,9 +50,14 @@ class SetupPayloadValidator:
             )
             return
 
-        for issue in issues:
+        for schema_issue in issues:
             errors.append(
-                _issue("SETUP_CONFIG_INVALID", issue.path, issue.message, retryable=False)
+                issue(
+                    "SETUP_CONFIG_INVALID",
+                    schema_issue.path,
+                    schema_issue.message,
+                    retryable=False,
+                )
             )
 
     def _validate_setup_rules(
@@ -68,7 +73,7 @@ class SetupPayloadValidator:
 
         if not isinstance(departments, list) or not departments:
             errors.append(
-                _issue(
+                issue(
                     "SETUP_CONFIG_INVALID",
                     "$.setup.organization.departments",
                     "at least one department is required",
@@ -82,7 +87,7 @@ class SetupPayloadValidator:
             )
             if default_count != 1:
                 errors.append(
-                    _issue(
+                    issue(
                         "SETUP_CONFIG_INVALID",
                         "$.setup.organization.departments",
                         "exactly one default department is required",
@@ -92,7 +97,7 @@ class SetupPayloadValidator:
         builtin_roles = roles.get("builtin_roles")
         if not isinstance(builtin_roles, list) or set(builtin_roles) != BUILTIN_ROLE_NAMES:
             errors.append(
-                _issue(
+                issue(
                     "SETUP_CONFIG_INVALID",
                     "$.setup.roles.builtin_roles",
                     "builtin roles must match P0 role set",
@@ -100,7 +105,7 @@ class SetupPayloadValidator:
             )
         if roles.get("admin_role") != "system_admin":
             errors.append(
-                _issue(
+                issue(
                     "SETUP_CONFIG_INVALID",
                     "$.setup.roles.admin_role",
                     "admin_role must be system_admin",
@@ -108,7 +113,7 @@ class SetupPayloadValidator:
             )
         if roles.get("default_user_role") != "employee":
             errors.append(
-                _issue(
+                issue(
                     "SETUP_CONFIG_INVALID",
                     "$.setup.roles.default_user_role",
                     "default_user_role must be employee",
@@ -122,7 +127,7 @@ class SetupPayloadValidator:
             min_length = 12
         if not isinstance(password, str) or len(password) < min_length:
             errors.append(
-                _issue(
+                issue(
                     "SETUP_CONFIG_INVALID",
                     "$.setup.admin.initial_password",
                     "initial password does not meet length policy",
@@ -132,7 +137,7 @@ class SetupPayloadValidator:
             char.isupper() for char in password or ""
         ):
             errors.append(
-                _issue(
+                issue(
                     "SETUP_CONFIG_INVALID",
                     "$.setup.admin.initial_password",
                     "initial password requires uppercase letter",
@@ -142,7 +147,7 @@ class SetupPayloadValidator:
             char.islower() for char in password or ""
         ):
             errors.append(
-                _issue(
+                issue(
                     "SETUP_CONFIG_INVALID",
                     "$.setup.admin.initial_password",
                     "initial password requires lowercase letter",
@@ -152,7 +157,7 @@ class SetupPayloadValidator:
             char.isdigit() for char in password or ""
         ):
             errors.append(
-                _issue(
+                issue(
                     "SETUP_CONFIG_INVALID",
                     "$.setup.admin.initial_password",
                     "initial password requires digit",
@@ -187,7 +192,7 @@ class SetupPayloadValidator:
                 continue
             if not isinstance(value, str) or not value.startswith("secret://rag/"):
                 errors.append(
-                    _issue("SETUP_CONFIG_INVALID", path, "secret ref must start with secret://rag/")
+                    issue("SETUP_CONFIG_INVALID", path, "secret ref must start with secret://rag/")
                 )
 
     def _validate_cache_policy(
@@ -196,7 +201,7 @@ class SetupPayloadValidator:
         cache = as_dict(config.get("cache"))
         if cache.get("cross_user_final_answer_allowed") is True:
             errors.append(
-                _issue(
+                issue(
                     "SETUP_CONFIG_INVALID",
                     "$.config.cache.cross_user_final_answer_allowed",
                     "cross-user final answer cache is not allowed in P0",
@@ -209,7 +214,7 @@ class SetupPayloadValidator:
         keyword_search = as_dict(config.get("keyword_search"))
         if keyword_search.get("keyword_analyzer") != "zhparser":
             warnings.append(
-                _issue(
+                issue(
                     "SETUP_KEYWORD_ANALYZER_WARNING",
                     "$.config.keyword_search.keyword_analyzer",
                     "P0 Chinese keyword search expects zhparser",

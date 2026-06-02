@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from app.modules.setup.contracts import role_scopes
 from app.modules.setup.initialize_service import (
     SetupInitializationService,
     SetupStatus,
-    _role_scopes,
 )
 
 
@@ -175,7 +175,7 @@ def test_mark_status_writes_json_value_without_jsonb_build_object_parameter() ->
 
 
 def test_employee_builtin_role_includes_knowledge_base_read_scope() -> None:
-    scopes = _role_scopes("employee")
+    scopes = role_scopes("employee")
 
     assert "knowledge_base:read" in scopes
     assert "document:read" in scopes
@@ -183,7 +183,7 @@ def test_employee_builtin_role_includes_knowledge_base_read_scope() -> None:
 
 
 def test_department_admin_builtin_role_includes_department_read_scopes() -> None:
-    scopes = _role_scopes("department_admin")
+    scopes = role_scopes("department_admin")
 
     assert "department:*" in scopes
     assert "user:read" in scopes

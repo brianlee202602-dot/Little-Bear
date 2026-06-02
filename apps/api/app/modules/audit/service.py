@@ -1,7 +1,7 @@
 """Audit Service facade。
 
-审计日志、查询日志、模型调用日志的读取实现分别由 reader 承担；这里保留
-原 public API，避免路由和外部调用方在结构拆分时被迫同步修改。
+审计日志、查询日志、模型调用日志的读取实现分别由 reader 承担；
+本服务是管理后台诊断路由的稳定读取边界。
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 
 class AuditService:
-    """审计读取 facade，兼容历史调用入口。"""
+    """审计、查询诊断和模型调用诊断读取 facade。"""
 
     def __init__(
         self,

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 
 class AdminPermissionGuardMixin:
-    """Compatibility mixin exposing historical AdminService permission guards."""
+    """管理后台知识库与文档权限策略校验 helper。"""
 
     def _ensure_default_document_permission_within_kb_access(
         self,

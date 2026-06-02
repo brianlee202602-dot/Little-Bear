@@ -6,7 +6,7 @@ import yaml
 from app.main import create_app
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-CONTRACT_PATH = Path("design_docs_history/contracts/openapi.yaml")
+CONTRACT_PATH = Path("docs/contracts/openapi.yaml")
 
 # OpenAPI 中已经登记、但当前后端尚未挂载的 P1/P2 契约占位。后续每实现一个接口，
 # 都应从这里删除对应项，让测试成为开发进度的细颗粒提醒。
