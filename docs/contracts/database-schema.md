@@ -6,18 +6,13 @@
 
 设计依据：
 
-- `design_docs_history/MVP范围说明.md`
 - `docs/contracts/config.schema.json`
 - `docs/contracts/openapi.yaml`
-- `design_docs_history/modules/14-核心数据模型设计实现文档.md`
-- `design_docs_history/modules/01-初始化服务设计实现文档.md`
-- `design_docs_history/modules/02-认证服务设计实现文档.md`
-- `design_docs_history/modules/03-组织服务设计实现文档.md`
-- `design_docs_history/modules/04-权限服务设计实现文档.md`
-- `design_docs_history/modules/05-配置服务设计实现文档.md`
-- `design_docs_history/modules/06-导入服务与工作进程设计实现文档.md`
-- `design_docs_history/modules/07-索引服务设计实现文档.md`
-- `design_docs_history/modules/11-审计与可观测性设计实现文档.md`
+- `docs/contracts/权限矩阵.md`
+- `docs/contracts/状态机设计.md`
+- `docs/contracts/审计事件字典.md`
+- `docs/backend/后端架构设计书.md`
+- `docs/backend/后端接口文档.md`
 
 ## 2. 总体原则
 

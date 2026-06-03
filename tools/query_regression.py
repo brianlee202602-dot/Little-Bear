@@ -468,7 +468,7 @@ def _parse_args(argv: Sequence[str] | None) -> RegressionConfig:
         "--dataset",
         default=os.getenv(
             "LITTLE_BEAR_QUERY_REGRESSION_DATASET",
-            "design_docs_history/examples/query-regression.p0.jsonl",
+            "docs/examples/query-regression.p0.jsonl",
         ),
     )
     parser.add_argument(

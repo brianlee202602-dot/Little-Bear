@@ -77,7 +77,7 @@ class _ExplodingBootstrapService(ServiceBootstrapService):
 
 def _example_config() -> dict:
     payload = json.loads(
-        Path("design_docs_history/examples/setup-initialization.local.p0.json").read_text(
+        Path("docs/examples/setup-initialization.local.p0.json").read_text(
             encoding="utf-8"
         )
     )
