@@ -20,6 +20,8 @@ SMOKE_TIMEOUT_SECONDS ?= 30
 SMOKE_RECORD_PATH ?=
 QUERY_REGRESSION_DATASET ?= design_docs_history/examples/query-regression.p0.jsonl
 QUERY_REGRESSION_RECORD_PATH ?= artifacts/query-regression-latest.json
+RAG_REGRESSION_DATASET ?= docs/examples/query-regression.rag-enhancement.jsonl
+RAG_REGRESSION_RECORD_PATH ?= artifacts/query-regression-rag-latest.json
 REGRESSION_KB_ID ?= $(SMOKE_KB_ID)
 REGRESSION_TIMEOUT_SECONDS ?= 30
 BACKUP_DIR ?= artifacts/backups
@@ -30,7 +32,7 @@ define env_shell
 set -a; [ ! -f "./$(ENV_FILE)" ] || . "./$(ENV_FILE)"; set +a;
 endef
 
-.PHONY: env up down restart ps logs clean reset db-upgrade db-current pg-backup api worker web admin test smoke-p0 smoke-p0-record query-regression-p0 release-smoke-p0 test-integration-qdrant
+.PHONY: env up down restart ps logs clean reset db-upgrade db-current pg-backup api worker web admin test smoke-p0 smoke-p0-record query-regression-p0 query-regression-rag release-smoke-p0 test-integration-qdrant
 
 env:
 	@if [ ! -f "$(ENV_FILE)" ]; then cp .env.example "$(ENV_FILE)"; fi
@@ -119,6 +121,11 @@ query-regression-p0:
 		LITTLE_BEAR_QUERY_REGRESSION_RECORD_PATH="$${LITTLE_BEAR_QUERY_REGRESSION_RECORD_PATH:-$(QUERY_REGRESSION_RECORD_PATH)}" \
 		LITTLE_BEAR_REGRESSION_TIMEOUT_SECONDS="$${LITTLE_BEAR_REGRESSION_TIMEOUT_SECONDS:-$(REGRESSION_TIMEOUT_SECONDS)}" \
 		$(PYTHON) tools/query_regression.py
+
+query-regression-rag:
+	$(MAKE) query-regression-p0 \
+		QUERY_REGRESSION_DATASET="$(RAG_REGRESSION_DATASET)" \
+		QUERY_REGRESSION_RECORD_PATH="$(RAG_REGRESSION_RECORD_PATH)"
 
 release-smoke-p0: smoke-p0-record query-regression-p0
 

@@ -45,7 +45,6 @@ export function useChatWorkspaceRuntime() {
   const canSubmit = computed(() => {
     return Boolean(
       authState.currentUser.value &&
-      knowledgeBaseState.selectedIds.value.length &&
       form.query.trim(),
     );
   });
@@ -57,7 +56,7 @@ export function useChatWorkspaceRuntime() {
       return "暂无可查询知识库";
     }
     if (!knowledgeBaseState.selectedItems.value.length) {
-      return "请选择知识库";
+      return "自动搜索全部可访问知识库";
     }
     return `${knowledgeBaseState.selectedItems.value.length} 个知识库`;
   });
@@ -67,9 +66,6 @@ export function useChatWorkspaceRuntime() {
     }
     if (!knowledgeBaseState.items.value.length) {
       return "当前账号暂无可查询的知识库。";
-    }
-    if (!knowledgeBaseState.selectedIds.value.length) {
-      return "请至少选择一个知识库。";
     }
     if (!form.query.trim()) {
       return "输入问题后开始查询。";

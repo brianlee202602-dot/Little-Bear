@@ -27,13 +27,13 @@
 -> query_logs / model_call_logs / audit_logs
 ```
 
-当前导入索引链路：
+当前导入索引链路（P2 第一阶段后）：
 
 ```text
 upload / url / metadata_batch
 -> parse
 -> clean
--> HeadingParagraphChunker chunk
+-> StructureAwareChunker chunk
 -> draft chunks
 -> create draft index version
 -> keyword index + Qdrant draft vector points
@@ -42,10 +42,10 @@ upload / url / metadata_batch
 
 已实现但需要增强的点：
 
-- 当前会话历史只用于展示，不参与检索 query 改写。
-- 当前查询 API 要求前端传入 `kb_ids`，还不是服务端自动搜索当前用户全部可访问知识库。
-- 当前切块器已经按标题/段落聚合，但长块仍按字符长度硬切，页码、段落序号、标题层级、表格等元数据不足。
-- 当前检索策略有关键词、向量、RRF、rerank、最低 rerank 分数 gate，但缺少 query rewrite、多 query 召回、字段加权、相邻 chunk 扩展、文档级聚合、MMR 去冗余等精细策略。
+- 当前会话历史已可作为 Query Rewrite 的轻量输入，但 RAG 召回仍只针对改写出的检索 query，不做多轮联合上下文检索。
+- 查询 API 已支持不传 `kb_ids` 时由服务端自动搜索当前用户全部可访问知识库；前端选择知识库保留为显式过滤入口。
+- 当前切块器已升级为结构化切块，但旧文档需要重新导入或后续重建文档版本后才能获得新 chunk 元数据；上下文预算已改为可替换 token 估算器驱动，当前默认估算器不是 provider 精确 tokenizer。
+- 当前检索策略已具备 Query Rewrite、多 query 召回、字段加权、Weighted RRF、质量门控、相邻 chunk 扩展、文档 / section 限制、embedding MMR（缺向量时回落文本 Jaccard）、完整 chunk 对象存储回源读取和管理后台检索诊断详情可视化。
 
 ## 2. 总体目标
 
@@ -82,6 +82,24 @@ P0 服务端全权限知识库自动搜索
 - 精细化检索策略依赖更好的 query 和 chunk 元数据，放到最后收益最大。
 
 ## 4. P0 服务端全权限知识库自动搜索
+
+实施状态：已落地，更新时间 2026-06-02。
+
+实现结果：
+
+- `POST /internal/v1/queries` 和 `POST /internal/v1/query-streams` 已允许 `kb_ids` 缺省或为空数组。
+- 空 `kb_ids` 会由后端通过 Permission Service 自动解析当前用户全部可查询知识库。
+- 显式 `kb_ids` 仍会逐个校验可查询权限，越权知识库继续拒绝。
+- 自动范围为空时返回结构化降级答案，降级原因包含 `query_scope_empty`。
+- resolved 知识库范围会写入 `QueryResult.kb_ids`、服务端会话 `query_conversations.kb_ids` 和 `query_logs.kb_ids`。
+- 已新增 `query_scope_mode`、`resolved_kb_count` 和 `rewrite_count` 数据库字段；查询日志列表和详情可直接读取结构化摘要，不需要解析诊断 JSON 推导检索范围。
+- 普通查询前端已将知识库选择改为可选限定范围；清空选择表示自动搜索全部可访问知识库。
+
+验证结果：
+
+- `make PYTHON=.venv/bin/python test`：371 个单元测试通过。
+- `npm run typecheck:web`：通过。
+- `npm run build:web`：通过。
 
 ### 4.1 目标
 
@@ -187,6 +205,22 @@ resolved_kb_count
 
 ## 5. P1 Query Rewrite
 
+实施状态：已落地，更新时间 2026-06-02。
+
+实现结果：
+
+- 新增 `apps/api/app/modules/query_rewrite/`，包含 schema、规则 fallback、LLM prompt 和 `QueryRewriteService`。
+- `QueryService` runtime 已接入 Query Rewrite。默认可使用规则 fallback；当 active config 设置 `retrieval.query_rewrite_use_llm=true` 时，复用当前 LLM provider 做 JSON query rewrite。
+- `QueryOrchestrator` 已在 keyword search 和 vector search 前执行 rewrite，并对每个 rewritten query 执行关键词召回和向量召回；Context Builder、rerank query 和最终回答仍使用用户原始问题。
+- Query API 和 Query Stream API 已把前端传入的 history 转交给后端，rewrite 阶段只读取最近会话消息做指代补全，不把历史内容作为答案事实。
+- LLM rewrite 失败或返回非法 JSON 时使用规则 fallback，不阻断查询；rewrite 模型调用只写入 hash、耗时、状态和错误码，不记录完整 prompt 或文档原文。
+- `docs/contracts/config.schema.json` 和 `docs/contracts/config-schema.md` 已支持 `query_rewrite_*` 与 `query_rewrite_ms` 配置项；未配置新字段时，运行时用 `rewrite_enabled` 作为后备开关。
+
+当前刻意未做：
+
+- 候选级 `matched_query`、`matched_query_index`、`rewrite_weight` 还没有写入 `RetrievalCandidate`。当前 P1 只完成多 query 扇出召回和模型调用日志，候选归因留到 P3 精细化检索策略一起处理。
+- Query Rewrite 失败不作为用户可见降级原因展示；它只影响检索 query 生成，查询仍使用规则 fallback 正常推进，并在模型调用日志中可观测。
+
 ### 5.1 目标
 
 把用户原始问题改写为适合检索的 query 列表，并支持复合问题拆分。例如：
@@ -201,19 +235,18 @@ resolved_kb_count
 
 ### 5.2 架构位置
 
-新增模块建议：
+实际模块：
 
 ```text
 apps/api/app/modules/query_rewrite/
   __init__.py
   schemas.py
   service.py
-  runtime.py
   prompt.py
   fallback.py
 ```
 
-也可以放在 `modules/query/rewrite_*` 下，但更推荐独立模块，原因是 Query Rewrite 是模型能力，不应塞进 QueryOrchestrator 继续变大。
+Query Rewrite 独立于 `modules/query`，但 runtime 组装入口仍在 `apps/api/app/modules/query/runtime.py`，因为它需要复用 active config、secret 和当前 LLM provider。
 
 ### 5.3 数据结构
 
@@ -373,9 +406,30 @@ active config 增加：
 
 ## 6. P2 结构化切块与元数据增强
 
+实施状态：已落地第二阶段，更新时间 2026-06-02。
+
+实现结果：
+
+- 新增 `ParsedBlock` 结构块模型，`ParsedDocument` 和 `CleanedDocument` 均携带 `blocks`。
+- `PlainTextParser` / Markdown 路径可识别 heading、paragraph、list_item、code 和 page marker。
+- `PdfParser` 保留 `[page N]` 文本标记，并为 page 内 block 写入 `page_number`。
+- `DocxParser` 可识别 paragraph、heading style 和 table block，表格保留行列文本摘要。
+- `PlainTextCleaner` 会清洗并保留 blocks；Worker parse / clean / chunk 阶段会把 blocks 存入 `import_jobs.request_json`，支持任务重试和锁接管后继续使用结构块。
+- 新增 `StructureAwareChunker` 并作为导入 runtime 默认 chunker：heading 更新 section path，paragraph / list_item 按同一 heading 聚合，table / code 独立成 chunk，超长段落优先按句子切分。
+- `chunks.page_start` / `chunks.page_end` 已在 chunk 写入阶段落库；`source_offsets` 已包含 `block_start`、`block_end`、`char_start`、`char_end`、`page_start`、`page_end`、`heading_path`、`block_types`、`section_id`、`chunk_strategy` 和 `chunker_version`。
+- keyword 和 vector 索引文本已从裸 chunk preview 改为结构化检索摘要：`title + section + content`。自然正文仍保留在 chunk 对象和 `text_preview` 中，避免把检索前缀展示给用户。
+- `docs/contracts/config.schema.json` 已允许 `chunk.strategy.mode=structure_aware`，配置说明已同步。
+
+当前刻意未做：
+
+- 未新增数据库字段；结构化元数据第一阶段写入现有 `source_offsets` 和 `page_start/page_end`。
+- 未自动改写旧文档 chunk；旧文档需要重新导入或后续通过文档版本级重建生成新 chunk。管理后台“重建索引”只重排现有 chunk，不补齐历史 chunk 元数据。
+- 未接入具体模型 provider 的精确 tokenizer；当前上下文预算使用可替换的保守 token 估算器执行截断。
+- `overlap_tokens` 当前只作为长度预算输入保留，P2 第一阶段不强制给每个 chunk 增加重叠句子，避免 citation 片段重复。
+
 ### 6.1 目标
 
-升级当前 `HeadingParagraphChunker`。当前它已经按标题/段落聚合，但仍存在：
+升级当前导入切块链路。旧 `HeadingParagraphChunker` 已被 `StructureAwareChunker` 替代。历史问题包括：
 
 - 长段落按字符硬切。
 - page_start / page_end 经常为空。
@@ -515,13 +569,15 @@ source_type: ...
 - embedding 文本可以带标题和 section，提高召回。
 - keyword search_text 也可以带标题和 section。
 
-### 6.7 重建索引
+### 6.7 历史文档元数据补齐
 
-切块策略变更必须触发重建：
+切块策略变更后，历史文档元数据补齐必须重新生成 chunk：
 
-- 新上传文档自动使用新策略。
-- 旧文档需要管理后台批量重建索引。
-- 重建会生成新 document_version 或至少新 index_version。更安全的做法是新 document_version，避免旧 chunk 与新 chunk 混杂。
+- 新上传或重新导入文档自动使用新策略。
+- 旧文档不做原地批量回写；旧 chunk 无法可靠反推标题层级、页码跨度和结构块范围。
+- 旧文档需要重新导入，或后续通过文档版本级重建生成新的 `document_version`。
+- 管理后台“重建索引”只把现有 active chunk 重新写入 keyword/vector 索引，不能补齐旧 chunk 元数据。
+- 详细策略见 `docs/backend/历史文档元数据补齐策略.md`。
 
 ### 6.8 测试
 
@@ -536,6 +592,26 @@ source_type: ...
 - 新 chunker 生成的 chunk 可完整走 embedding/index/publish。
 
 ## 7. P3 精细化检索策略
+
+实施状态：已落地第二阶段，更新时间 2026-06-02。
+
+实现结果：
+
+- 多 query 召回已接入候选归因：keyword/vector 候选会记录 `matched_query`、`matched_query_index`、`query_weight`、`source_weight` 和 `source_score`。
+- `ReciprocalRankFusion` 已升级为 Weighted RRF，公式为 `query_weight * source_weight / (rrf_k + rank)`；默认权重为 keyword 1.0、vector 1.2、original query 1.2、rewrite query 1.0。
+- 关键词检索已增加字段加权：标题命中、`heading_path` 命中和 tags 命中会在正文 `ts_rank` / `ILIKE` 基础上增加分数。
+- 新增 `CandidateQualityGate`，在 rerank 未配置或降级时用融合分和原始召回分做兜底质量门控；候选质量过低时不会调用 LLM，并写入 `query.quality_gate_failed` 审计事件。
+- 配置契约已允许 `fusion_params.keyword_weight`、`vector_weight`、`original_query_weight`、`rewrite_query_weight`、`min_fusion_score` 和 `min_source_score`。
+- 新增相邻 chunk 扩展：对已通过权限 gate 的候选按同文档同版本前后 chunk 扩展，扩展候选会再次经过 Permission Service candidate gate，避免越权进入上下文。
+- Context Builder 已支持同文档 / 同 section 数量限制和 embedding MMR 去冗余，减少同一文档同一小节 chunk 挤占全部上下文；缺少 embedding 的候选会回落到文本 token Jaccard。
+- Context Builder 已支持完整 chunk 正文对象存储回源读取：最终选入上下文的候选优先按 `text_object_key` 读取完整正文，失败时回落到 `text_preview`，并继续执行上下文预算截断。
+- 新增 `query_retrieval_diagnostics` 表，并在 query log 写入时保存 rewrite queries、阶段候选数量、quality gate 摘要和最终上下文 chunk 摘要；查询日志详情可读取该诊断摘要。
+- 管理后台查询日志详情弹窗已接入检索诊断可视化，展示 query rewrite、阶段候选数量、quality gate 摘要和最终上下文片段摘要，不展示 prompt 或完整文档正文。
+- 配置契约已允许 `max_chunks_per_document`、`max_chunks_per_section`、`mmr_enabled`、`mmr_lambda` 和 `context_expand_neighbors`。
+
+当前刻意未做：
+
+- Qdrant 向量召回已带回 point vector；Context Builder 的 MMR 优先使用 embedding 余弦相似度，缺少 embedding 或维度不一致时回落 chunk 文本 token Jaccard。
 
 ### 7.1 目标
 
@@ -669,7 +745,7 @@ quality_reason
 
 ### 7.8 Context Builder 使用完整 chunk 正文
 
-当前 Context Builder 使用 `text_preview`。增强为：
+已实现。Context Builder 在最终候选已通过权限 gate、相关性门控、相邻 chunk 扩展和去冗余选择后，再读取完整正文：
 
 - 优先通过 `text_object_key` 读取对象存储完整 chunk。
 - 对象存储不可用时降级使用 `text_preview`。
@@ -683,13 +759,13 @@ quality_reason
 
 ### 7.9 检索诊断增强
 
-管理后台查询诊断中建议显示：
+已实现。管理后台查询诊断详情显示：
 
 - rewrite queries。
 - 每个 query 的 keyword/vector 命中数量。
 - fusion 前后候选数量。
 - gate 拒绝数量及原因摘要。
-- rerank 分数。
+- rerank 调用状态和 top 分数摘要。
 - quality gate 是否拦截。
 - 最终进入上下文的 chunk 数量。
 
@@ -714,22 +790,18 @@ quality_reason
 `POST /internal/v1/queries` 和 `/internal/v1/query-streams`：
 
 - `kb_ids` 从必填改为可选或允许空数组。
-- 响应可选增加：
+- 普通查询响应已增加 `query_scope` 最小范围摘要：
 
 ```json
 {
   "query_scope": {
     "mode": "auto_all_accessible",
     "resolved_kb_count": 3
-  },
-  "retrieval_debug": {
-    "rewrite_count": 3,
-    "candidate_count": 12
   }
 }
 ```
 
-注意：普通用户响应不要暴露内部 trace、完整 rewrite prompt、完整 chunk。debug 字段应受配置控制，默认只给最小摘要。
+非流式响应、流式 `metadata` 和流式 `done` 均返回 `query_scope`。普通用户响应不返回 `retrieval_debug`；rewrite、召回、gate、rerank 和上下文 chunk 摘要只通过管理后台查询日志详情读取，避免把内部检索策略和候选细节暴露给普通查询端。
 
 ### 8.2 Config Schema
 
@@ -788,7 +860,7 @@ quality_reason
 - `query_logs` 继续存摘要。
 - `model_call_logs` 存 rewrite / rerank / llm 调用摘要。
 
-建议新增字段或表：
+已新增字段或表：
 
 1. `query_logs.rewrite_count`
 2. `query_logs.resolved_kb_count`
@@ -834,10 +906,16 @@ quality_reason
 
 ### 11.3 回归评测
 
-扩展 `query-regression.p0.jsonl` 或新增：
+已新增 RAG 增强回归样例：
 
 ```text
 docs/examples/query-regression.rag-enhancement.jsonl
+```
+
+执行入口：
+
+```bash
+make PYTHON=.venv/bin/python query-regression-rag
 ```
 
 指标：
@@ -891,13 +969,13 @@ docs/examples/query-regression.rag-enhancement.jsonl
 - StructureAwareChunker。
 - 页码、heading_path、block offsets、section metadata。
 - keyword/vector index text 增强。
-- 管理后台重建索引验收。
+- 新导入 / 重新导入验收。
 
 验收：
 
 - 新导入 Markdown/PDF/DOCX 文档 chunk 元数据明显改善。
 - citation 页码不再普遍为空。
-- 旧文档重建后使用新 chunker。
+- 旧文档重新导入或生成新文档版本后使用新 chunker；仅重建索引不会改变旧 chunk 元数据。
 
 ### P3 精细化检索
 
@@ -937,4 +1015,3 @@ docs/examples/query-regression.rag-enhancement.jsonl
 4. P2 只先增强 Markdown/PDF 页码与 heading metadata。
 
 这四项可以在不大幅扩大模型调用成本的情况下明显改善用户体验。
-

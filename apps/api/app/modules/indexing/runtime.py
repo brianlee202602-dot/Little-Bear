@@ -33,13 +33,13 @@ class _VectorStoreEmbeddingClientAdapter:
         try:
             return self.client.embed_query(query_text)
         except ModelClientError as exc:
-            raise VectorStoreEmbeddingError(exc.error_code) from exc
+            raise VectorStoreEmbeddingError(exc.error_code, exc.message) from exc
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         try:
             return self.client.embed_texts(texts)
         except ModelClientError as exc:
-            raise VectorStoreEmbeddingError(exc.error_code) from exc
+            raise VectorStoreEmbeddingError(exc.error_code, exc.message) from exc
 
 
 class _QdrantVectorIndexWriterAdapter:
@@ -170,6 +170,7 @@ def _build_indexing_service(session: Session, config: dict[str, Any]) -> Indexin
                 default_ms=3000,
                 min_ms=3000,
             ),
+            embedding_batch_size=_embedding_batch_size(config),
         )
     )
     return IndexingService(
@@ -193,6 +194,11 @@ def _embedding_path(provider: dict[str, Any]) -> str:
         return configured
     provider_type = json_str(provider, "type", default="http")
     return "/embed" if provider_type == "tei" else "/v1/embeddings"
+
+
+def _embedding_batch_size(config: dict[str, Any]) -> int:
+    import_config = as_dict(config.get("import"))
+    return max(json_int(import_config, "embedding_batch_size") or 16, 1)
 
 
 def _secret_value(session: Session, secret_ref: str | None) -> str | None:

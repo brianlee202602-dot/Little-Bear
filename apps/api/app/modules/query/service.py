@@ -18,6 +18,7 @@ from app.modules.query.retrieval_pipeline import QueryRetrievalPipeline
 from app.modules.query.schemas import (
     ActiveIndexVersion,
     QueryAllowedCandidate,
+    QueryCandidateGateResult,
     QueryCitation,
     QueryFilterClause,
     QueryResult,
@@ -47,7 +48,9 @@ from app.modules.query.utils import (
     _string_list,
     _truncate_error_message,
 )
+from app.modules.query_rewrite import QueryRewriteService
 from app.modules.retrieval import (
+    CandidateQualityGate,
     CandidateReranker,
     NoopCandidateReranker,
     ReciprocalRankFusion,
@@ -76,8 +79,12 @@ class QueryService:
         rerank_input_top_k: int = 20,
         rerank_min_score: float = DEFAULT_RERANK_MIN_SCORE,
         fusion_service: ReciprocalRankFusion | None = None,
+        retrieval_weights: dict[str, float] | None = None,
+        candidate_quality_gate: CandidateQualityGate | None = None,
+        context_expand_neighbors: int = 0,
         context_builder: ContextBuilder | None = None,
         answer_service: AnswerService | None = None,
+        query_rewrite_service: QueryRewriteService | None = None,
         repository: QueryRepository | None = None,
         log_writer: QueryLogWriter | None = None,
     ) -> None:
@@ -87,8 +94,17 @@ class QueryService:
         self.rerank_input_top_k = max(rerank_input_top_k, 1)
         self.rerank_min_score = max(float(rerank_min_score), 0.0)
         self.fusion_service = fusion_service or ReciprocalRankFusion()
+        self.retrieval_weights = retrieval_weights or {
+            "keyword": 1.0,
+            "vector": 1.2,
+            "original_query": 1.2,
+            "rewrite_query": 1.0,
+        }
+        self.candidate_quality_gate = candidate_quality_gate or CandidateQualityGate()
+        self.context_expand_neighbors = max(context_expand_neighbors, 0)
         self.context_builder = context_builder or ContextBuilder()
         self.answer_service = answer_service or AnswerService()
+        self.query_rewrite_service = query_rewrite_service or QueryRewriteService()
         self._query_repository = repository or QueryRepository()
         self._query_log_writer = log_writer or QueryLogWriter()
 
@@ -163,6 +179,25 @@ class QueryService:
             limit=limit,
         )
 
+    def _gate_candidates_with_diagnostics(
+        self,
+        session: Session,
+        context: PermissionContext,
+        candidates: tuple[RetrievalCandidate, ...],
+        *,
+        allowed_kb_ids: tuple[str, ...],
+        active_index_version_ids: tuple[str, ...],
+        limit: int,
+    ) -> QueryCandidateGateResult:
+        return self._retrieval_pipeline().gate_candidates_with_diagnostics(
+            session,
+            context,
+            candidates,
+            allowed_kb_ids=allowed_kb_ids,
+            active_index_version_ids=active_index_version_ids,
+            limit=limit,
+        )
+
     def _load_current_candidate_facts(
         self,
         session: Session,
@@ -183,6 +218,26 @@ class QueryService:
             query_text=query_text,
             allowed_candidates=allowed_candidates,
             top_k=top_k,
+        )
+
+    def _expand_context_candidates(
+        self,
+        session: Session,
+        context: PermissionContext,
+        allowed_candidates: tuple[QueryAllowedCandidate, ...],
+        *,
+        allowed_kb_ids: tuple[str, ...],
+        active_index_version_ids: tuple[str, ...],
+        limit: int,
+    ) -> tuple[QueryAllowedCandidate, ...]:
+        return self._retrieval_pipeline().expand_context_candidates(
+            session,
+            context,
+            allowed_candidates,
+            allowed_kb_ids=allowed_kb_ids,
+            active_index_version_ids=active_index_version_ids,
+            neighbor_window=self.context_expand_neighbors,
+            limit=limit,
         )
 
     def _load_rerank_texts(
@@ -206,6 +261,7 @@ class QueryService:
         config_version: int,
         latency_ms: int,
         error_code: str,
+        query_scope_mode: str,
     ) -> None:
         self._query_log_writer.insert_denied_query_log(
             session,
@@ -218,6 +274,7 @@ class QueryService:
             config_version=config_version,
             latency_ms=latency_ms,
             error_code=error_code,
+            query_scope_mode=query_scope_mode,
         )
 
     def _insert_query_log(
@@ -242,6 +299,10 @@ class QueryService:
         candidate_count: int,
         citation_count: int,
         error_code: str | None,
+        query_scope_mode: str,
+        resolved_kb_count: int,
+        rewrite_count: int,
+        retrieval_diagnostics: dict[str, object] | None = None,
     ) -> None:
         self._query_log_writer.insert_query_log(
             session,
@@ -263,6 +324,10 @@ class QueryService:
             candidate_count=candidate_count,
             citation_count=citation_count,
             error_code=error_code,
+            query_scope_mode=query_scope_mode,
+            resolved_kb_count=resolved_kb_count,
+            rewrite_count=rewrite_count,
+            retrieval_diagnostics=retrieval_diagnostics,
         )
 
     def _insert_model_call_log(

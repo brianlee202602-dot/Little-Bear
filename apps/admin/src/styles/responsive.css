@@ -18,7 +18,8 @@
   .config-version-strip,
   .summary.document-detail-summary,
   .index-health-metrics,
-  .document-version-index-grid {
+  .document-version-index-grid,
+  .retrieval-stage-grid {
     grid-template-columns: 1fr;
   }
 
@@ -162,6 +163,12 @@
 
   .modal__body--document-details {
     padding-right: 18px;
+  }
+
+  .retrieval-diagnostics__header,
+  .retrieval-section__title {
+    display: grid;
+    justify-items: start;
   }
 
   .user-menu {

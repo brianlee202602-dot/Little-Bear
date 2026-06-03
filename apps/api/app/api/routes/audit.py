@@ -135,6 +135,7 @@ async def list_query_logs(
     user_id: str | None = Query(default=None),
     kb_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    query_scope_mode: str | None = Query(default=None),
     degraded: bool | None = Query(default=None),
     degrade_reason: str | None = Query(default=None),
     request_id: str | None = Query(default=None),
@@ -156,6 +157,7 @@ async def list_query_logs(
                     "user_id": user_id,
                     "kb_id": kb_id,
                     "status": status,
+                    "query_scope_mode": query_scope_mode,
                     "degraded": degraded,
                     "degrade_reason": degrade_reason,
                     "request_id": request_id,
@@ -274,4 +276,3 @@ async def get_model_call_log(
         return _database_error_response(exc, stage="model_call_log_get")
 
     return ModelCallLogResponse(request_id=_request_id(), data=_model_call_log_data(log))
-

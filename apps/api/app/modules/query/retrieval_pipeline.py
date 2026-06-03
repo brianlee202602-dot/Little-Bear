@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from app.modules.permissions import CandidateMetadata, PermissionService
 from app.modules.permissions.schemas import PermissionContext
 from app.modules.query.errors import QueryServiceError
 from app.modules.query.repository import QueryRepository
-from app.modules.query.schemas import QueryAllowedCandidate
+from app.modules.query.schemas import (
+    QueryAllowedCandidate,
+    QueryCandidateGateDiagnostics,
+    QueryCandidateGateResult,
+)
 from app.modules.query.utils import (
     _candidate_rerank_text,
     _citation_from_candidate,
@@ -44,11 +50,34 @@ class QueryRetrievalPipeline:
         active_index_version_ids: tuple[str, ...],
         limit: int,
     ) -> tuple[QueryAllowedCandidate, ...]:
+        return self.gate_candidates_with_diagnostics(
+            session,
+            context,
+            candidates,
+            allowed_kb_ids=allowed_kb_ids,
+            active_index_version_ids=active_index_version_ids,
+            limit=limit,
+        ).allowed_candidates
+
+    def gate_candidates_with_diagnostics(
+        self,
+        session: Session,
+        context: PermissionContext,
+        candidates: tuple[RetrievalCandidate, ...],
+        *,
+        allowed_kb_ids: tuple[str, ...],
+        active_index_version_ids: tuple[str, ...],
+        limit: int,
+    ) -> QueryCandidateGateResult:
         allowed: list[QueryAllowedCandidate] = []
+        rejection_reasons: Counter[str] = Counter()
+        missing_metadata_count = 0
+        rejected_count = 0
         current_facts = self._repository.load_current_candidate_facts(session, candidates)
         for candidate in candidates:
             facts = current_facts.get((candidate.chunk_id, candidate.index_version_id))
             if facts is None:
+                missing_metadata_count += 1
                 continue
             candidate = facts.candidate
             gate_result = self._permission_service.gate_candidate(
@@ -72,6 +101,8 @@ class QueryRetrievalPipeline:
                 active_index_version_ids=active_index_version_ids,
             )
             if not gate_result.allowed:
+                rejected_count += 1
+                rejection_reasons[gate_result.error_code or gate_result.reason] += 1
                 continue
             allowed.append(
                 QueryAllowedCandidate(
@@ -81,7 +112,53 @@ class QueryRetrievalPipeline:
             )
             if len(allowed) >= limit:
                 break
-        return tuple(allowed)
+        return QueryCandidateGateResult(
+            allowed_candidates=tuple(allowed),
+            diagnostics=QueryCandidateGateDiagnostics(
+                input_count=len(candidates),
+                allowed_count=len(allowed),
+                rejected_count=rejected_count,
+                missing_metadata_count=missing_metadata_count,
+                rejection_reasons=dict(rejection_reasons),
+            ),
+        )
+
+    def expand_context_candidates(
+        self,
+        session: Session,
+        context: PermissionContext,
+        allowed_candidates: tuple[QueryAllowedCandidate, ...],
+        *,
+        allowed_kb_ids: tuple[str, ...],
+        active_index_version_ids: tuple[str, ...],
+        neighbor_window: int,
+        limit: int,
+    ) -> tuple[QueryAllowedCandidate, ...]:
+        if not allowed_candidates or neighbor_window <= 0:
+            return allowed_candidates
+        primary_candidates = tuple(item.candidate for item in allowed_candidates)
+        try:
+            neighbor_candidates = self._repository.load_neighbor_candidates(
+                session,
+                candidates=primary_candidates,
+                window=neighbor_window,
+            )
+        except QueryServiceError:
+            return allowed_candidates
+        if not neighbor_candidates:
+            return allowed_candidates
+        remaining_limit = max(limit - len(allowed_candidates), 0)
+        if remaining_limit <= 0:
+            return allowed_candidates
+        gated_neighbors = self.gate_candidates(
+            session,
+            context,
+            neighbor_candidates,
+            allowed_kb_ids=allowed_kb_ids,
+            active_index_version_ids=active_index_version_ids,
+            limit=remaining_limit,
+        )
+        return _merge_allowed_candidates(allowed_candidates, gated_neighbors)
 
     def rerank_allowed_candidates(
         self,
@@ -120,3 +197,17 @@ class QueryRetrievalPipeline:
             texts=texts,
             top_k=top_k,
         )
+
+
+def _merge_allowed_candidates(
+    primary: tuple[QueryAllowedCandidate, ...],
+    expanded: tuple[QueryAllowedCandidate, ...],
+) -> tuple[QueryAllowedCandidate, ...]:
+    merged: list[QueryAllowedCandidate] = []
+    seen: set[str] = set()
+    for item in (*primary, *expanded):
+        if item.candidate.chunk_id in seen:
+            continue
+        seen.add(item.candidate.chunk_id)
+        merged.append(item)
+    return tuple(merged)

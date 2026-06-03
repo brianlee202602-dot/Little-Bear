@@ -72,8 +72,12 @@ def query_log_data(log: QueryLog) -> QueryLogData:
         latency_ms=log.latency_ms,
         candidate_count=log.candidate_count,
         citation_count=log.citation_count,
+        query_scope_mode=log.query_scope_mode,
+        resolved_kb_count=log.resolved_kb_count,
+        rewrite_count=log.rewrite_count,
         error_code=log.error_code,
         created_at=log.created_at,
+        retrieval_diagnostics=log.retrieval_diagnostics,
     )
 
 
@@ -88,6 +92,9 @@ def query_log_list_item_data(log: QueryLog) -> QueryLogListItemData:
         latency_ms=log.latency_ms,
         candidate_count=log.candidate_count,
         citation_count=log.citation_count,
+        query_scope_mode=log.query_scope_mode,
+        resolved_kb_count=log.resolved_kb_count,
+        rewrite_count=log.rewrite_count,
         error_code=log.error_code,
         created_at=log.created_at,
     )
@@ -129,4 +136,3 @@ def model_call_log_list_item_data(log: ModelCallLog) -> ModelCallLogListItemData
         error_code=log.error_code,
         created_at=log.created_at,
     )
-

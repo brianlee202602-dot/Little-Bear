@@ -134,9 +134,20 @@ class QueryRepository:
                         ) AS indexed_permission_version,
                         c.page_start,
                         c.page_end,
-                        GREATEST(
-                            ts_rank_cd(kie.search_tsv, plainto_tsquery('simple', :query_text)),
-                            CASE WHEN kie.search_text ILIKE :like_query THEN 0.05 ELSE 0 END
+                        (
+                            GREATEST(
+                                ts_rank_cd(
+                                    kie.search_tsv,
+                                    plainto_tsquery('simple', :query_text)
+                                ),
+                                CASE WHEN kie.search_text ILIKE :like_query THEN 0.05 ELSE 0 END
+                            )
+                            + CASE WHEN d.title ILIKE :like_query THEN 0.30 ELSE 0 END
+                            + CASE WHEN c.heading_path ILIKE :like_query THEN 0.20 ELSE 0 END
+                            + CASE
+                                WHEN array_to_string(d.tags, ' ') ILIKE :like_query THEN 0.20
+                                ELSE 0
+                              END
                         )::float AS score
                     FROM keyword_index_entries kie
                     JOIN chunks c ON c.id = kie.chunk_id
@@ -282,6 +293,112 @@ class QueryRepository:
                 access_blocked=bool(mapping["access_blocked"]),
             )
         return facts
+
+    def load_neighbor_candidates(
+        self,
+        session: Session,
+        *,
+        candidates: tuple[RetrievalCandidate, ...],
+        window: int,
+    ) -> tuple[RetrievalCandidate, ...]:
+        window = max(window, 0)
+        if not candidates or window <= 0:
+            return ()
+        chunk_ids = [candidate.chunk_id for candidate in candidates]
+        index_version_ids = [candidate.index_version_id for candidate in candidates]
+        try:
+            rows = session.execute(
+                text(
+                    """
+                    WITH anchors AS (
+                        SELECT *
+                        FROM unnest(
+                            CAST(:chunk_ids AS uuid[]),
+                            CAST(:index_version_ids AS uuid[])
+                        ) WITH ORDINALITY AS item(anchor_chunk_id, index_version_id, anchor_order)
+                    )
+                    SELECT
+                        a.anchor_chunk_id::text AS anchor_chunk_id,
+                        c.enterprise_id::text AS enterprise_id,
+                        d.kb_id::text AS kb_id,
+                        d.id::text AS document_id,
+                        c.document_version_id::text AS document_version_id,
+                        c.id::text AS chunk_id,
+                        d.title,
+                        d.owner_department_id::text AS owner_department_id,
+                        d.visibility,
+                        d.lifecycle_status AS document_lifecycle_status,
+                        d.index_status AS document_index_status,
+                        c.status AS chunk_status,
+                        cir.visibility_state,
+                        iv.id::text AS index_version_id,
+                        cir.indexed_permission_version,
+                        c.page_start,
+                        c.page_end,
+                        0.0::float AS score,
+                        abs(c.ordinal - anchor_chunk.ordinal) AS ordinal_distance
+                    FROM anchors a
+                    JOIN chunks anchor_chunk
+                      ON anchor_chunk.id = a.anchor_chunk_id
+                     AND anchor_chunk.deleted_at IS NULL
+                    JOIN chunks c
+                      ON c.document_id = anchor_chunk.document_id
+                     AND c.document_version_id = anchor_chunk.document_version_id
+                     AND c.deleted_at IS NULL
+                     AND c.status = 'active'
+                     AND c.ordinal BETWEEN anchor_chunk.ordinal - :window
+                                      AND anchor_chunk.ordinal + :window
+                     AND c.id <> anchor_chunk.id
+                    JOIN documents d
+                      ON d.id = c.document_id
+                     AND d.deleted_at IS NULL
+                    JOIN index_versions iv
+                      ON iv.id = a.index_version_id
+                     AND iv.document_id = d.id
+                     AND iv.document_version_id = c.document_version_id
+                     AND iv.status = 'active'
+                    JOIN chunk_index_refs cir
+                      ON cir.chunk_id = c.id
+                     AND cir.index_version_id = iv.id
+                     AND cir.visibility_state = 'active'
+                    ORDER BY a.anchor_order, ordinal_distance, c.ordinal
+                    """
+                ),
+                {
+                    "chunk_ids": chunk_ids,
+                    "index_version_ids": index_version_ids,
+                    "window": window,
+                },
+            ).all()
+        except SQLAlchemyError as exc:
+            raise _database_error(
+                "QUERY_NEIGHBOR_CHUNKS_UNAVAILABLE",
+                "neighbor chunks cannot be loaded",
+                exc,
+            ) from exc
+        anchors = {candidate.chunk_id: candidate for candidate in candidates}
+        neighbor_candidates: list[RetrievalCandidate] = []
+        for rank, row in enumerate(rows, start=1):
+            mapping = dict(row._mapping)
+            anchor = anchors.get(str(mapping["anchor_chunk_id"]))
+            if anchor is None:
+                continue
+            distance = _optional_int(mapping.get("ordinal_distance")) or 1
+            score = max(anchor.score * (0.85**distance), 0.0)
+            source_score = max(anchor.source_score * (0.85**distance), 0.0)
+            candidate = _candidate_from_mapping(mapping, source="context_expansion", rank=rank)
+            neighbor_candidates.append(
+                replace(
+                    candidate,
+                    score=score,
+                    source_score=source_score,
+                    matched_query=anchor.matched_query,
+                    matched_query_index=anchor.matched_query_index,
+                    query_weight=anchor.query_weight,
+                    source_weight=max(anchor.source_weight * 0.5, 0.0),
+                )
+            )
+        return tuple(neighbor_candidates)
 
     def load_rerank_texts(
         self,

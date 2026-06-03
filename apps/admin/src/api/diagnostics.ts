@@ -15,6 +15,15 @@ export type {
   QueryLogListItemData,
   QueryLogListResponse,
   QueryLogResponse,
+  QueryRetrievalGateData,
+  QueryRetrievalDiagnosticsData,
+  QueryRetrievalPerQueryData,
+  QueryRetrievalQualityGateData,
+  QueryRetrievalQueryData,
+  QueryRetrievalRerankData,
+  QueryRetrievalRerankScoreData,
+  QueryRetrievalSelectedChunkData,
+  QueryRetrievalStageCountsData,
 } from "./diagnosticsTypes";
 
 export async function listQueryLogs(
@@ -27,6 +36,7 @@ export async function listQueryLogs(
     status?: string;
     degraded?: boolean | null;
     degrade_reason?: string;
+    query_scope_mode?: string;
     request_id?: string;
     trace_id?: string;
     error_code?: string;

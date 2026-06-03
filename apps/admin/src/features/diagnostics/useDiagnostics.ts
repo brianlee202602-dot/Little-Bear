@@ -60,6 +60,7 @@ export function useDiagnostics(options: UseDiagnosticsOptions) {
     userId: "",
     kbId: "",
     status: "",
+    queryScopeMode: "",
     degraded: "",
     degradeReason: "",
     requestId: "",
@@ -241,6 +242,7 @@ export function useDiagnostics(options: UseDiagnosticsOptions) {
     queryLogSearchForm.userId = "";
     queryLogSearchForm.kbId = "";
     queryLogSearchForm.status = "";
+    queryLogSearchForm.queryScopeMode = "";
     queryLogSearchForm.degraded = "";
     queryLogSearchForm.degradeReason = "";
     queryLogSearchForm.requestId = "";

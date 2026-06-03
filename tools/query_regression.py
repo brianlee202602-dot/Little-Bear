@@ -416,7 +416,8 @@ def _case_kb_ids(
 ) -> list[str]:
     explicit_ids = data.get("kb_ids")
     if explicit_ids is not None:
-        return _string_list(explicit_ids, default=default_kb_ids)
+        # 显式空数组是有效输入：表示交给后端自动解析全部可访问知识库。
+        return _explicit_string_list(explicit_ids, field_name="kb_ids")
 
     name_terms = _string_list(data.get("kb_name_terms"), default=[])
     if not name_terms:
@@ -543,6 +544,12 @@ def _string_list(value: Any, *, default: list[str]) -> list[str]:
         raise RegressionError("expected a list of strings")
     result = [item.strip() for item in value if isinstance(item, str) and item.strip()]
     return result or list(default)
+
+
+def _explicit_string_list(value: Any, *, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise RegressionError(f"{field_name} must be a list of strings")
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
 def _int_value(value: Any, default: int) -> int:

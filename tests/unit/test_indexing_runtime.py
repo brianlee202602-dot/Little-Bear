@@ -16,6 +16,7 @@ def test_build_indexing_service_uses_indexing_timeout_floor(monkeypatch) -> None
     writer = service.vector_index_writer
     assert writer.embedding_client.timeout_seconds == 3.0
     assert writer.timeout_seconds == 3.0
+    assert writer.writer.embedding_batch_size == 32
 
 
 def _active_config() -> dict[str, object]:
@@ -41,5 +42,8 @@ def _active_config() -> dict[str, object]:
         "timeout": {
             "embedding_ms": 500,
             "vector_search_ms": 500,
+        },
+        "import": {
+            "embedding_batch_size": 32,
         },
     }

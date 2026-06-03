@@ -16,6 +16,7 @@ QUERY_LOG_FILTER_FIELDS = {
     "trace_id": "q.trace_id",
     "user_id": "q.user_id",
     "status": "q.status",
+    "query_scope_mode": "q.query_scope_mode",
     "degrade_reason": "q.degrade_reason",
     "error_code": "q.error_code",
 }
@@ -77,6 +78,9 @@ class QueryLogReader:
                         q.latency_ms,
                         q.candidate_count,
                         q.citation_count,
+                        q.query_scope_mode,
+                        q.resolved_kb_count,
+                        q.rewrite_count,
                         q.error_code,
                         q.created_at
                     FROM query_logs q
@@ -151,7 +155,11 @@ class QueryLogReader:
                         q.latency_ms,
                         q.candidate_count,
                         q.citation_count,
+                        q.query_scope_mode,
+                        q.resolved_kb_count,
+                        q.rewrite_count,
                         q.error_code,
+                        retrieval_diag.diagnostics_json AS retrieval_diagnostics,
                         q.created_at
                     FROM query_logs q
                     LEFT JOIN users u
@@ -163,6 +171,17 @@ class QueryLogReader:
                         WHERE kb.id = ANY(q.kb_ids)
                           AND kb.enterprise_id = q.enterprise_id
                     ) kb_lookup ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_build_object(
+                            'rewrite_queries', d.rewrite_queries,
+                            'stage_counts', d.stage_counts,
+                            'quality_gate', d.quality_gate,
+                            'selected_chunks', d.selected_chunks
+                        ) AS diagnostics_json
+                        FROM query_retrieval_diagnostics d
+                        WHERE d.query_log_id = q.id
+                        LIMIT 1
+                    ) retrieval_diag ON TRUE
                     WHERE q.enterprise_id = CAST(:enterprise_id AS uuid)
                       AND q.id::text = :query_log_id
                     LIMIT 1
@@ -231,13 +250,20 @@ def _query_log_from_mapping(row: dict[str, Any]) -> QueryLog:
         latency_ms=int(row["latency_ms"]),
         candidate_count=int(row["candidate_count"]),
         citation_count=int(row["citation_count"]),
+        query_scope_mode=str(row["query_scope_mode"]),
+        resolved_kb_count=int(row["resolved_kb_count"]),
+        rewrite_count=int(row["rewrite_count"]),
         error_code=_optional_str(row.get("error_code")),
         created_at=row.get("created_at") if isinstance(row.get("created_at"), datetime) else None,
         user_display_name=_optional_str(row.get("user_display_name")),
         knowledge_base_names=tuple(str(item) for item in row.get("knowledge_base_names") or ()),
+        retrieval_diagnostics=_json_mapping(row.get("retrieval_diagnostics")),
     )
 
 
 def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
+
+def _json_mapping(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None

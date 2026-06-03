@@ -33,6 +33,10 @@ const {
   refreshQueryLogs,
   selectQueryLog,
 } = props.runtime;
+
+function formatQueryScopeMode(value: string): string {
+  return value === "auto_all_accessible" ? "自动范围" : "指定范围";
+}
 </script>
 
 <template>
@@ -76,6 +80,14 @@ const {
         </select>
       </label>
       <label class="field">
+        <span class="field__label">查询范围</span>
+        <select v-model="queryLogSearchForm.queryScopeMode" class="control">
+          <option value="">全部</option>
+          <option value="auto_all_accessible">自动范围</option>
+          <option value="explicit">指定范围</option>
+        </select>
+      </label>
+      <label class="field">
         <span class="field__label">是否降级</span>
         <select v-model="queryLogSearchForm.degraded" class="control">
           <option value="">全部</option>
@@ -106,6 +118,11 @@ const {
         <div class="entity-main">
           <strong>{{ formatQueryLogUser(log) }}</strong>
           <span>知识库：{{ formatQueryLogKnowledgeBases(log) }}</span>
+          <span>
+            {{ formatQueryScopeMode(log.query_scope_mode) }} /
+            {{ log.resolved_kb_count }} 个知识库 /
+            {{ log.rewrite_count }} 条检索 query
+          </span>
         </div>
         <div class="entity-cell">
           <StatusBadge

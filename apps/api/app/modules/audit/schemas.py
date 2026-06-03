@@ -53,10 +53,14 @@ class QueryLog:
     latency_ms: int
     candidate_count: int
     citation_count: int
+    query_scope_mode: str
+    resolved_kb_count: int
+    rewrite_count: int
     error_code: str | None
     created_at: datetime | None = None
     user_display_name: str | None = None
     knowledge_base_names: tuple[str, ...] = field(default_factory=tuple)
+    retrieval_diagnostics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

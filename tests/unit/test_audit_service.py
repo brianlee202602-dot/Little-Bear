@@ -92,6 +92,9 @@ def _query_row() -> dict[str, Any]:
         "latency_ms": 321,
         "candidate_count": 5,
         "citation_count": 2,
+        "query_scope_mode": "explicit",
+        "resolved_kb_count": 1,
+        "rewrite_count": 2,
         "error_code": None,
         "created_at": datetime.now(UTC),
     }

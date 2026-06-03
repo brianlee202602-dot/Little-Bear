@@ -52,6 +52,8 @@ def degrade_reason_messages(reasons: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def degrade_reason_message(reason: str) -> str:
+    if reason == "query_scope_empty":
+        return "当前账号没有可用于问答检索的知识库"
     if reason == "llm_context_empty":
         return "没有可用于生成答案的上下文，通常是文档为空、未检索到内容或权限过滤后无可用片段"
     if reason == "llm_runtime_config_unavailable":
@@ -80,6 +82,8 @@ def degrade_reason_message(reason: str) -> str:
         return "向量数据库检索失败，本次只能依赖关键词检索"
     if reason == "retrieval_relevance_too_low":
         return "召回片段与问题相关性过低，系统未将这些片段交给模型生成答案"
+    if reason == "retrieval_quality_too_low":
+        return "检索到的片段与问题相关性过低，系统未将这些片段交给模型生成答案"
     if reason in {
         "RERANK_PROVIDER_UNAVAILABLE",
         "RERANK_PROVIDER_HTTP_ERROR",

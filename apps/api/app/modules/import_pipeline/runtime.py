@@ -7,7 +7,7 @@ from typing import Any
 from app.modules.config.errors import ConfigServiceError
 from app.modules.config.service import ConfigService
 from app.modules.import_pipeline.errors import ImportServiceError
-from app.modules.import_pipeline.executors import HeadingParagraphChunker, MultiFormatDocumentParser
+from app.modules.import_pipeline.executors import MultiFormatDocumentParser, StructureAwareChunker
 from app.modules.import_pipeline.service import ImportService
 from app.modules.storage import StorageRuntimeError, build_object_storage_from_config
 from app.shared.json_utils import as_dict, json_int
@@ -75,7 +75,7 @@ def _build_import_service(session: Session, config: dict[str, Any]) -> ImportSer
     return ImportService(
         object_storage=object_storage,
         parser=MultiFormatDocumentParser(),
-        chunker=HeadingParagraphChunker(max_chars=max_chars, overlap_chars=overlap_chars),
+        chunker=StructureAwareChunker(max_chars=max_chars, overlap_chars=overlap_chars),
         max_upload_bytes=max_file_mb * 1024 * 1024,
         allowed_file_types=tuple(allowed_file_types),
     )

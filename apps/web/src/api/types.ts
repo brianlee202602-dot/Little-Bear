@@ -115,7 +115,7 @@ export interface QueryHistoryMessage {
 }
 
 export interface QueryRequest {
-  kb_ids: string[];
+  kb_ids?: string[];
   query: string;
   conversation_id?: string | null;
   history?: QueryHistoryMessage[];
@@ -135,6 +135,11 @@ export interface CitationData {
   score: number;
 }
 
+export interface QueryScopeData {
+  mode: "explicit" | "auto_all_accessible";
+  resolved_kb_count: number;
+}
+
 export interface QueryResponse {
   debug_id: string;
   conversation_id: string | null;
@@ -144,6 +149,7 @@ export interface QueryResponse {
   confidence: QueryConfidence;
   degraded: boolean;
   degrade_reason: string | null;
+  query_scope: QueryScopeData;
 }
 
 export type QueryStreamMetadata = Pick<
@@ -154,6 +160,7 @@ export type QueryStreamMetadata = Pick<
   | "confidence"
   | "degraded"
   | "degrade_reason"
+  | "query_scope"
 > & {
   streaming?: boolean;
 };

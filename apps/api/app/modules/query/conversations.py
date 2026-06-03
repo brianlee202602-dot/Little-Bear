@@ -138,6 +138,19 @@ class QueryConversationService:
             trace_id=trace_id,
         )
 
+    def update_conversation_kbs(
+        self,
+        session: Session,
+        *,
+        conversation_id: str,
+        kb_ids: tuple[str, ...],
+    ) -> None:
+        self._repository.touch_conversation_kbs(
+            session,
+            conversation_id=conversation_id,
+            kb_ids=kb_ids,
+        )
+
     def complete_assistant_message(
         self,
         session: Session,

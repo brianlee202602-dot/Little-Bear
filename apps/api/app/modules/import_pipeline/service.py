@@ -13,9 +13,9 @@ from app.modules.import_pipeline.executors import (
     DocumentChunker,
     DocumentCleaner,
     DocumentParser,
-    HeadingParagraphChunker,
     MultiFormatDocumentParser,
     PlainTextCleaner,
+    StructureAwareChunker,
 )
 from app.modules.import_pipeline.permission_guard import ImportPermissionGuard
 from app.modules.import_pipeline.repository import ImportPipelineRepository
@@ -68,7 +68,7 @@ class ImportService:
         self.object_storage = object_storage or InMemoryObjectStorage()
         self.parser = parser or MultiFormatDocumentParser()
         self.cleaner = cleaner or PlainTextCleaner()
-        self.chunker = chunker or HeadingParagraphChunker()
+        self.chunker = chunker or StructureAwareChunker()
         self.command_service = ImportCommandService(self)
         self.retry_service = ImportRetryService(self)
         self.repository = ImportPipelineRepository()

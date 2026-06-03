@@ -223,3 +223,134 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
 }
+
+.retrieval-diagnostics {
+  border-top: 1px solid #e7ebf0;
+  padding-top: 14px;
+}
+
+.retrieval-diagnostics__header,
+.retrieval-section__title {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+}
+
+.retrieval-diagnostics__header > div,
+.retrieval-section__title > h5 {
+  min-width: 0;
+}
+
+.retrieval-diagnostics__header p {
+  margin: 4px 0 0;
+  color: #667182;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.retrieval-diagnostics__header span,
+.retrieval-section__title span {
+  color: #667182;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.retrieval-stage-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.retrieval-stage-card {
+  min-width: 0;
+  border: 1px solid #e7ebf0;
+  border-radius: 8px;
+  background: #fbfcfd;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.retrieval-stage-card span {
+  color: #667182;
+  font-size: 12px;
+}
+
+.retrieval-stage-card strong {
+  color: #1d2935;
+  font-size: 16px;
+}
+
+.retrieval-section {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.retrieval-section__title h5 {
+  margin: 0;
+  color: #1d2935;
+  font-size: 14px;
+}
+
+.retrieval-summary {
+  max-width: 560px;
+}
+
+.retrieval-query-list,
+.retrieval-chunk-list {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.retrieval-query-card,
+.retrieval-chunk-card {
+  min-width: 0;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+}
+
+.retrieval-query-card {
+  display: grid;
+  gap: 4px;
+}
+
+.retrieval-query-card strong,
+.retrieval-chunk-card strong {
+  min-width: 0;
+  color: #1d2935;
+  overflow-wrap: anywhere;
+}
+
+.retrieval-query-card span,
+.retrieval-chunk-card span {
+  min-width: 0;
+  color: #667182;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.retrieval-chunk-card {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.retrieval-chunk-card__index {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: #eef2f5;
+  color: #516072;
+  display: inline-grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+}

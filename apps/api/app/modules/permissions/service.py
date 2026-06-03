@@ -141,6 +141,48 @@ class PermissionService:
             )
         return tuple(kb_id for kb_id in normalized_kb_ids if kb_id in allowed)
 
+    def list_queryable_knowledge_base_ids(
+        self,
+        session: Session,
+        context: PermissionContext,
+        *,
+        required_scope: str = "rag:query",
+    ) -> tuple[str, ...]:
+        """列出当前权限上下文可用于问答检索的知识库 ID。"""
+
+        self.require_scope(context, required_scope)
+        params: dict[str, Any] = {
+            "enterprise_id": context.enterprise_id,
+        }
+        access_sql = knowledge_base_access_where_sql(
+            context,
+            params,
+            permission="query",
+            alias="kb",
+        )
+        try:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT kb.id::text AS kb_id
+                    FROM knowledge_bases kb
+                    WHERE kb.enterprise_id = CAST(:enterprise_id AS uuid)
+                      AND kb.deleted_at IS NULL
+                      AND kb.status = 'active'
+                      AND {access_sql}
+                    ORDER BY kb.name ASC, kb.created_at ASC, kb.id ASC
+                    """
+                ),
+                params,
+            ).all()
+        except SQLAlchemyError as exc:
+            raise permission_database_error(
+                "PERM_KB_ACCESS_UNAVAILABLE",
+                "knowledge base access cannot be listed",
+                exc,
+            ) from exc
+        return tuple(str(row._mapping["kb_id"]) for row in rows)
+
     def validate_visibility_policy(self, policy: dict[str, Any]) -> None:
         self.policy_validator.validate_visibility_policy(policy)
 

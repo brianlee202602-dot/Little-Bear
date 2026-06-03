@@ -714,6 +714,24 @@ def test_advance_claimed_job_chunk_stage_writes_draft_chunks(monkeypatch) -> Non
                                 "document_version_id": "55555555-5555-5555-5555-555555555555",
                                 "title": "handbook.md",
                                 "metadata": {"content": "# 员工手册\n\n请遵守制度。"},
+                                "cleaned_blocks": [
+                                    {
+                                        "text": "员工手册",
+                                        "block_type": "heading",
+                                        "heading_level": 1,
+                                        "page_number": 3,
+                                        "ordinal": 0,
+                                        "metadata": {"char_start": 0, "char_end": 6},
+                                    },
+                                    {
+                                        "text": "请遵守制度。",
+                                        "block_type": "paragraph",
+                                        "heading_level": None,
+                                        "page_number": 3,
+                                        "ordinal": 1,
+                                        "metadata": {"char_start": 8, "char_end": 14},
+                                    },
+                                ],
                             }
                         ],
                     },
@@ -742,6 +760,16 @@ def test_advance_claimed_job_chunk_stage_writes_draft_chunks(monkeypatch) -> Non
     assert job.stage == "embed"
     assert any("INSERT INTO chunks" in statement for statement, _ in session.executed)
     assert any("chunker_version" in statement for statement, _ in session.executed)
+    chunk_insert = next(
+        params for statement, params in session.executed if "INSERT INTO chunks" in statement
+    )
+    assert chunk_insert["page_start"] == 3
+    assert chunk_insert["page_end"] == 3
+    source_offsets = json.loads(str(chunk_insert["source_offsets"]))
+    assert source_offsets["block_start"] == 1
+    assert source_offsets["heading_path"] == ["员工手册"]
+    assert source_offsets["chunk_strategy"] == "structure_aware"
+    assert source_offsets["chunker_version"] == service.chunker.version
 
 
 def test_advance_permission_refresh_job_refreshes_payload_and_skips_import_stages(

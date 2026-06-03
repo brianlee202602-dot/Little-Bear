@@ -1,7 +1,9 @@
 .chat-shell {
+  height: 100dvh;
   min-height: 100vh;
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
+  overflow: hidden;
   background: #ffffff;
   color: #171717;
 }
@@ -14,7 +16,7 @@ p {
 }
 
 .sidebar {
-  height: 100vh;
+  height: 100dvh;
   position: sticky;
   top: 0;
   display: grid;
@@ -133,9 +135,11 @@ h1 {
 }
 
 .chat-panel {
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
   background: #ffffff;
 }
 
@@ -238,7 +242,9 @@ button:disabled {
 
 @media (max-width: 920px) {
   .chat-shell {
+    height: auto;
     grid-template-columns: 1fr;
+    overflow: visible;
   }
 
   .sidebar {
@@ -247,6 +253,10 @@ button:disabled {
     grid-template-rows: auto auto auto auto;
     border-right: 0;
     border-bottom: 1px solid #e5e5e5;
+  }
+
+  .chat-panel {
+    height: 100dvh;
   }
 
   .chat-topbar {

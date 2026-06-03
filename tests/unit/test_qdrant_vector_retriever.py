@@ -42,6 +42,24 @@ class _FailingEmbeddingClient:
         raise VectorStoreEmbeddingError("EMBEDDING_UNAVAILABLE")
 
 
+class _BatchLimitedEmbeddingClient:
+    def __init__(self, *, max_batch_size: int) -> None:
+        self.max_batch_size = max_batch_size
+        self.batch_sizes: list[int] = []
+
+    def embed_query(self, _query_text: str) -> list[float]:
+        return [0.1, 0.2]
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.batch_sizes.append(len(texts))
+        if len(texts) > self.max_batch_size:
+            raise VectorStoreEmbeddingError(
+                "EMBEDDING_PROVIDER_HTTP_ERROR",
+                f"batch size {len(texts)} > maximum allowed batch size {self.max_batch_size}",
+            )
+        return [[0.1, 0.2] for _text in texts]
+
+
 class _Response:
     def __init__(self, payload: object | None = None) -> None:
         self.payload = payload
@@ -59,6 +77,7 @@ class _Response:
             "result": [
                 {
                     "score": 0.88,
+                    "vector": [0.3, 0.4],
                     "payload": {
                         "enterprise_id": ENTERPRISE_ID,
                         "kb_id": KB_ID,
@@ -110,9 +129,11 @@ def test_qdrant_vector_retriever_searches_with_permission_filter(monkeypatch) ->
     assert result.degraded is False
     assert result.candidates[0].source == "vector"
     assert result.candidates[0].chunk_id == CHUNK_ID
+    assert result.candidates[0].embedding == (0.3, 0.4)
     assert captured["url"] == "http://qdrant:6333/collections/little_bear_p0/points/search"
     assert captured["timeout"] == 2.0
     assert captured["body"]["vector"] == [0.1, 0.2]
+    assert captured["body"]["with_vector"] is True
     assert captured["body"]["filter"]["must"][0]["key"] == "enterprise_id"
 
 
@@ -203,6 +224,53 @@ def test_qdrant_vector_index_writer_upserts_draft_points(monkeypatch) -> None:
     assert captured[1]["body"]["points"][0]["id"] == "11111111-1111-5111-8111-111111111111"
     assert captured[1]["body"]["points"][0]["vector"] == [0.1, 0.2]
     assert captured[1]["body"]["points"][0]["payload"]["visibility_state"] == "draft"
+
+
+def test_qdrant_vector_index_writer_splits_embedding_batch_when_provider_rejects(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+    embedding_client = _BatchLimitedEmbeddingClient(max_batch_size=16)
+
+    def _urlopen(request, timeout):
+        captured.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        if request.get_method() == "GET":
+            return _Response(
+                {"result": {"config": {"params": {"vectors": {"size": 2, "distance": "Cosine"}}}}}
+            )
+        return _Response({"result": {"status": "acknowledged"}})
+
+    monkeypatch.setattr("app.adapters.qdrant.urlopen", _urlopen)
+
+    points = tuple(
+        VectorStoreDraftPoint(
+            collection_name="little_bear_p0",
+            vector_id=f"11111111-1111-5111-8111-{index:012d}",
+            text=f"员工手册正文 {index}",
+            payload={"chunk_id": CHUNK_ID, "visibility_state": "draft"},
+        )
+        for index in range(40)
+    )
+
+    QdrantVectorIndexWriter(
+        base_url="http://qdrant:6333",
+        embedding_client=embedding_client,
+        embedding_batch_size=32,
+    ).upsert_draft_points(points)
+
+    assert embedding_client.batch_sizes == [32, 16, 16, 8]
+    put_bodies = [
+        item["body"]
+        for item in captured
+        if item["method"] == "PUT" and str(item["url"]).endswith("/points")
+    ]
+    assert [len(body["points"]) for body in put_bodies] == [16, 16, 8]
 
 
 def test_qdrant_vector_index_writer_creates_missing_collection(monkeypatch) -> None:

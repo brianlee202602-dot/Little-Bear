@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.modules.models import ModelGatewayChatClient, ModelGatewayRerankClient
 from app.modules.query.runtime import build_query_service
 from app.modules.retrieval import ModelCandidateReranker
+from app.modules.storage.service import InMemoryObjectStorage
 
 
 def test_build_query_service_wires_llm_provider_from_active_config(monkeypatch) -> None:
@@ -47,9 +48,33 @@ def test_build_query_service_wires_llm_provider_from_active_config(monkeypatch) 
     assert service.rerank_input_top_k == 20
     assert service.rerank_min_score == 0.05
     assert service.context_builder.max_chunks == 4
-    assert service.context_builder.max_chars == 1800
+    assert service.context_builder.max_chars == 6000
+    assert service.context_builder.max_context_tokens == 900
     assert "secret://llm" in secrets
     assert "secret://rerank" in secrets
+
+
+def test_build_query_service_wires_context_chunk_text_reader(monkeypatch) -> None:
+    storage = InMemoryObjectStorage({"chunks/doc_1/chunk_1.txt": "完整正文".encode()})
+
+    monkeypatch.setattr(
+        "app.modules.query.runtime.ConfigService.load_active_config",
+        lambda *_args, **_kwargs: SimpleNamespace(config=_active_config()),
+    )
+    monkeypatch.setattr(
+        "app.modules.query.runtime.SecretStoreService.get_secret_value",
+        lambda _self, _session, *, secret_ref: f"value-for-{secret_ref}",
+    )
+    monkeypatch.setattr(
+        "app.modules.query.runtime.build_object_storage_from_config",
+        lambda *_args, **_kwargs: storage,
+    )
+
+    service = build_query_service(object())
+
+    reader = service.context_builder.chunk_text_reader
+    assert reader is not None
+    assert reader.read_text(object_key="chunks/doc_1/chunk_1.txt") == "完整正文"
 
 
 def test_build_query_service_falls_back_to_default_model_secret_refs(monkeypatch) -> None:
@@ -87,6 +112,58 @@ def test_build_query_service_falls_back_to_default_model_secret_refs(monkeypatch
     assert "secret://rag/model/embedding-api-key" in secrets
     assert "secret://rag/model/rerank-api-key" in secrets
     assert "secret://rag/model/llm-api-key" in secrets
+
+
+def test_build_query_service_wires_optional_query_rewrite_llm(monkeypatch) -> None:
+    config = _active_config()
+    retrieval = config["retrieval"]
+    assert isinstance(retrieval, dict)
+    retrieval["query_rewrite_use_llm"] = True
+    retrieval["query_rewrite_max_queries"] = 5
+    retrieval["query_rewrite_recent_messages"] = 4
+    retrieval["query_rewrite_max_tokens"] = 256
+    timeout = config["timeout"]
+    assert isinstance(timeout, dict)
+    timeout["query_rewrite_ms"] = 1400
+
+    monkeypatch.setattr(
+        "app.modules.query.runtime.ConfigService.load_active_config",
+        lambda *_args, **_kwargs: SimpleNamespace(config=config),
+    )
+    monkeypatch.setattr(
+        "app.modules.query.runtime.SecretStoreService.get_secret_value",
+        lambda _self, _session, *, secret_ref: f"value-for-{secret_ref}",
+    )
+
+    service = build_query_service(object())
+
+    rewrite_service = service.query_rewrite_service
+    rewrite_client = rewrite_service.chat_client
+    assert isinstance(rewrite_client, ModelGatewayChatClient)
+    assert rewrite_client.base_url == "https://llm.example"
+    assert rewrite_client.timeout_seconds == 1.4
+    assert rewrite_service.max_queries == 5
+    assert rewrite_service.recent_messages == 4
+    assert rewrite_service.max_tokens == 256
+
+
+def test_build_query_service_uses_legacy_rewrite_enabled_as_rewrite_fallback(
+    monkeypatch,
+) -> None:
+    config = _active_config()
+    retrieval = config["retrieval"]
+    assert isinstance(retrieval, dict)
+    retrieval["rewrite_enabled"] = False
+    retrieval.pop("query_rewrite_enabled", None)
+
+    monkeypatch.setattr(
+        "app.modules.query.runtime.ConfigService.load_active_config",
+        lambda *_args, **_kwargs: SimpleNamespace(config=config),
+    )
+
+    service = build_query_service(object())
+
+    assert service.query_rewrite_service.enabled is False
 
 
 def _active_config() -> dict[str, object]:

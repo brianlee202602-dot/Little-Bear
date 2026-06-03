@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { DiagnosticsRuntime } from "@/features/diagnostics/useDiagnostics";
+import QueryRetrievalDiagnostics from "@/features/diagnostics/QueryRetrievalDiagnostics.vue";
 import { formatAuditTime, formatShortIdentifier } from "@/utils/date";
 import { formatLatency } from "@/utils/display";
 import {
@@ -112,6 +113,10 @@ const {
             </div>
           </dl>
         </section>
+
+        <QueryRetrievalDiagnostics
+          :diagnostics="selectedQueryLog.retrieval_diagnostics"
+        />
       </div>
       <footer class="modal__footer">
         <button class="button button--secondary" type="button" @click="closeQueryLogDetailModal">

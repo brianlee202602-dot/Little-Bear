@@ -19,6 +19,8 @@ class ContextChunk:
     score: float
     rank: int
     source_offsets: dict[str, Any] | None = None
+    matched_query: str | None = None
+    matched_query_index: int = 0
 
 
 @dataclass(frozen=True)

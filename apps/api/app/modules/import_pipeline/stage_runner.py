@@ -9,7 +9,12 @@ from typing import Any
 
 from app.modules.import_pipeline import request_items as _request_helpers
 from app.modules.import_pipeline.errors import ImportServiceError
-from app.modules.import_pipeline.executors import ParsedDocument, SourceDocument
+from app.modules.import_pipeline.executors import (
+    CleanedDocument,
+    ParsedBlock,
+    ParsedDocument,
+    SourceDocument,
+)
 from app.modules.indexing.errors import IndexingServiceError
 from app.modules.indexing.runtime import build_indexing_service
 from app.shared.json_utils import stable_json_hash
@@ -137,6 +142,8 @@ class ImportStageRunner:
             )
             item["parsed_object_key"] = parsed_object_key
             item["parser_version"] = parsed.parser_version
+            item["parsed_blocks"] = _blocks_to_json(parsed.blocks)
+            item["parsed_block_count"] = len(parsed.blocks)
             session.execute(
                 text(
                     """
@@ -183,6 +190,7 @@ class ImportStageRunner:
                         _request_helpers.item_str(item, "parser_version") or "stage-text"
                     ),
                     metadata=_request_helpers.item_metadata(item),
+                    blocks=_blocks_from_json(item.get("parsed_blocks")),
                 )
             )
             cleaned_object_key = _derived_object_key(
@@ -198,6 +206,8 @@ class ImportStageRunner:
             )
             item["cleaned_object_key"] = cleaned_object_key
             item["cleaner_version"] = cleaned.cleaner_version
+            item["cleaned_blocks"] = _blocks_to_json(cleaned.blocks)
+            item["cleaned_block_count"] = len(cleaned.blocks)
             session.execute(
                 text(
                     """
@@ -243,15 +253,31 @@ class ImportStageRunner:
                 continue
             document_version_ids.append(document_version_id)
             text_content = self.item_stage_text(item, preferred_key="cleaned_object_key")
-            cleaned = self.owner.cleaner.clean(
-                ParsedDocument(
+            cleaned_blocks = _blocks_from_json(item.get("cleaned_blocks"))
+            if cleaned_blocks:
+                cleaned = CleanedDocument(
                     text=text_content,
-                    parser_version=(
-                        _request_helpers.item_str(item, "parser_version") or "stage-text"
+                    cleaner_version=(
+                        _request_helpers.item_str(item, "cleaner_version") or "stage-text"
                     ),
-                    metadata=_request_helpers.item_metadata(item),
+                    metadata={
+                        **_request_helpers.item_metadata(item),
+                        "parser_version": (
+                            _request_helpers.item_str(item, "parser_version") or "stage-text"
+                        ),
+                    },
+                    blocks=cleaned_blocks,
                 )
-            )
+            else:
+                cleaned = self.owner.cleaner.clean(
+                    ParsedDocument(
+                        text=text_content,
+                        parser_version=(
+                            _request_helpers.item_str(item, "parser_version") or "stage-text"
+                        ),
+                        metadata=_request_helpers.item_metadata(item),
+                    )
+                )
             chunk_documents = self.owner.chunker.chunk(
                 cleaned,
                 title=_request_helpers.item_title(item),
@@ -286,13 +312,14 @@ class ImportStageRunner:
                         INSERT INTO chunks(
                             id, enterprise_id, kb_id, document_id, document_version_id,
                             ordinal, text_object_key, text_preview, heading_path, source_offsets,
-                            content_hash, token_count, status, permission_snapshot_id
+                            page_start, page_end, content_hash, token_count, status,
+                            permission_snapshot_id
                         )
                         SELECT
                             CAST(:id AS uuid), d.enterprise_id, d.kb_id, d.id, dv.id,
                             :ordinal, :text_object_key, :text_preview, :heading_path,
-                            CAST(:source_offsets AS jsonb), :content_hash, :token_count,
-                            'draft', d.permission_snapshot_id
+                            CAST(:source_offsets AS jsonb), :page_start, :page_end,
+                            :content_hash, :token_count, 'draft', d.permission_snapshot_id
                         FROM documents d
                         JOIN document_versions dv
                           ON dv.id = CAST(:document_version_id AS uuid)
@@ -309,6 +336,8 @@ class ImportStageRunner:
                         "text_object_key": text_object_key,
                         "text_preview": preview,
                         "heading_path": chunk.heading_path,
+                        "page_start": chunk.page_start,
+                        "page_end": chunk.page_end,
                         "source_offsets": json.dumps(
                             {
                                 "item_index": item_index,
@@ -445,6 +474,51 @@ def _chunk_text_object_key(
     ordinal: int,
 ) -> str:
     return f"chunks/{enterprise_id}/{document_id}/{document_version_id}/{ordinal:06d}.txt"
+
+
+def _blocks_to_json(blocks: tuple[ParsedBlock, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "text": block.text,
+            "block_type": block.block_type,
+            "heading_level": block.heading_level,
+            "page_number": block.page_number,
+            "ordinal": block.ordinal,
+            "metadata": block.metadata,
+        }
+        for block in blocks
+    ]
+
+
+def _blocks_from_json(value: Any) -> tuple[ParsedBlock, ...]:
+    if not isinstance(value, list):
+        return ()
+    blocks: list[ParsedBlock] = []
+    for raw_block in value:
+        if not isinstance(raw_block, dict):
+            continue
+        text_value = raw_block.get("text")
+        block_type = raw_block.get("block_type")
+        if not isinstance(text_value, str) or not text_value.strip():
+            continue
+        if block_type not in {"heading", "paragraph", "list_item", "table", "code", "page_break"}:
+            continue
+        metadata = raw_block.get("metadata")
+        blocks.append(
+            ParsedBlock(
+                text=text_value,
+                block_type=block_type,
+                heading_level=_optional_int(raw_block.get("heading_level")),
+                page_number=_optional_int(raw_block.get("page_number")),
+                ordinal=_optional_int(raw_block.get("ordinal")) or len(blocks),
+                metadata=metadata if isinstance(metadata, dict) else {},
+            )
+        )
+    return tuple(blocks)
+
+
+def _optional_int(value: Any) -> int | None:
+    return value if isinstance(value, int) else None
 
 
 def _indexing_error(exc: IndexingServiceError) -> ImportServiceError:

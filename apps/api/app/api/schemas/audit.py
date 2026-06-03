@@ -85,8 +85,12 @@ class QueryLogData(BaseModel):
     latency_ms: int
     candidate_count: int
     citation_count: int
+    query_scope_mode: Literal["explicit", "auto_all_accessible"]
+    resolved_kb_count: int
+    rewrite_count: int
     error_code: str | None = None
     created_at: datetime | None = None
+    retrieval_diagnostics: dict[str, Any] | None = None
 
 
 class QueryLogResponse(BaseModel):
@@ -108,6 +112,9 @@ class QueryLogListItemData(BaseModel):
     latency_ms: int
     candidate_count: int
     citation_count: int
+    query_scope_mode: Literal["explicit", "auto_all_accessible"]
+    resolved_kb_count: int
+    rewrite_count: int
     error_code: str | None = None
     created_at: datetime | None = None
 

@@ -10,6 +10,7 @@ import type {
   QueryConfidence,
   QueryRequest,
   QueryResponse,
+  QueryScopeData,
   QueryStreamDone,
   QueryStreamHandlers,
   QueryStreamMetadata,
@@ -22,6 +23,7 @@ export type {
   QueryMode,
   QueryRequest,
   QueryResponse,
+  QueryScopeData,
   QueryStreamDone,
   QueryStreamHandlers,
   QueryStreamMetadata,
@@ -148,6 +150,7 @@ function isQueryStreamMetadata(value: unknown): value is QueryStreamMetadata {
     isQueryConfidence(value.confidence) &&
     typeof value.degraded === "boolean" &&
     isNullableString(value.degrade_reason) &&
+    isQueryScopeData(value.query_scope) &&
     (value.streaming === undefined || typeof value.streaming === "boolean")
   );
 }
@@ -163,7 +166,18 @@ function isQueryStreamDone(value: unknown): value is QueryStreamDone {
     value.citations.every(isCitationData) &&
     isQueryConfidence(value.confidence) &&
     typeof value.degraded === "boolean" &&
-    isNullableString(value.degrade_reason)
+    isNullableString(value.degrade_reason) &&
+    isQueryScopeData(value.query_scope)
+  );
+}
+
+function isQueryScopeData(value: unknown): value is QueryScopeData {
+  return (
+    isRecord(value) &&
+    (value.mode === "explicit" || value.mode === "auto_all_accessible") &&
+    typeof value.resolved_kb_count === "number" &&
+    Number.isInteger(value.resolved_kb_count) &&
+    value.resolved_kb_count >= 0
   );
 }
 

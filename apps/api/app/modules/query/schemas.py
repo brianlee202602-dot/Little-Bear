@@ -23,6 +23,12 @@ class QueryCitation:
 
 
 @dataclass(frozen=True)
+class QueryScopeSummary:
+    mode: Literal["explicit", "auto_all_accessible"]
+    resolved_kb_count: int
+
+
+@dataclass(frozen=True)
 class QueryResult:
     request_id: str
     answer: str
@@ -31,6 +37,8 @@ class QueryResult:
     degraded: bool
     degrade_reason: str | None
     trace_id: str
+    query_scope: QueryScopeSummary = QueryScopeSummary(mode="explicit", resolved_kb_count=0)
+    kb_ids: tuple[str, ...] = ()
     context: QueryContext | None = None
     conversation_id: str | None = None
     message_id: str | None = None
@@ -52,6 +60,21 @@ class ActiveIndexVersion:
 class QueryAllowedCandidate:
     candidate: RetrievalCandidate
     citation: QueryCitation
+
+
+@dataclass(frozen=True)
+class QueryCandidateGateDiagnostics:
+    input_count: int
+    allowed_count: int
+    rejected_count: int
+    missing_metadata_count: int
+    rejection_reasons: dict[str, int]
+
+
+@dataclass(frozen=True)
+class QueryCandidateGateResult:
+    allowed_candidates: tuple[QueryAllowedCandidate, ...]
+    diagnostics: QueryCandidateGateDiagnostics
 
 
 @dataclass(frozen=True)
@@ -103,11 +126,15 @@ class QueryStreamPlan:
     confidence: Literal["low", "medium", "high"]
     pre_degrade_reasons: tuple[str, ...]
     audit_events: tuple[_QueryAuditEvent, ...]
-    rerank_model_call: RetrievalModelCall | None
+    rerank_model_calls: tuple[RetrievalModelCall, ...]
     model_route_hash: str | None
     candidate_count: int
     permission_filter_hash: str
     permission_version: int
     index_version_hash: str | None
+    query_scope_mode: Literal["explicit", "auto_all_accessible"]
+    rewritten_queries: tuple[str, ...] = ()
+    query_rewrite_model_call: RetrievalModelCall | None = None
+    retrieval_diagnostics: dict[str, object] | None = None
     conversation_id: str | None = None
     message_id: str | None = None

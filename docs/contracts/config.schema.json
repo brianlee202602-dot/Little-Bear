@@ -904,6 +904,30 @@
             "low_ocr_penalty": {
               "type": "number",
               "minimum": 0
+            },
+            "keyword_weight": {
+              "type": "number",
+              "minimum": 0
+            },
+            "vector_weight": {
+              "type": "number",
+              "minimum": 0
+            },
+            "original_query_weight": {
+              "type": "number",
+              "minimum": 0
+            },
+            "rewrite_query_weight": {
+              "type": "number",
+              "minimum": 0
+            },
+            "min_fusion_score": {
+              "type": "number",
+              "minimum": 0
+            },
+            "min_source_score": {
+              "type": "number",
+              "minimum": 0
             }
           }
         },
@@ -923,8 +947,52 @@
           "type": "integer",
           "minimum": 1
         },
+        "max_chunks_per_document": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_chunks_per_section": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mmr_enabled": {
+          "type": "boolean"
+        },
+        "mmr_lambda": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "context_expand_neighbors": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
         "rewrite_enabled": {
           "type": "boolean"
+        },
+        "query_rewrite_enabled": {
+          "type": "boolean"
+        },
+        "query_rewrite_use_llm": {
+          "type": "boolean"
+        },
+        "query_rewrite_max_queries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "query_rewrite_use_conversation": {
+          "type": "boolean"
+        },
+        "query_rewrite_recent_messages": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "query_rewrite_max_tokens": {
+          "type": "integer",
+          "minimum": 64
         },
         "expansion_enabled": {
           "type": "boolean"
@@ -956,7 +1024,7 @@
           "properties": {
             "mode": {
               "type": "string",
-              "enum": ["heading_paragraph", "fixed_tokens"]
+              "enum": ["structure_aware", "heading_paragraph", "fixed_tokens"]
             },
             "preserve_tables": {
               "type": "boolean"
@@ -1235,6 +1303,10 @@
           "minimum": 1
         },
         "rewrite_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "query_rewrite_ms": {
           "type": "integer",
           "minimum": 1
         },

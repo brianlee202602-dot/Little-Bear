@@ -184,6 +184,47 @@ def test_build_filter_rejects_missing_scope() -> None:
     assert exc_info.value.error_code == "PERM_SCOPE_MISSING"
 
 
+def test_list_queryable_knowledge_base_ids_uses_access_policy() -> None:
+    session = _FakeSession(
+        [
+            _Result(
+                all_rows=[
+                    _Row({"kb_id": "55555555-5555-5555-5555-555555555555"}),
+                    _Row({"kb_id": "66666666-6666-6666-6666-666666666666"}),
+                ]
+            )
+        ]
+    )
+
+    kb_ids = PermissionService().list_queryable_knowledge_base_ids(
+        session,
+        _permission_context(),
+        required_scope="rag:query",
+    )
+
+    assert kb_ids == (
+        "55555555-5555-5555-5555-555555555555",
+        "66666666-6666-6666-6666-666666666666",
+    )
+    statement, params = session.executed[0]
+    assert "FROM knowledge_bases kb" in statement
+    assert "knowledge_base_accesses kba" in statement
+    assert "kb.status = 'active'" in statement
+    assert "kb.id = ANY" not in statement
+    assert params["kb_kb_access_permissions"] == ["manage", "query"]
+
+
+def test_list_queryable_knowledge_base_ids_rejects_missing_scope() -> None:
+    with pytest.raises(PermissionServiceError) as exc_info:
+        PermissionService().list_queryable_knowledge_base_ids(
+            _FakeSession([]),
+            _permission_context(scopes=("document:read",)),
+            required_scope="rag:query",
+        )
+
+    assert exc_info.value.error_code == "PERM_SCOPE_MISSING"
+
+
 def test_gate_candidate_allows_enterprise_and_own_department() -> None:
     service = PermissionService()
     context = _permission_context()

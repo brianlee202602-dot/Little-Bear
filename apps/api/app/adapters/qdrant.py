@@ -105,7 +105,7 @@ class QdrantVectorRetriever:
                 "filter": permission_filter.payload_filter,
                 "limit": top_k,
                 "with_payload": True,
-                "with_vector": False,
+                "with_vector": True,
             }
             response = _send_json(
                 _search_url(self.base_url, collection_name),
@@ -137,19 +137,30 @@ class QdrantVectorIndexWriter:
         api_key: str | None = None,
         timeout_seconds: float = 3.0,
         vector_distance: str = "Cosine",
+        embedding_batch_size: int = 16,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.embedding_client = embedding_client
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.vector_distance = vector_distance
+        self.embedding_batch_size = max(embedding_batch_size, 1)
 
     def upsert_draft_points(self, points: tuple[VectorStoreDraftPoint, ...]) -> None:
         if not points:
             return
+        for batch in _chunks(points, self.embedding_batch_size):
+            self._upsert_draft_point_batch(batch)
+
+    def _upsert_draft_point_batch(self, points: tuple[VectorStoreDraftPoint, ...]) -> None:
         try:
             vectors = self.embedding_client.embed_texts([point.text for point in points])
         except VectorStoreEmbeddingError as exc:
+            if len(points) > 1:
+                midpoint = max(len(points) // 2, 1)
+                self._upsert_draft_point_batch(points[:midpoint])
+                self._upsert_draft_point_batch(points[midpoint:])
+                return
             raise QdrantClientError("embedding provider failed while indexing") from exc
         if len(vectors) != len(points):
             raise QdrantClientError("embedding count does not match vector point count")
@@ -499,6 +510,7 @@ def _candidate_from_point(point: dict[str, Any], *, rank: int) -> VectorStoreCan
         page_end=_payload_int(payload, "page_end"),
         rank=rank,
         score=float(point.get("score") or 0),
+        embedding=_point_vector(point),
     )
 
 
@@ -523,7 +535,25 @@ def _replace_rank(candidate: VectorStoreCandidate, rank: int) -> VectorStoreCand
         page_end=candidate.page_end,
         rank=rank,
         score=candidate.score,
+        embedding=candidate.embedding,
     )
+
+
+def _point_vector(point: dict[str, Any]) -> tuple[float, ...] | None:
+    raw_vector = point.get("vector")
+    if isinstance(raw_vector, dict):
+        raw_vector = next(
+            (value for value in raw_vector.values() if isinstance(value, list)),
+            None,
+        )
+    if not isinstance(raw_vector, list):
+        return None
+    vector: list[float] = []
+    for item in raw_vector:
+        if not isinstance(item, int | float):
+            return None
+        vector.append(float(item))
+    return tuple(vector) if vector else None
 
 
 def _payload_str(payload: dict[str, Any], key: str) -> str:
@@ -686,3 +716,10 @@ def _unique(values: tuple[str, ...]) -> tuple[str, ...]:
         seen.add(value)
         result.append(value)
     return tuple(result)
+
+
+def _chunks(
+    values: tuple[VectorStoreDraftPoint, ...],
+    size: int,
+) -> tuple[tuple[VectorStoreDraftPoint, ...], ...]:
+    return tuple(values[index : index + size] for index in range(0, len(values), size))

@@ -73,6 +73,17 @@ class _ThinkingOnlyChatClient:
         )
 
 
+class _RawFailingStreamClient:
+    model = "failing-stream-model"
+
+    def complete(self, *, messages, temperature, max_tokens) -> ChatCompletionResult:
+        return ChatCompletionResult(content="")
+
+    def stream_complete(self, *, messages, temperature, max_tokens):
+        raise RuntimeError("socket closed")
+        yield ChatCompletionChunk(content_delta="")
+
+
 def test_answer_service_generates_answer_from_query_context() -> None:
     chat_client = _ChatClient()
 
@@ -94,6 +105,8 @@ def test_answer_service_generates_answer_from_query_context() -> None:
     assert "本次允许引用的 source id：chunk_1" in messages[1].content
     assert "[source:chunk_1]" in messages[1].content
     assert "员工年假需要提前申请" in messages[1].content
+    assert "matched_query: 员工年假申请" in messages[1].content
+    assert "如果用户问题包含多个子问题，请逐一回答" in messages[1].content
 
 
 def test_answer_service_strips_thinking_blocks_from_answer() -> None:
@@ -169,6 +182,20 @@ def test_answer_service_degrades_when_llm_provider_fails() -> None:
     assert result.degrade_reason == "LLM_PROVIDER_UNAVAILABLE"
 
 
+def test_answer_service_stream_degrades_when_provider_raises_raw_exception() -> None:
+    runner = AnswerService(chat_client=_RawFailingStreamClient()).stream(
+        query_context=_query_context()
+    )
+
+    assert list(runner.stream_tokens()) == []
+    assert runner.result is not None
+    assert runner.result.degraded is True
+    assert runner.result.degrade_reason == "LLM_PROVIDER_UNAVAILABLE"
+    assert runner.result.model_call_attempted is True
+    assert runner.result.model_name == "failing-stream-model"
+    assert runner.result.error_message == "RuntimeError: socket closed"
+
+
 def _query_context() -> QueryContext:
     return QueryContext(
         query_text="员工年假怎么申请？",
@@ -184,6 +211,8 @@ def _query_context() -> QueryContext:
                 page_end=2,
                 score=0.9,
                 rank=1,
+                matched_query="员工年假申请",
+                matched_query_index=1,
             ),
         ),
         estimated_tokens=10,

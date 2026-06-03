@@ -67,7 +67,11 @@ function updateIncludeSources(event: Event): void {
 
 <style scoped>
 .composer {
-  padding: 12px clamp(20px, 7vw, 96px) 24px;
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0), #ffffff 24%);
+  padding: 12px clamp(20px, 7vw, 96px) max(24px, env(safe-area-inset-bottom));
 }
 
 .submit-hint {

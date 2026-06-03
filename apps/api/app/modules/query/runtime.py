@@ -25,7 +25,9 @@ from app.modules.models import (
 )
 from app.modules.permissions.schemas import PermissionFilter
 from app.modules.query.service import DEFAULT_RERANK_MIN_SCORE, QueryService
+from app.modules.query_rewrite import QueryRewriteService
 from app.modules.retrieval import (
+    CandidateQualityGate,
     ModelCandidateReranker,
     NoopCandidateReranker,
     RetrievalCandidate,
@@ -33,6 +35,8 @@ from app.modules.retrieval import (
     VectorSearchResult,
 )
 from app.modules.secrets.service import SecretStoreError, SecretStoreService
+from app.modules.storage.runtime import build_object_storage_from_config
+from app.modules.storage.service import ObjectStorage
 from app.shared.json_utils import as_dict, json_bool, json_int, json_str
 from sqlalchemy.orm import Session
 
@@ -51,13 +55,13 @@ class _VectorStoreEmbeddingClientAdapter:
         try:
             return self.client.embed_query(query_text)
         except ModelClientError as exc:
-            raise VectorStoreEmbeddingError(exc.error_code) from exc
+            raise VectorStoreEmbeddingError(exc.error_code, exc.message) from exc
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         try:
             return self.client.embed_texts(texts)
         except ModelClientError as exc:
-            raise VectorStoreEmbeddingError(exc.error_code) from exc
+            raise VectorStoreEmbeddingError(exc.error_code, exc.message) from exc
 
 
 class _QdrantVectorRetrieverAdapter:
@@ -85,6 +89,20 @@ class _QdrantVectorRetrieverAdapter:
             degraded=result.degraded,
             degrade_reason=result.degrade_reason,
         )
+
+
+class _ObjectStorageChunkTextReader:
+    """从对象存储读取 chunk 完整正文；失败时交由 ContextBuilder 回落 preview。"""
+
+    def __init__(self, object_storage: ObjectStorage) -> None:
+        self.object_storage = object_storage
+
+    def read_text(self, *, object_key: str) -> str | None:
+        try:
+            content = self.object_storage.get_object(object_key=object_key)
+        except (KeyError, OSError):
+            return None
+        return content.decode("utf-8", errors="replace")
 
 
 def build_query_service(session: Session) -> QueryService:
@@ -115,13 +133,21 @@ def build_query_service(session: Session) -> QueryService:
         candidate_reranker = _build_candidate_reranker(session, config)
     except Exception:
         candidate_reranker = NoopCandidateReranker()
+    try:
+        query_rewrite_service = _build_query_rewrite_service(session, config)
+    except Exception:
+        query_rewrite_service = QueryRewriteService()
     return QueryService(
         vector_retriever=vector_retriever,
         candidate_reranker=candidate_reranker,
         rerank_input_top_k=_rerank_input_top_k(config),
         rerank_min_score=_rerank_min_score(config),
-        context_builder=_build_context_builder(config),
+        retrieval_weights=_retrieval_weights(config),
+        candidate_quality_gate=_candidate_quality_gate(config),
+        context_expand_neighbors=_context_expand_neighbors(config),
+        context_builder=_build_context_builder(session, config),
         answer_service=answer_service,
+        query_rewrite_service=query_rewrite_service,
     )
 
 
@@ -192,6 +218,8 @@ def _retrieval_candidate(candidate: VectorStoreCandidate) -> RetrievalCandidate:
         page_end=candidate.page_end,
         rank=candidate.rank,
         score=candidate.score,
+        source_score=candidate.score,
+        embedding=candidate.embedding,
     )
 
 
@@ -253,6 +281,70 @@ def _build_candidate_reranker(session: Session, config: dict[str, Any]):
     return ModelCandidateReranker(rerank_client=rerank_client)
 
 
+def _build_query_rewrite_service(session: Session, config: dict[str, Any]) -> QueryRewriteService:
+    retrieval_config = as_dict(config.get("retrieval"))
+    timeout_config = as_dict(config.get("timeout"))
+    legacy_enabled = json_bool(retrieval_config, "rewrite_enabled", default=True)
+    enabled = json_bool(
+        retrieval_config,
+        "query_rewrite_enabled",
+        default=legacy_enabled,
+    )
+    use_llm = json_bool(retrieval_config, "query_rewrite_use_llm", default=False)
+    max_queries = json_int(retrieval_config, "query_rewrite_max_queries") or 4
+    recent_messages = json_int(retrieval_config, "query_rewrite_recent_messages") or 6
+    use_conversation = json_bool(
+        retrieval_config,
+        "query_rewrite_use_conversation",
+        default=True,
+    )
+    max_tokens = json_int(retrieval_config, "query_rewrite_max_tokens") or 512
+    if not enabled or not use_llm:
+        return QueryRewriteService(
+            enabled=enabled,
+            max_queries=max_queries,
+            use_conversation=use_conversation,
+            recent_messages=recent_messages,
+            max_tokens=max_tokens,
+        )
+
+    model_gateway = as_dict(config.get("model_gateway"))
+    model_config = as_dict(config.get("model"))
+    providers = as_dict(model_gateway.get("providers"))
+    llm_provider = as_dict(providers.get("llm"))
+    llm_base_url = json_str(llm_provider, "base_url")
+    llm_model = json_str(model_config, "llm_model")
+    if not llm_base_url or not llm_model:
+        return QueryRewriteService(
+            enabled=enabled,
+            max_queries=max_queries,
+            use_conversation=use_conversation,
+            recent_messages=recent_messages,
+            max_tokens=max_tokens,
+        )
+
+    provider_auth_ref = _model_provider_auth_ref(model_gateway, llm_provider, "llm")
+    chat_client = ModelGatewayChatClient(
+        base_url=llm_base_url,
+        path=_chat_completions_path(llm_provider),
+        model=llm_model,
+        auth_token=_secret_value(session, provider_auth_ref),
+        timeout_seconds=_timeout_seconds(
+            json_int(timeout_config, "query_rewrite_ms"),
+            default_ms=3000,
+        ),
+        extra_body=as_dict(as_dict(config.get("llm")).get("openai_extra_body")) or None,
+    )
+    return QueryRewriteService(
+        enabled=enabled,
+        chat_client=chat_client,
+        max_queries=max_queries,
+        use_conversation=use_conversation,
+        recent_messages=recent_messages,
+        max_tokens=max_tokens,
+    )
+
+
 def _chat_completions_path(provider: dict[str, Any]) -> str:
     return json_str(provider, "chat_completions_path") or "/v1/chat/completions"
 
@@ -287,16 +379,58 @@ def _rerank_min_score(config: dict[str, Any]) -> float:
     )
 
 
-def _build_context_builder(config: dict[str, Any]) -> ContextBuilder:
+def _retrieval_weights(config: dict[str, Any]) -> dict[str, float]:
+    retrieval_config = as_dict(config.get("retrieval"))
+    fusion_params = as_dict(retrieval_config.get("fusion_params"))
+    return {
+        "keyword": _json_float(fusion_params, "keyword_weight", default=1.0),
+        "vector": _json_float(fusion_params, "vector_weight", default=1.2),
+        "original_query": _json_float(fusion_params, "original_query_weight", default=1.2),
+        "rewrite_query": _json_float(fusion_params, "rewrite_query_weight", default=1.0),
+    }
+
+
+def _candidate_quality_gate(config: dict[str, Any]) -> CandidateQualityGate:
+    retrieval_config = as_dict(config.get("retrieval"))
+    fusion_params = as_dict(retrieval_config.get("fusion_params"))
+    return CandidateQualityGate(
+        min_fusion_score=_json_float(fusion_params, "min_fusion_score", default=0.01),
+        min_source_score=_json_float(fusion_params, "min_source_score", default=0.02),
+    )
+
+
+def _context_expand_neighbors(config: dict[str, Any]) -> int:
+    retrieval_config = as_dict(config.get("retrieval"))
+    return max(json_int(retrieval_config, "context_expand_neighbors") or 0, 0)
+
+
+def _build_context_builder(session: Session, config: dict[str, Any]) -> ContextBuilder:
     retrieval_config = as_dict(config.get("retrieval"))
     max_chunks = json_int(retrieval_config, "final_context_top_k") or DEFAULT_MAX_CONTEXT_CHUNKS
     max_context_tokens = json_int(retrieval_config, "max_context_tokens")
-    if max_context_tokens is None:
-        max_chars = DEFAULT_MAX_CONTEXT_CHARS
-    else:
-        # P0 没有接入各模型 tokenizer，这里用保守字符预算近似 token 预算。
-        max_chars = min(DEFAULT_MAX_CONTEXT_CHARS, max_context_tokens * 2)
-    return ContextBuilder(max_chunks=max_chunks, max_chars=max_chars)
+    return ContextBuilder(
+        max_chunks=max_chunks,
+        max_chars=DEFAULT_MAX_CONTEXT_CHARS,
+        max_context_tokens=max_context_tokens,
+        max_chunks_per_document=json_int(retrieval_config, "max_chunks_per_document") or 3,
+        max_chunks_per_section=json_int(retrieval_config, "max_chunks_per_section") or 2,
+        mmr_enabled=json_bool(retrieval_config, "mmr_enabled", default=True),
+        mmr_lambda=_json_float(retrieval_config, "mmr_lambda", default=0.7),
+        chunk_text_reader=_build_chunk_text_reader(session, config),
+    )
+
+
+def _build_chunk_text_reader(
+    session: Session,
+    config: dict[str, Any],
+) -> _ObjectStorageChunkTextReader | None:
+    try:
+        object_storage = build_object_storage_from_config(session, config, required=False)
+    except Exception:
+        return None
+    if object_storage is None:
+        return None
+    return _ObjectStorageChunkTextReader(object_storage)
 
 
 def _secret_value(session: Session, secret_ref: str | None) -> str | None:

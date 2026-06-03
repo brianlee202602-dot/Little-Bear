@@ -20,7 +20,7 @@ class QueryHistoryMessage(BaseModel):
 class QueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kb_ids: list[str] = Field(min_length=1)
+    kb_ids: list[str] = Field(default_factory=list)
     query: str = Field(min_length=1)
     conversation_id: str | None = None
     history: list[QueryHistoryMessage] = Field(default_factory=list, max_length=20)
@@ -28,6 +28,13 @@ class QueryRequest(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
     top_k: int = Field(default=8, ge=1, le=50)
     include_sources: bool = True
+
+
+class QueryScopeData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["explicit", "auto_all_accessible"]
+    resolved_kb_count: int = Field(ge=0)
 
 
 class QueryResponse(BaseModel):
@@ -41,6 +48,7 @@ class QueryResponse(BaseModel):
     confidence: Literal["low", "medium", "high"]
     degraded: bool
     degrade_reason: str | None = None
+    query_scope: QueryScopeData
 
 
 class QueryConversationCreateRequest(BaseModel):

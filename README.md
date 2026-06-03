@@ -1,8 +1,8 @@
 # Little Bear
 
-更新时间：2026-06-02
+更新时间：2026-06-03
 
-Little Bear 是一个面向企业内部知识检索与问答场景的 RAG 系统工作区。当前仓库已完成 RAG 主链路、导入索引 Worker、普通用户查询前端、管理后台核心功能、P0 验收入口，以及后端模块化重构的主要收口工作；前端已完成查询端和管理后台 P0-P13 模块化拆分与样式收口，P14 管理后台大文件二次拆分已继续完成文档弹窗、setup flow、用户表单、角色绑定、配置表单处理、知识库 runtime 和用户 runtime 的职责迁移。
+Little Bear 是一个面向企业内部知识检索与问答场景的 RAG 系统工作区。当前仓库已完成 RAG 主链路、服务端全权限知识库自动搜索、P1 Query Rewrite、P2 结构化切块与元数据增强、导入索引 Worker、普通用户查询前端、管理后台核心功能、P0 验收入口，以及后端模块化重构的主要收口工作；前端已完成查询端和管理后台 P0-P13 模块化拆分与样式收口，P14 管理后台大文件二次拆分已继续完成文档弹窗、setup flow、用户表单、角色绑定、配置表单处理、知识库 runtime 和用户 runtime 的职责迁移。
 
 本文只记录项目定位、启动方式、开发约定和当前已完成能力，不承载后续推进说明或任务排期。
 
@@ -74,6 +74,12 @@ PostgreSQL 就绪后执行数据库迁移：
 make PYTHON=.venv/bin/python db-upgrade
 make PYTHON=.venv/bin/python db-current
 ```
+
+当前 Alembic 迁移已压缩为一个当前 schema 基线：
+`apps/api/migrations/versions/0013_current_schema_baseline.py`。空库执行
+`db-upgrade` 会一次性建立当前版本结构；已经升级到
+`0013_query_log_scope_summary` 的数据库不会重复执行建表。若某个历史环境仍停留在
+`0013` 之前的旧增量版本，需要先使用旧迁移链升级到 head，或重建数据库后再使用当前基线。
 
 启动 API：
 
@@ -161,6 +167,24 @@ make PYTHON=.venv/bin/python query-regression-p0
 
 默认查询回归样例当前归档于 `design_docs_history/examples/query-regression.p0.jsonl`。真实验收时应复制并替换为当前业务知识库的问题、预期引用和必要关键词；执行记录默认写入 `artifacts/`，不会提交到仓库。
 
+RAG 增强回归样例位于 `docs/examples/query-regression.rag-enhancement.jsonl`，覆盖空 `kb_ids` 自动搜索全部可访问知识库、跨文档联合问题、结构化切块命中、口语化问题和低相关降级：
+
+```bash
+make PYTHON=.venv/bin/python query-regression-rag
+```
+
+该目标仍复用 `tools/query_regression.py`，默认记录写入 `artifacts/query-regression-rag-latest.json`。
+
+管理后台查询日志详情中的检索诊断已展示 Query Rewrite、阶段候选数量、子 query 召回明细、权限 Gate 拒绝摘要、Rerank 摘要和最终上下文片段摘要；诊断内容不包含完整 prompt 或文档原文。
+
+查询日志已新增结构化摘要字段：`query_scope_mode`、`resolved_kb_count` 和 `rewrite_count`。管理后台查询日志列表可显示查询范围、解析出的知识库数量和 rewrite 数量，并支持按查询范围过滤。
+
+普通查询响应已新增 `query_scope` 范围摘要；非流式响应、流式 `metadata` 和流式 `done` 均会返回查询范围模式与最终解析出的知识库数量。完整检索诊断仍仅通过管理后台查询日志详情查看。
+
+查询上下文构建已按 `max_context_tokens` 做 token 预算截断；当前使用可替换的保守 token 估算器，避免联合问题中长 chunk 挤占全部上下文预算。
+
+历史文档结构化元数据补齐策略已整理到 `docs/backend/历史文档元数据补齐策略.md`。现有“重建索引”只重排已有 chunk，不会重新解析原文或补齐旧 chunk 元数据；需要补齐页码、标题路径和结构块 offsets 时，应重新导入或生成新文档版本。
+
 发布前可以使用当前非破坏性 P0 验收目标串联 smoke 记录和查询回归：
 
 ```bash
@@ -191,19 +215,21 @@ make PYTHON=.venv/bin/python release-smoke-p0
 - 后端 admin / query / audit 中的 compatibility / legacy 语义残留已清理：相关 facade 和 mixin 已标定为正式的 route-facing、diagnostics-facing 或领域 helper 边界，不再以历史兼容层描述。
 - 后端模块化重构已完成 P0-P5 主要任务：Admin、Auth、Audit、Config、Import Pipeline、Indexing、Knowledge、Permission、Query、Setup 等模块已按 service / repository / runtime / writer / presenter 等边界拆分；历史 `core.py` 中间兼容文件已删除，当前 `apps/api/app/modules` 下不再保留 `*core.py`。
 - 后端重构期兼容冗余已完成一轮清理：管理后台子路由不再通过聚合路由 `_compat()` 回跳共享依赖，`admin` / `config` / `query` / `import_pipeline` 聚合路由只保留 router 挂载职责；`ConfigRepository` 聚合兼容仓储、`ConfigService` 私有兼容代理、`ImportDocumentWriter.owner` 回调桥、query / knowledge / setup 下划线 mapper/helper 兼容别名，以及 admin 侧旧权限变更服务入口已删除，权限策略修改统一由 `modules.permissions.PermissionAdminService` 承担。
-- 数据库迁移已覆盖 P0 大部分核心表：配置、认证、组织、权限、知识库、文档、索引、导入任务、审计、查询日志和模型调用日志。
+- 数据库迁移已压缩为当前 schema 基线，覆盖配置、认证、组织、权限、知识库、文档、索引、导入任务、审计、查询日志、模型调用日志、查询会话和检索诊断表。
 - 管理后台已接入 setup、登录、配置、用户、部门、角色绑定、审计查询和知识库运营页面；知识库页面已支持知识库 CRUD、文件夹 CRUD、指定文件夹上传、文档列表、文档版本、chunk 预览以及知识库 / 文档权限变更。
 - Permission Service 核心已落地；管理端知识库、文件夹和文档元数据管理已接入权限边界。
 - 权限安全回归测试已补强：跨部门候选、access block、旧索引版本、deleted / draft / pending_delete 非 active 状态、source 回源权限过滤和 citation unauthorized 降级均已纳入单元测试防回退范围。
 - 文档详情、文档版本、chunk 来源、普通用户文档预览，以及知识库 / 文档独立权限变更 API 已补齐。
-- Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、过期 `running` 任务锁接管、非持锁推进拒绝、失败重试恢复、MinIO/S3 对象存储交接、PDF / DOCX / UTF-8 文本 / Markdown parse-clean-chunk、draft chunk 写入、PostgreSQL 关键词索引账本、Qdrant draft vector point 写入、active index 发布，以及权限变更后的索引 payload 刷新任务。
-- Query Service 非流式链路已落地：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、RRF 融合排序、rerank provider、Permission Service filter、候选 gate、Context Builder、LLM provider、citation 校验、query_logs、model_call_logs 和高风险 query audit 写入；rerank、LLM 不可用或 citation 校验失败时结构化降级。
-- Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、provider token 级流式答案、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、服务端历史会话同步、多轮消息展示、会话删除、降级状态、request_id 和 trace_id 展示。
-- 普通用户查询前端已完成模块化拆分和工作区运行态下沉，并新增 `docs/frontend/查询前端架构设计书.md` 作为团队开发架构说明：`App.vue` 只挂载 `ChatWorkspace.vue`，跨域编排迁入 `useChatWorkspaceRuntime.ts`；HTTP 层、认证会话、会话列表、知识库选择、聊天输入、流式查询执行、消息列表、来源片段预览和浏览器存储已拆入 `apps/web/src/features`、`apps/web/src/components`、`apps/web/src/utils` 和 `apps/web/src/api`。`useQueryStream` 已改为依赖会话窄接口，SSE 事件已补 runtime guard，避免弱类型事件直接写入消息状态。
+- Import Service、Worker 和 Indexing Service 最小链路已落地：支持上传 / URL / metadata_batch 导入任务创建、任务查询、取消、重试、Worker claim、过期 `running` 任务锁接管、非持锁推进拒绝、失败重试恢复、MinIO/S3 对象存储交接、PDF / DOCX / UTF-8 文本 / Markdown parse-clean-chunk、结构块 `ParsedBlock`、`StructureAwareChunker`、chunk 页码和 `source_offsets` 元数据写入、结构化 keyword/vector 索引文本、draft chunk 写入、PostgreSQL 关键词索引账本、embedding 分批与批量失败拆分重试、Qdrant draft vector point 写入、active index 发布，以及权限变更后的索引 payload 刷新任务。
+- Query Service 非流式链路已落地：`POST /internal/v1/queries` 支持关键词召回、query embedding client、Qdrant VectorRetriever adapter、Weighted RRF 融合排序、关键词标题 / heading / tags 字段加权、候选 matched query 归因、CandidateQualityGate、相邻 chunk 权限重检扩展、文档 / section 上限、embedding MMR 去冗余（缺向量时回落文本 Jaccard）、Context Builder 完整 chunk 对象存储回源读取、`query_retrieval_diagnostics` 检索诊断落库、rerank provider、Permission Service filter、候选 gate、LLM provider、citation 校验、query_logs、model_call_logs 和高风险 query audit 写入；多 query 检索时已在 fusion、rerank 输入、权限 gate 前候选配额、按子问题 rerank、最终候选裁剪和 Context Builder 阶段保留子问题覆盖，Context Builder 会按已选 chunk 数量分配多子问题 token 预算，在 LLM prompt 中携带 `matched_query`，避免某个子问题候选被全局排序或上下文压缩挤出；Context Builder 已修复 coverage seed 后继续 MMR 补充候选时的 token set 范围问题，避免显式知识库查询触发 `KeyError`；答案引用已收窄为实际进入 LLM 上下文的 chunk；rerank、LLM 不可用、候选质量过低、完整 chunk 对象不可用或 citation 校验失败时结构化降级或回落。
+- Query Service citation 后处理已补强：当模型把引用写成 `[source:1]`、`[source:无相关资料]` 等非法格式或遗漏引用但答案正文仍可保留时，系统会移除错误占位符，并只用本次已授权候选自动补引用；该行为只写入审计摘要，不再作为用户侧降级状态展示。若模型引用合法 UUID 但不属于本次授权来源，或非法引用不可修复，仍按 `citation_unauthorized` / `citation_invalid_format` 拦截并降级。
+- RAG P1 Query Rewrite 已落地：新增 `apps/api/app/modules/query_rewrite`，支持规则 fallback 拆分复合问题、保留自包含子问题和最近会话指代补全；例如 `什么是 Can 协议，什么是 RAG` 会被拆为原始问题、`什么是 Can 协议` 和 `什么是 RAG` 三条检索 query。active config 可开启 LLM JSON rewrite，失败时回退规则检索并写入模型调用日志 hash；QueryOrchestrator 已对 rewritten queries 分别执行关键词召回和向量召回，最终上下文构建与回答仍基于用户原始问题。配置契约已支持 `retrieval.query_rewrite_*` 与 `timeout.query_rewrite_ms`。
+- Query Stream 和普通用户查询工作区第一版已落地：支持 `POST /internal/v1/query-streams` SSE 输出、provider token 级流式答案、Web 登录、token refresh、知识库浏览、文档浏览、citation 来源跳转、流式/非流式查询、服务端全权限知识库自动搜索、服务端历史会话同步、多轮消息展示、会话删除、降级状态、request_id 和 trace_id 展示；流式 token 生成、查询收束和会话写回阶段已补齐异常兜底，provider 流式裸异常会进入 LLM 降级结果，收束异常会返回 SSE `error` 事件并标记会话消息失败，避免 generator 异常直接击穿为 ASGI 500。
+- 普通用户查询前端已完成模块化拆分和工作区运行态下沉，并新增 `docs/frontend/查询前端架构设计书.md` 作为团队开发架构说明：`App.vue` 只挂载 `ChatWorkspace.vue`，跨域编排迁入 `useChatWorkspaceRuntime.ts`；HTTP 层、认证会话、会话列表、知识库选择、聊天输入、流式查询执行、消息列表、来源片段预览和浏览器存储已拆入 `apps/web/src/features`、`apps/web/src/components`、`apps/web/src/utils` 和 `apps/web/src/api`。`useQueryStream` 已改为依赖会话窄接口，SSE 事件已补 runtime guard，避免弱类型事件直接写入消息状态；查询输入区已固定在浏览器视口底部，消息列表在工作区内部滚动，用户无需滑到页面底部即可继续输入。
 - 普通用户查询前端已修复历史会话消息排序：刷新页面、切换会话和加载历史消息时，会按时间线归一化消息顺序；同一轮问答使用 `createdAt + debugId` 聚组，并保证用户提问显示在对应回答上方。
 - 管理后台前端已完成 P0-P4 模块化重构：公共 HTTP 层、通用工具、基础组件、后台外壳、菜单权限、初始化页面、配置管理、部门管理、用户管理和角色绑定已拆入 `apps/admin/src/features`、`apps/admin/src/components`、`apps/admin/src/composables` 和 `apps/admin/src/app`；配置、部门、用户相关请求和状态已分别迁移到对应 composable。
 - 管理后台知识库管理前端已完成 P5 拆分：知识库主列表页、知识库操作弹窗、文件夹操作弹窗、文档管理弹窗、文件夹管理面板、文档权限 / 版本片段弹窗已抽入 `apps/admin/src/features/knowledge`；知识库列表、详情、权限、文件夹、文档、导入上传、版本片段、批量索引等主要操作逻辑已迁入 `useKnowledgeBaseAdmin.ts`；`apps/admin/src/App.vue` 已从约 14102 行降至约 7654 行。
-- 管理后台运维诊断审计前端已完成 P6 拆分：索引运维、Qdrant 快照、查询日志、查询详情、模型调用日志、模型调用详情和配置审计日志已抽入 `apps/admin/src/features/diagnostics` 与 `apps/admin/src/features/audit`；诊断请求状态已迁入 `useDiagnostics.ts`，配置审计请求状态已迁入 `useAuditLogs.ts`，降级原因短中文描述和诊断状态 tone 已迁入 `apps/admin/src/utils/status.ts`；`apps/admin/src/App.vue` 当前约 6337 行。
+- 管理后台运维诊断审计前端已完成 P6 拆分：索引运维、Qdrant 快照、查询日志、查询详情、模型调用日志、模型调用详情和配置审计日志已抽入 `apps/admin/src/features/diagnostics` 与 `apps/admin/src/features/audit`；查询日志详情已接入 `query_retrieval_diagnostics` 检索诊断可视化，展示 query rewrite、阶段候选数量、quality gate 和最终上下文片段摘要；诊断请求状态已迁入 `useDiagnostics.ts`，配置审计请求状态已迁入 `useAuditLogs.ts`，降级原因短中文描述和诊断状态 tone 已迁入 `apps/admin/src/utils/status.ts`；`apps/admin/src/App.vue` 当前约 6337 行。
 - 前端 API client 已完成 P7 收口：普通查询端 API 已拆为 `auth`、`knowledge`、`documents`、`conversations`、`query`、`health` 和 `types` 模块，页面和 composable 已直接 import 具体 API 模块，不再保留 `apps/web/src/api/client.ts` 兼容聚合入口；管理后台 API 已拆为 `setup`、`auth`、`config`、`audit`、`diagnostics`、`departments`、`users`、`roles`、`knowledgeBases`、`folders`、`documents`、`imports`、`indexOps` 及各领域类型模块，管理后台不再保留 `apps/admin/src/api/client.ts` / `apps/admin/src/api/types.ts` 兼容聚合入口。
 - 前端样式已完成 P8 收口：普通查询端 `App.vue` 已移除大块 scoped style，样式拆入 `apps/web/src/styles/tokens.css`、`base.css` 和 `chat.css`；管理后台 `App.vue` 已移除全局 style，样式拆入 `apps/admin/src/styles/tokens.css`、`base.css`、`layout.css`、`ui-controls.css`、`list-filter-layouts.css`、`entity-tables.css`、`modals.css`、`pickers.css`、`setup-layout.css`、`setup-forms.css`、`setup-feedback.css` 和 `responsive.css`；旧的列表筛选和分页全局规则已按组件结构调整，并已通过 mock 运行态截图验证查询端、管理后台主页面和代表性弹窗在桌面宽度下无横向溢出、无离屏按钮、无 console error。
 - 管理后台启动与认证已完成 P9 深拆：`apps/admin/src/App.vue` 只挂载 `AdminRoot`，登录页迁入 `apps/admin/src/app/LoginPage.vue`，setup-state / active view / 路径同步、管理员会话 token / 登录恢复 / 退出、tab 切换分别迁入 `useAdminBootstrap.ts`、`useAdminSession.ts` 和 `useAdminNavigation.ts`；本轮已通过管理后台 typecheck 和 build。

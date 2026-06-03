@@ -78,7 +78,7 @@ def draft_vector_point(chunk: DraftIndexChunk) -> DraftVectorPoint:
     return DraftVectorPoint(
         collection_name=chunk.collection_name,
         vector_id=vector_id(chunk),
-        text=chunk.text,
+        text=index_search_text(chunk),
         payload={
             "enterprise_id": chunk.enterprise_id,
             "kb_id": chunk.kb_id,
@@ -132,6 +132,15 @@ def vector_payload_update(target: PermissionRefreshTarget) -> VectorPayloadUpdat
             "payload_hash": payload_hash,
         },
     )
+
+
+def index_search_text(chunk: DraftIndexChunk) -> str:
+    parts = [
+        f"title: {chunk.title}".strip(),
+        f"section: {chunk.heading_path}".strip() if chunk.heading_path else "",
+        f"content: {chunk.text}".strip(),
+    ]
+    return "\n".join(part for part in parts if part)
 
 
 def chunk_index_payload_hash(chunk: DraftIndexChunk) -> str:

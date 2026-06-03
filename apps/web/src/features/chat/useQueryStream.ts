@@ -61,7 +61,7 @@ export function useQueryStream(options: UseQueryStreamOptions) {
       return;
     }
     const queryText = submitOptions.query.trim();
-    if (!queryText || !submitOptions.kbIds.length) {
+    if (!queryText) {
       return;
     }
     options.onBeforeSubmit?.();
@@ -132,6 +132,7 @@ export function useQueryStream(options: UseQueryStreamOptions) {
                 confidence: event.confidence,
                 degraded: event.degraded,
                 degrade_reason: event.degrade_reason,
+                query_scope: event.query_scope,
               };
               if (event.conversation_id) {
                 options.conversationPort.replaceConversationId(conversation.id, event.conversation_id);

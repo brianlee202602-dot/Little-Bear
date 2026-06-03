@@ -10,6 +10,7 @@ from typing import Protocol
 from app.modules.models import ModelClientError, RerankClient
 from app.modules.permissions.schemas import PermissionFilter
 from app.modules.retrieval.schemas import (
+    CandidateQualityGateResult,
     RerankResult,
     RetrievalCandidate,
     RetrievalModelCall,
@@ -80,6 +81,56 @@ class NoopCandidateReranker:
         top_k: int,
     ) -> RerankResult:
         return RerankResult(candidates=candidates[: max(top_k, 0)])
+
+
+class CandidateQualityGate:
+    """在无可用 rerank 分数时，用融合分和原始召回分做兜底相关性门控。"""
+
+    def __init__(
+        self,
+        *,
+        min_fusion_score: float = 0.01,
+        min_source_score: float = 0.02,
+    ) -> None:
+        self.min_fusion_score = max(float(min_fusion_score), 0.0)
+        self.min_source_score = max(float(min_source_score), 0.0)
+
+    def evaluate(
+        self,
+        candidates: tuple[RetrievalCandidate, ...],
+        *,
+        rerank_result: RerankResult,
+    ) -> CandidateQualityGateResult:
+        if not candidates:
+            return CandidateQualityGateResult(
+                accepted_candidates=(),
+                rejected_count=0,
+                top_score=0.0,
+            )
+        if _has_successful_rerank(rerank_result):
+            return CandidateQualityGateResult(
+                accepted_candidates=candidates,
+                rejected_count=0,
+                top_score=max((candidate.score for candidate in candidates), default=0.0),
+            )
+        accepted = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.score >= self.min_fusion_score
+            and candidate.source_score >= self.min_source_score
+        )
+        if accepted:
+            return CandidateQualityGateResult(
+                accepted_candidates=accepted,
+                rejected_count=len(candidates) - len(accepted),
+                top_score=max((candidate.score for candidate in candidates), default=0.0),
+            )
+        return CandidateQualityGateResult(
+            accepted_candidates=(),
+            rejected_count=len(candidates),
+            top_score=max((candidate.score for candidate in candidates), default=0.0),
+            quality_reason="retrieval_quality_too_low",
+        )
 
 
 class ModelCandidateReranker:
@@ -175,15 +226,29 @@ class ReciprocalRankFusion:
         best_raw_score: dict[str, float] = defaultdict(float)
         for index, candidate in enumerate(candidates, start=1):
             rank = candidate.rank if candidate.rank > 0 else index
-            scores[candidate.chunk_id] += 1.0 / (max(rrf_k, 1) + rank)
-            if candidate.chunk_id not in best_candidate or candidate.score > best_raw_score[
-                candidate.chunk_id
-            ]:
+            scores[candidate.chunk_id] += (
+                max(candidate.query_weight, 0.0)
+                * max(candidate.source_weight, 0.0)
+                / (max(rrf_k, 1) + rank)
+            )
+            current_best = best_candidate.get(candidate.chunk_id)
+            if (
+                current_best is None
+                or candidate.score > best_raw_score[candidate.chunk_id]
+                or (current_best.embedding is None and candidate.embedding is not None)
+            ):
                 best_candidate[candidate.chunk_id] = candidate
-                best_raw_score[candidate.chunk_id] = candidate.score
+            best_raw_score[candidate.chunk_id] = max(
+                best_raw_score[candidate.chunk_id],
+                candidate.score,
+            )
 
         fused = [
-            replace(best_candidate[chunk_id], score=score)
+            replace(
+                best_candidate[chunk_id],
+                score=score,
+                source_score=best_raw_score[chunk_id],
+            )
             for chunk_id, score in sorted(
                 scores.items(),
                 key=lambda item: (-item[1], best_candidate[item[0]].rank),
@@ -223,6 +288,16 @@ def _failed_model_call(
         latency_ms=latency_ms,
         input_hash=stable_json_hash({"query": query_text, "texts": list(texts)}),
         error_code=error_code,
+    )
+
+
+def _has_successful_rerank(result: RerankResult) -> bool:
+    model_call = result.model_call
+    return (
+        model_call is not None
+        and not result.degraded
+        and model_call.status == "success"
+        and not model_call.degraded
     )
 
 

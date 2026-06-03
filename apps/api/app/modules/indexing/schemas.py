@@ -27,6 +27,7 @@ class DraftIndexChunk:
     title: str
     collection_name: str
     text: str
+    heading_path: str | None
     owner_department_id: str
     visibility: str
     indexed_permission_version: int

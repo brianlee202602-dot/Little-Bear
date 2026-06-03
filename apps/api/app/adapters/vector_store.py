@@ -13,6 +13,11 @@ from typing import Any, Protocol
 class VectorStoreEmbeddingError(Exception):
     """向量化 provider 调用失败。"""
 
+    def __init__(self, error_code: str, message: str | None = None) -> None:
+        super().__init__(message or error_code)
+        self.error_code = error_code
+        self.message = message or error_code
+
 
 class VectorStoreEmbeddingClient(Protocol):
     def embed_query(self, query_text: str) -> list[float]:
@@ -48,6 +53,7 @@ class VectorStoreCandidate:
     page_end: int | None
     rank: int
     score: float
+    embedding: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)

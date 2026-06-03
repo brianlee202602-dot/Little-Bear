@@ -20,8 +20,108 @@ export interface QueryLogData {
   latency_ms: number;
   candidate_count: number;
   citation_count: number;
+  query_scope_mode: "explicit" | "auto_all_accessible";
+  resolved_kb_count: number;
+  rewrite_count: number;
   error_code: string | null;
   created_at: string | null;
+  retrieval_diagnostics: QueryRetrievalDiagnosticsData | null;
+}
+
+export interface QueryRetrievalDiagnosticsData {
+  rewrite_queries?: QueryRetrievalQueryData[];
+  stage_counts?: QueryRetrievalStageCountsData;
+  quality_gate?: QueryRetrievalQualityGateData;
+  selected_chunks?: QueryRetrievalSelectedChunkData[];
+}
+
+export interface QueryRetrievalQueryData {
+  query?: string;
+  index?: number;
+  intent?: string | null;
+  weight?: number;
+}
+
+export interface QueryRetrievalStageCountsData {
+  resolved_kb_count?: number;
+  keyword_candidate_count?: number;
+  vector_candidate_count?: number;
+  fused_candidate_count?: number;
+  gated_candidate_count?: number;
+  relevant_candidate_count?: number;
+  quality_rejected_count?: number;
+  context_candidate_count?: number;
+  context_chunk_count?: number;
+  citation_count?: number;
+  per_query?: QueryRetrievalPerQueryData[];
+  gate?: QueryRetrievalGateData;
+  rerank?: QueryRetrievalRerankData[];
+}
+
+export interface QueryRetrievalQualityGateData {
+  reason?: string | null;
+  top_score?: number | null;
+  rejected_count?: number | null;
+}
+
+export interface QueryRetrievalSelectedChunkData {
+  chunk_id?: string;
+  document_id?: string;
+  document_version_id?: string;
+  title?: string;
+  heading_path?: string | null;
+  matched_query?: string | null;
+  matched_query_index?: number;
+  rank?: number;
+  score?: number;
+}
+
+export interface QueryRetrievalPerQueryData {
+  index?: number;
+  query?: string;
+  intent?: string | null;
+  weight?: number;
+  keyword_candidate_count?: number;
+  vector_candidate_count?: number;
+  fused_candidate_count?: number;
+  gated_candidate_count?: number;
+  relevant_candidate_count?: number;
+  context_chunk_count?: number;
+  vector_degraded?: boolean;
+  vector_degrade_reason?: string | null;
+}
+
+export interface QueryRetrievalGateData {
+  input_count?: number;
+  allowed_count?: number;
+  rejected_count?: number;
+  missing_metadata_count?: number;
+  rejection_reasons?: Array<{
+    reason?: string;
+    count?: number;
+  }>;
+}
+
+export interface QueryRetrievalRerankData {
+  query_index?: number;
+  query?: string;
+  input_candidate_count?: number;
+  output_candidate_count?: number;
+  degraded?: boolean;
+  degrade_reason?: string | null;
+  model_status?: string;
+  scores?: QueryRetrievalRerankScoreData[];
+}
+
+export interface QueryRetrievalRerankScoreData {
+  chunk_id?: string;
+  document_id?: string;
+  title?: string;
+  rank?: number;
+  score?: number;
+  source_score?: number;
+  matched_query?: string | null;
+  matched_query_index?: number;
 }
 
 export interface QueryLogResponse {
@@ -39,6 +139,9 @@ export interface QueryLogListItemData {
   latency_ms: number;
   candidate_count: number;
   citation_count: number;
+  query_scope_mode: "explicit" | "auto_all_accessible";
+  resolved_kb_count: number;
+  rewrite_count: number;
   error_code: string | null;
   created_at: string | null;
 }

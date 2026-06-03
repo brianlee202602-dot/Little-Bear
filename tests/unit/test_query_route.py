@@ -15,7 +15,7 @@ from app.modules.query.conversations import (
     QueryMessage,
 )
 from app.modules.query.errors import QueryServiceError
-from app.modules.query.schemas import QueryCitation, QueryResult
+from app.modules.query.schemas import QueryCitation, QueryResult, QueryScopeSummary
 from app.modules.query.service import QueryStreamPlan
 from app.modules.setup.service import SetupState, SetupStatus
 from fastapi.testclient import TestClient
@@ -57,6 +57,20 @@ class _FakeStreamingAnswerService:
     def stream(self, *, query_context):
         assert query_context is not None
         return _FakeAnswerRunner()
+
+
+class _FailingAnswerRunner:
+    result: AnswerGenerationResult | None = None
+
+    def stream_tokens(self):
+        raise RuntimeError("provider stream crashed")
+        yield ""
+
+
+class _FailingStreamingAnswerService:
+    def stream(self, *, query_context):
+        assert query_context is not None
+        return _FailingAnswerRunner()
 
 
 class _FakeStreamingQueryService:
@@ -104,26 +118,48 @@ class _FakeStreamingQueryService:
             confidence="low",
             pre_degrade_reasons=(),
             audit_events=(),
-            rerank_model_call=None,
+            rerank_model_calls=(),
             model_route_hash=None,
             candidate_count=1,
             permission_filter_hash="permission_hash",
             permission_version=1,
             index_version_hash="index_hash",
+            query_scope_mode="explicit",
         )
 
     def finalize_query_stream(self, _session, *, plan, answer_result):
         self.captured["final_answer"] = answer_result.answer
+        self.captured["final_degraded"] = answer_result.degraded
+        self.captured["final_degrade_reason"] = answer_result.degrade_reason
         return QueryResult(
             request_id=plan.request_id,
-            answer="员工年假需要提前申请。",
+            answer=(
+                "流式回答生成失败，已进入降级流程。"
+                if answer_result.degraded
+                else "员工年假需要提前申请。"
+            ),
             citations=plan.citations,
             confidence=plan.confidence,
             degraded=answer_result.degraded,
             degrade_reason=answer_result.degrade_reason,
             trace_id=plan.trace_id,
+            query_scope=QueryScopeSummary(
+                mode=plan.query_scope_mode,
+                resolved_kb_count=len(plan.normalized_kb_ids),
+            ),
             context=plan.query_context,
         )
+
+
+class _FailingStreamingQueryService(_FakeStreamingQueryService):
+    def __init__(self, captured: dict[str, object]) -> None:
+        super().__init__(captured)
+        self.answer_service = _FailingStreamingAnswerService()
+
+
+class _FailingFinalizeStreamingQueryService(_FakeStreamingQueryService):
+    def finalize_query_stream(self, _session, *, plan, answer_result):
+        raise RuntimeError("finalize crashed")
 
 
 class _FakeConversationService:
@@ -186,6 +222,9 @@ class _FakeConversationService:
 
     def complete_assistant_message(self, _session, **kwargs):
         self.captured["conversation_complete_kwargs"] = kwargs
+
+    def update_conversation_kbs(self, _session, **kwargs):
+        self.captured["conversation_update_kbs_kwargs"] = kwargs
 
     def fail_assistant_message(self, _session, **kwargs):
         self.captured["conversation_fail_kwargs"] = kwargs
@@ -283,6 +322,8 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
             degraded=True,
             degrade_reason="llm_runtime_config_unavailable",
             trace_id=kwargs["trace_id"],
+            query_scope=QueryScopeSummary(mode="explicit", resolved_kb_count=1),
+            kb_ids=tuple(kwargs["kb_ids"]),
         )
 
     monkeypatch.setattr(
@@ -318,11 +359,71 @@ def test_create_query_route_returns_query_response(monkeypatch) -> None:
     assert body["message_id"] == "99999999-9999-9999-9999-999999999999"
     assert body["citations"][0]["title"] == "员工手册"
     assert body["degraded"] is True
+    assert body["query_scope"] == {"mode": "explicit", "resolved_kb_count": 1}
+    assert "retrieval_debug" not in body
     assert captured["required_scope"] == "rag:query"
     assert captured["query_text"] == "员工手册"
     assert captured["conversation_prepare_kwargs"]["query_text"] == "员工手册"
+    assert captured["conversation_update_kbs_kwargs"]["kb_ids"] == (
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
     assert captured["conversation_complete_kwargs"]["message_id"] == (
         "99999999-9999-9999-9999-999999999999"
+    )
+
+
+def test_create_query_route_allows_missing_kb_ids_for_auto_scope(monkeypatch) -> None:
+    app = _create_test_app()
+    _open_business_api(monkeypatch)
+    _patch_query_session_scope(monkeypatch)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        AUTH_TARGET,
+        lambda *_args, **kwargs: (captured.update(kwargs) or _auth_context()),
+    )
+    _patch_conversation_service(monkeypatch, captured)
+
+    def _create_query(_self, _session, **kwargs):
+        captured.update(kwargs)
+        return QueryResult(
+            request_id=kwargs["request_id"],
+            answer="未选择知识库时自动搜索全部可访问知识库。",
+            citations=(),
+            confidence="low",
+            degraded=False,
+            degrade_reason=None,
+            trace_id=kwargs["trace_id"],
+            query_scope=QueryScopeSummary(
+                mode="auto_all_accessible",
+                resolved_kb_count=1,
+            ),
+            kb_ids=("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",),
+        )
+
+    monkeypatch.setattr(
+        "app.api.routes.query_execute.build_query_service",
+        lambda _session: _FakeQueryService(_create_query),
+    )
+
+    response = TestClient(app).post(
+        "/internal/v1/queries",
+        headers={"Authorization": "Bearer token"},
+        json={
+            "query": "员工手册",
+            "mode": "answer",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["query_scope"] == {
+        "mode": "auto_all_accessible",
+        "resolved_kb_count": 1,
+    }
+    assert captured["kb_ids"] == []
+    assert captured["conversation_prepare_kwargs"]["kb_ids"] == ()
+    assert captured["conversation_update_kbs_kwargs"]["kb_ids"] == (
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
     )
 
 
@@ -356,6 +457,7 @@ def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
             degraded=False,
             degrade_reason=None,
             trace_id=kwargs["trace_id"],
+            query_scope=QueryScopeSummary(mode="explicit", resolved_kb_count=1),
         )
 
     monkeypatch.setattr(
@@ -387,6 +489,8 @@ def test_create_query_stream_route_returns_sse_events(monkeypatch) -> None:
     assert '"debug_id":"dbg_' in response.text
     assert '"request_id"' not in response.text
     assert '"trace_id"' not in response.text
+    assert '"query_scope":{"mode":"explicit","resolved_kb_count":1}' in response.text
+    assert "retrieval_debug" not in response.text
     assert '"conversation_id":"22222222-2222-2222-2222-222222222222"' in response.text
     assert '"message_id":"99999999-9999-9999-9999-999999999999"' in response.text
     assert "员工手册" in response.text
@@ -438,6 +542,83 @@ def test_create_query_stream_route_uses_provider_token_stream(monkeypatch) -> No
     assert captured["final_answer"] == "员工年假需要提前申请。[source:chunk_1]"
     assert captured["query_text"] == "员工手册"
     assert captured["conversation_complete_kwargs"]["answer"] == "员工年假需要提前申请。"
+
+
+def test_create_query_stream_route_degrades_when_stream_generator_raises(
+    monkeypatch,
+) -> None:
+    app = _create_test_app()
+    _open_business_api(monkeypatch)
+    _patch_query_session_scope(monkeypatch)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        AUTH_TARGET,
+        lambda *_args, **kwargs: (captured.update(kwargs) or _auth_context()),
+    )
+    _patch_conversation_service(monkeypatch, captured)
+    monkeypatch.setattr(
+        "app.api.routes.query_stream.build_query_service",
+        lambda _session: _FailingStreamingQueryService(captured),
+    )
+
+    response = TestClient(app).post(
+        "/internal/v1/query-streams",
+        headers={"Authorization": "Bearer token", "x-request-id": "req_stream"},
+        json={
+            "kb_ids": ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            "query": "员工手册",
+            "mode": "answer",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: done" in response.text
+    assert "event: error" not in response.text
+    assert '"degraded":true' in response.text
+    assert '"degrade_reason":"LLM_PROVIDER_UNAVAILABLE"' in response.text
+    assert captured["final_answer"] == ""
+    assert captured["final_degraded"] is True
+    assert captured["final_degrade_reason"] == "LLM_PROVIDER_UNAVAILABLE"
+    assert captured["conversation_complete_kwargs"]["degraded"] is True
+
+
+def test_create_query_stream_route_returns_error_event_when_finalize_raises(
+    monkeypatch,
+) -> None:
+    app = _create_test_app()
+    _open_business_api(monkeypatch)
+    _patch_query_session_scope(monkeypatch)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        AUTH_TARGET,
+        lambda *_args, **kwargs: (captured.update(kwargs) or _auth_context()),
+    )
+    _patch_conversation_service(monkeypatch, captured)
+    monkeypatch.setattr(
+        "app.api.routes.query_stream.build_query_service",
+        lambda _session: _FailingFinalizeStreamingQueryService(captured),
+    )
+
+    response = TestClient(app).post(
+        "/internal/v1/query-streams",
+        headers={"Authorization": "Bearer token", "x-request-id": "req_stream"},
+        json={
+            "kb_ids": ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            "query": "员工手册",
+            "mode": "answer",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: error" in response.text
+    assert "QUERY_STREAM_FINALIZE_FAILED" in response.text
+    assert captured["conversation_fail_kwargs"]["degrade_reason"] == (
+        "QUERY_STREAM_FINALIZE_FAILED"
+    )
 
 
 def test_create_query_route_returns_service_error(monkeypatch) -> None:

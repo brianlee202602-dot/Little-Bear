@@ -10,6 +10,7 @@ from app.modules.config.errors import ConfigServiceError
 from app.modules.config.probe import ActiveConfigProbe
 from app.modules.config.schemas import ConfigValidationResult
 from app.modules.config.service import ConfigService
+from app.modules.config.validator import ConfigSchemaValidator
 from app.shared.json_utils import stable_json_hash
 
 
@@ -364,6 +365,29 @@ def test_config_service_rejects_schema_invalid_config() -> None:
 
     assert exc_info.value.error_code == "CONFIG_SCHEMA_INVALID"
     assert exc_info.value.details["error_count"] >= 1
+
+
+def test_config_schema_accepts_query_rewrite_p1_fields() -> None:
+    config = _example_config()
+    retrieval = config["retrieval"]
+    assert isinstance(retrieval, dict)
+    retrieval.update(
+        {
+            "query_rewrite_enabled": True,
+            "query_rewrite_use_llm": False,
+            "query_rewrite_max_queries": 4,
+            "query_rewrite_use_conversation": True,
+            "query_rewrite_recent_messages": 6,
+            "query_rewrite_max_tokens": 512,
+        }
+    )
+    timeout = config["timeout"]
+    assert isinstance(timeout, dict)
+    timeout["query_rewrite_ms"] = 3000
+
+    issues = ConfigSchemaValidator().validate_active_config(config)
+
+    assert issues == []
 
 
 def test_config_service_rejects_hash_mismatch() -> None:

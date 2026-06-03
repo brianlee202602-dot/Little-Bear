@@ -35,17 +35,15 @@ def normalize_query(value: str) -> str:
     return query
 
 
-def normalize_ids(values: list[str]) -> tuple[str, ...]:
+def normalize_ids(values: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
     normalized: list[str] = []
     seen: set[str] = set()
-    for value in values:
+    for value in values or ():
         item = value.strip()
         if not item or item in seen:
             continue
         normalized.append(item)
         seen.add(item)
-    if not normalized:
-        raise QueryServiceError("QUERY_INVALID_REQUEST", "kb_ids must not be empty")
     return tuple(normalized)
 
 
@@ -97,7 +95,7 @@ def string_list(value: Any) -> list[str]:
 def candidate_from_mapping(
     row: dict[str, Any],
     *,
-    source: Literal["keyword", "vector"],
+    source: Literal["keyword", "vector", "context_expansion"],
     rank: int,
 ) -> RetrievalCandidate:
     return RetrievalCandidate(
@@ -120,6 +118,7 @@ def candidate_from_mapping(
         page_end=optional_int(row.get("page_end")),
         rank=rank,
         score=float(row["score"] or 0),
+        source_score=float(row["score"] or 0),
     )
 
 

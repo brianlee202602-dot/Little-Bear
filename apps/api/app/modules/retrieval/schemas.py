@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-RetrievalSource = Literal["keyword", "vector"]
+RetrievalSource = Literal["keyword", "vector", "context_expansion"]
 ModelCallStatus = Literal["success", "failed", "degraded"]
 
 
@@ -30,6 +30,12 @@ class RetrievalCandidate:
     page_end: int | None
     rank: int
     score: float
+    source_score: float = 0.0
+    matched_query: str | None = None
+    matched_query_index: int = 0
+    query_weight: float = 1.0
+    source_weight: float = 1.0
+    embedding: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -61,3 +67,11 @@ class RerankResult:
     degraded: bool = False
     degrade_reason: str | None = None
     model_call: RetrievalModelCall | None = None
+
+
+@dataclass(frozen=True)
+class CandidateQualityGateResult:
+    accepted_candidates: tuple[RetrievalCandidate, ...]
+    rejected_count: int
+    top_score: float
+    quality_reason: str | None = None

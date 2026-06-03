@@ -460,18 +460,53 @@ P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embeddi
     "rrf_k": 60,
     "title_boost": 1.2,
     "freshness_boost": 1.0,
-    "low_ocr_penalty": 0.8
+    "low_ocr_penalty": 0.8,
+    "keyword_weight": 1.0,
+    "vector_weight": 1.2,
+    "original_query_weight": 1.2,
+    "rewrite_query_weight": 1.0,
+    "min_fusion_score": 0.01,
+    "min_source_score": 0.02
   },
   "rerank_input_top_k": 20,
   "rerank_min_score": 0.05,
   "final_context_top_k": 8,
   "max_context_tokens": 1500,
+  "max_chunks_per_document": 3,
+  "max_chunks_per_section": 2,
+  "mmr_enabled": true,
+  "mmr_lambda": 0.7,
+  "context_expand_neighbors": 1,
   "rewrite_enabled": false,
+  "query_rewrite_enabled": true,
+  "query_rewrite_use_llm": false,
+  "query_rewrite_max_queries": 4,
+  "query_rewrite_use_conversation": true,
+  "query_rewrite_recent_messages": 6,
+  "query_rewrite_max_tokens": 512,
   "expansion_enabled": false
 }
 ```
 
-P0 rewrite 和 expansion 默认关闭；可以由规则或外部 LLM provider 开启。
+字段说明：
+
+- `rewrite_enabled`：历史总开关，未配置 `query_rewrite_enabled` 时作为 Query Rewrite 后备开关。
+- `query_rewrite_enabled`：是否启用 P1 Query Rewrite；关闭时直接使用原始问题检索。
+- `query_rewrite_use_llm`：是否调用 LLM 做 query 改写。关闭时仅使用规则 fallback，不产生模型调用成本。
+- `query_rewrite_max_queries`：单次问题最多生成的检索 query 数量，范围 1 到 5。
+- `query_rewrite_use_conversation`：是否读取最近会话消息做指代补全；只用于检索 query 改写，不直接进入答案上下文。
+- `query_rewrite_recent_messages`：最多读取最近多少条会话消息，范围 0 到 20。
+- `query_rewrite_max_tokens`：LLM rewrite 输出 token 上限。
+- `fusion_params.keyword_weight` / `vector_weight`：P3 Weighted RRF 的召回源权重。
+- `fusion_params.original_query_weight` / `rewrite_query_weight`：P3 Weighted RRF 的 query 来源权重，原始问题默认高于改写 query。
+- `fusion_params.min_fusion_score` / `min_source_score`：rerank 不可用或未配置时的候选质量门控阈值。候选必须同时满足融合分和原始召回分，才会进入上下文。
+- `max_context_tokens`：最终送入答案模型的上下文 token 预算。Context Builder 按可替换 token 估算器截断内容；当前默认估算器按 CJK 字符、ASCII 词和标点做保守估算，不等同于具体 provider 的精确 tokenizer。
+- `max_chunks_per_document`：单次上下文中同一文档最多保留多少个 chunk。
+- `max_chunks_per_section`：单次上下文中同一文档同一小节最多保留多少个 chunk。
+- `mmr_enabled` / `mmr_lambda`：是否启用上下文 MMR 去冗余；候选带 embedding 时使用向量余弦相似度，缺少 embedding 时回落文本 token Jaccard。`mmr_lambda` 越高越偏向相关性，越低越偏向多样性。
+- `context_expand_neighbors`：对已通过权限 gate 的候选扩展前后相邻 chunk 的窗口大小；扩展 chunk 仍会重新经过权限、状态、active index 和 access block 校验。
+
+P1 默认支持规则 fallback；LLM rewrite 需要 `query_rewrite_use_llm=true` 并依赖 LLM provider 配置。`expansion_enabled` 仍保留为后续 query expansion 能力开关。
 
 ### 6.11 chunk
 
@@ -480,13 +515,19 @@ P0 rewrite 和 expansion 默认关闭；可以由规则或外部 LLM provider �
   "default_size_tokens": 800,
   "overlap_tokens": 120,
   "strategy": {
-    "mode": "heading_paragraph",
+    "mode": "structure_aware",
     "preserve_tables": true,
     "preserve_code_blocks": true,
     "preserve_contract_clauses": true
   }
 }
 ```
+
+约束：
+
+- `strategy.mode` 支持 `structure_aware`、`heading_paragraph` 和 `fixed_tokens`；当前导入 runtime 默认使用 `StructureAwareChunker`。
+- `structure_aware` 会保留 parser 输出的 heading、paragraph、list_item、table、code 和 page 信息，并把 block range、heading_path、section_id、page_start/page_end 等写入 chunk 元数据。
+- `default_size_tokens` 和 `overlap_tokens` 会按保守字符预算转换为 chunker 的目标长度；超长段落优先按句子切分，只有单句仍超长时才按字符兜底。
 
 ### 6.12 import
 
@@ -600,6 +641,7 @@ P0 默认关闭最终答案缓存，降低串权风险。
   "query_total_ms": 8000,
   "auth_permission_ms": 100,
   "rewrite_ms": 300,
+  "query_rewrite_ms": 3000,
   "embedding_ms": 3000,
   "vector_search_ms": 500,
   "keyword_search_ms": 500,
@@ -608,6 +650,8 @@ P0 默认关闭最终答案缓存，降低串权风险。
   "postprocess_ms": 300
 }
 ```
+
+`rewrite_ms` 是历史 rewrite 预算字段；P1 Query Rewrite runtime 优先读取 `query_rewrite_ms`，未配置时默认 3000ms。
 
 ### 6.18 degrade
 

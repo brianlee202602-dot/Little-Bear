@@ -31,6 +31,7 @@ class QueryLogWriter:
         config_version: int,
         latency_ms: int,
         error_code: str,
+        query_scope_mode: str,
     ) -> None:
         self.insert_query_log(
             session,
@@ -52,6 +53,9 @@ class QueryLogWriter:
             candidate_count=0,
             citation_count=0,
             error_code=error_code,
+            query_scope_mode=query_scope_mode,
+            resolved_kb_count=0,
+            rewrite_count=0,
         )
 
     def insert_query_log(
@@ -76,7 +80,12 @@ class QueryLogWriter:
         candidate_count: int,
         citation_count: int,
         error_code: str | None,
-    ) -> None:
+        query_scope_mode: str,
+        resolved_kb_count: int,
+        rewrite_count: int,
+        retrieval_diagnostics: dict[str, object] | None = None,
+    ) -> str:
+        query_log_id = str(uuid.uuid4())
         try:
             session.execute(
                 text(
@@ -86,7 +95,7 @@ class QueryLogWriter:
                         query_hash, status, degraded, degrade_reason, config_version,
                         permission_version, permission_filter_hash, index_version_hash,
                         model_route_hash, latency_ms, candidate_count, citation_count,
-                        error_code
+                        error_code, query_scope_mode, resolved_kb_count, rewrite_count
                     )
                     VALUES (
                         CAST(:id AS uuid), CAST(:enterprise_id AS uuid), :request_id,
@@ -94,12 +103,12 @@ class QueryLogWriter:
                         :query_hash, :status, :degraded, :degrade_reason, :config_version,
                         :permission_version, :permission_filter_hash, :index_version_hash,
                         :model_route_hash, :latency_ms, :candidate_count, :citation_count,
-                        :error_code
+                        :error_code, :query_scope_mode, :resolved_kb_count, :rewrite_count
                     )
                     """
                 ),
                 {
-                    "id": str(uuid.uuid4()),
+                    "id": query_log_id,
                     "enterprise_id": enterprise_id,
                     "request_id": request_id,
                     "trace_id": trace_id,
@@ -118,14 +127,64 @@ class QueryLogWriter:
                     "candidate_count": candidate_count,
                     "citation_count": citation_count,
                     "error_code": error_code,
+                    "query_scope_mode": query_scope_mode,
+                    "resolved_kb_count": max(resolved_kb_count, 0),
+                    "rewrite_count": max(rewrite_count, 0),
                 },
             )
+            if retrieval_diagnostics:
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO query_retrieval_diagnostics(
+                            id, enterprise_id, query_log_id, request_id, trace_id,
+                            rewrite_queries, stage_counts, quality_gate, selected_chunks
+                        )
+                        VALUES (
+                            CAST(:id AS uuid), CAST(:enterprise_id AS uuid),
+                            CAST(:query_log_id AS uuid), :request_id, :trace_id,
+                            CAST(:rewrite_queries AS jsonb),
+                            CAST(:stage_counts AS jsonb),
+                            CAST(:quality_gate AS jsonb),
+                            CAST(:selected_chunks AS jsonb)
+                        )
+                        """
+                    ),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "enterprise_id": enterprise_id,
+                        "query_log_id": query_log_id,
+                        "request_id": request_id,
+                        "trace_id": trace_id,
+                        "rewrite_queries": json.dumps(
+                            retrieval_diagnostics.get("rewrite_queries", []),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        "stage_counts": json.dumps(
+                            retrieval_diagnostics.get("stage_counts", {}),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        "quality_gate": json.dumps(
+                            retrieval_diagnostics.get("quality_gate", {}),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        "selected_chunks": json.dumps(
+                            retrieval_diagnostics.get("selected_chunks", []),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                    },
+                )
         except SQLAlchemyError as exc:
             raise _database_error(
                 "QUERY_LOG_WRITE_FAILED",
                 "query log cannot be written",
                 exc,
             ) from exc
+        return query_log_id
 
     def insert_model_call_log(
         self,

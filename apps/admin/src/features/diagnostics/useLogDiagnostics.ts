@@ -47,6 +47,7 @@ type UseLogDiagnosticsOptions = {
     errorCode: string;
     kbId: string;
     requestId: string;
+    queryScopeMode: string;
     status: string;
     traceId: string;
     userId: string;
@@ -91,6 +92,7 @@ export function useLogDiagnostics(options: UseLogDiagnosticsOptions) {
         user_id: options.queryLogSearchForm.userId.trim() || undefined,
         kb_id: options.queryLogSearchForm.kbId.trim() || undefined,
         status: options.queryLogSearchForm.status || undefined,
+        query_scope_mode: options.queryLogSearchForm.queryScopeMode || undefined,
         degraded: parseBooleanFilter(options.queryLogSearchForm.degraded),
         degrade_reason: options.queryLogSearchForm.degradeReason.trim() || undefined,
         request_id: options.queryLogSearchForm.requestId.trim() || undefined,

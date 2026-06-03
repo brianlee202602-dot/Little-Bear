@@ -991,107 +991,35 @@ AND (
 | 模型调用日志 | `model_call_logs(enterprise_id, config_version, model_type, status, created_at desc)` |
 | 缓存过期 | `query_cache_entries(expires_at)` |
 
-## 14. 首批 Alembic migration 草案
+## 14. Alembic migration 基线
 
-建议拆分为以下 migration，避免一个文件过大且便于回滚定位：
+当前实现不再保留早期 0001-0013 的分散增量脚本，而是压缩为当前版本基线：
 
-### 14.1 `0001_extensions_and_base_enums`
+```text
+apps/api/migrations/versions/0013_current_schema_baseline.py
+revision = "0013_query_log_scope_summary"
+down_revision = None
+```
 
-- 启用必要扩展：`pgcrypto`、`btree_gin`。
-- 如果使用 DB 生成 UUID，可启用 `uuid-ossp`；P0 推荐应用生成 UUIDv7。
-- 创建 CHECK 约束辅助函数或直接在表定义中写 CHECK。
+执行策略：
 
-### 14.2 `0002_setup_config_auth_org`
+- 空库执行 `db-upgrade` 时，一次性建立当前版本 Schema。
+- 已经升级到 `0013_query_log_scope_summary` 的数据库不会重复执行建表。
+- 仍停留在旧增量链中间版本的历史数据库，应先使用旧迁移链升级到 head，或重建数据库后执行当前基线迁移。
 
-创建：
+当前基线迁移包含以下阶段化步骤：
 
-- `system_state`
-- `config_versions`
-- `system_configs`
-- `secrets`
-- `enterprises`
-- `users`
-- `user_credentials`
-- `jwt_tokens`
-- `setup_tokens`
-- `departments`
-- `user_department_memberships`
+1. 启用 PostgreSQL 扩展与中文全文检索配置：`pgcrypto`、`btree_gin`、`zhparser`、`little_bear_zh`。
+2. 创建初始化、配置、Secret、认证、组织和 JWT 相关表。
+3. 创建 RBAC、资源策略和权限快照相关表。
+4. 创建知识库、文件夹、文档、文档版本、chunk、索引版本、关键词索引、chunk index ref 和 access block。
+5. 创建导入任务、查询缓存、审计日志、查询日志和模型调用日志。
+6. 创建普通用户查询会话和消息表。
+7. 补齐配置版本生命周期字段与 `inactive` 状态约束。
+8. 创建查询检索诊断表，并为查询日志补充查询范围、解析知识库数量和 rewrite 数量摘要字段。
 
-初始化数据：
-
-- 默认 `system_state.initialized=false`
-- 默认 schema migration version
-
-### 14.3 `0003_roles_permissions`
-
-创建：
-
-- `roles`
-- `role_bindings`
-- `resource_policies`
-- `permission_snapshots`
-
-初始化数据：
-
-- P0 内置角色定义。
-- 默认 employee/system_admin 等 scopes。
-
-### 14.4 `0004_knowledge_document_index`
-
-创建：
-
-- `knowledge_bases`
-- `folders`
-- `documents`
-- `document_versions`
-- `chunks`
-- `index_versions`
-- `keyword_index_entries`
-- `chunk_index_refs`
-- `access_blocks`
-
-注意：
-
-- `documents.current_version_id` 和 `documents.permission_snapshot_id` 可在表创建后补 FK。
-- active index 和 active document 相关 partial unique index 在表创建后补。
-
-### 14.5 `0005_jobs_audit_cache`
-
-创建：
-
-- `import_jobs`
-- `audit_logs`
-- `query_logs`
-- `model_call_logs`
-- `query_cache_entries`
-
-### 14.6 `0006_indexes_and_constraints`
-
-- 补充所有 partial unique indexes。
-- 补充 GIN indexes。
-- 补充查询链路组合索引。
-- 补充软删除、active 状态查询索引。
-
-### 14.7 `0007_dept_admin_read_scopes`
-
-- 补齐 department_admin 的 `knowledge_base:read`、`document:read` 和 `rag:query` 权限。
-
-### 14.8 `0008_query_conversations`
-
-创建：
-
-- `query_conversations`
-- `query_messages`
-
-### 14.9 `0009_config_version_updated_at`
-
-- 为 `config_versions` 增加 `updated_at` 字段。
-- 增加 `idx_config_versions_updated_at`，用于管理后台按更新时间展示和追踪配置版本。
-
-### 14.10 `0010_config_inactive_status`
-
-- 为 `config_versions` 和 `system_configs` 的配置状态增加 `inactive`。
-- 激活新版本时，旧 active 版本转为 `inactive`，保留可再次激活能力；只有管理员显式归档时才转为 `archived`。
+内置角色不依赖 migration 中的历史补丁更新；setup 初始化阶段通过
+`apps/api/app/modules/setup/contracts.py` 写入当前最终 scope。
 
 ## 15. 软删除与阻断策略
 

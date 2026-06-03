@@ -12,6 +12,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 from app.api.presenters.query import citation_data as _citation_data
 from app.api.presenters.query import public_debug_id as _public_debug_id
+from app.api.presenters.query import query_scope_data as _query_scope_data
 from app.api.routes.query_execute import attach_conversation
 from app.api.routes.query_shared import (
     _auth_error_response,
@@ -92,6 +93,12 @@ def prepare_query_stream(
                     include_sources=payload.include_sources,
                     request_id=request_id,
                     trace_id=trace_id,
+                    history=[message.model_dump() for message in payload.history],
+                )
+                QueryConversationService().update_conversation_kbs(
+                    session,
+                    conversation_id=conversation_context.conversation_id,
+                    kb_ids=result.kb_ids,
                 )
                 QueryConversationService().complete_assistant_message(
                     session,
@@ -117,6 +124,12 @@ def prepare_query_stream(
                 include_sources=payload.include_sources,
                 request_id=request_id,
                 trace_id=trace_id,
+                history=[message.model_dump() for message in payload.history],
+            )
+            QueryConversationService().update_conversation_kbs(
+                session,
+                conversation_id=conversation_context.conversation_id,
+                kb_ids=plan.normalized_kb_ids,
             )
             plan = replace(
                 plan,
@@ -142,6 +155,7 @@ def query_sse_events(result: QueryResult) -> Iterable[str]:
             "confidence": result.confidence,
             "degraded": result.degraded,
             "degrade_reason": result.degrade_reason,
+            "query_scope": _query_scope_data(result).model_dump(),
         },
     )
     for token in stream_tokens(result.answer):
@@ -161,6 +175,7 @@ def query_sse_events(result: QueryResult) -> Iterable[str]:
             "confidence": result.confidence,
             "degraded": result.degraded,
             "degrade_reason": result.degrade_reason,
+            "query_scope": _query_scope_data(result).model_dump(),
         },
     )
 
@@ -178,17 +193,21 @@ def query_stream_sse_events(service: QueryService, plan: QueryStreamPlan) -> Ite
             if plan.pre_degrade_reasons
             else None,
             "streaming": plan.mode == "answer",
+            "query_scope": query_scope_from_plan(plan),
         },
     )
     if plan.mode == "answer":
-        runner = service.answer_service.stream(query_context=plan.query_context)
-        for token in runner.stream_tokens():
-            yield sse_event("token", {"delta": token})
-        answer_result = runner.result or AnswerGenerationResult(
-            answer="",
-            degraded=True,
-            degrade_reason="llm_stream_result_missing",
-        )
+        try:
+            runner = service.answer_service.stream(query_context=plan.query_context)
+            for token in runner.stream_tokens():
+                yield sse_event("token", {"delta": token})
+            answer_result = runner.result or AnswerGenerationResult(
+                answer="",
+                degraded=True,
+                degrade_reason="llm_stream_result_missing",
+            )
+        except Exception as exc:
+            answer_result = stream_error_answer_result(exc)
     else:
         answer_result = AnswerGenerationResult(answer="", degraded=False, degrade_reason=None)
 
@@ -235,6 +254,25 @@ def query_stream_sse_events(service: QueryService, plan: QueryStreamPlan) -> Ite
             },
         )
         return
+    except Exception as exc:
+        if plan.message_id:
+            mark_stream_message_failed(
+                message_id=plan.message_id,
+                message="query stream finalization failed",
+                request_id=plan.request_id,
+                trace_id=plan.trace_id,
+                degrade_reason="QUERY_STREAM_FINALIZE_FAILED",
+            )
+        yield sse_event(
+            "error",
+            {
+                "debug_id": _public_debug_id(plan.request_id, plan.trace_id) or "dbg_unknown",
+                "error_code": "QUERY_STREAM_FINALIZE_FAILED",
+                "message": "query stream finalization failed",
+                "details": {"error_type": exc.__class__.__name__},
+            },
+        )
+        return
 
     for citation in result.citations:
         yield sse_event("citation", _citation_data(citation).model_dump())
@@ -251,6 +289,7 @@ def query_stream_sse_events(service: QueryService, plan: QueryStreamPlan) -> Ite
             "confidence": result.confidence,
             "degraded": result.degraded,
             "degrade_reason": result.degrade_reason,
+            "query_scope": _query_scope_data(result).model_dump(),
         },
     )
 
@@ -278,9 +317,37 @@ def mark_stream_message_failed(
         return
 
 
+def stream_error_answer_result(exc: Exception) -> AnswerGenerationResult:
+    error_code = getattr(exc, "error_code", None)
+    if not isinstance(error_code, str) or not error_code:
+        error_code = "LLM_PROVIDER_UNAVAILABLE"
+    message = getattr(exc, "message", None)
+    if not isinstance(message, str) or not message:
+        raw_message = str(exc).strip()
+        message = (
+            f"{exc.__class__.__name__}: {raw_message}"
+            if raw_message
+            else exc.__class__.__name__
+        )
+    return AnswerGenerationResult(
+        answer="",
+        degraded=True,
+        degrade_reason=error_code,
+        model_call_attempted=True,
+        error_message=message,
+    )
+
+
 def sse_event(event_name: str, payload: dict[str, object]) -> str:
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event_name}\ndata: {data}\n\n"
+
+
+def query_scope_from_plan(plan: QueryStreamPlan) -> dict[str, object]:
+    return {
+        "mode": plan.query_scope_mode,
+        "resolved_kb_count": len(plan.normalized_kb_ids),
+    }
 
 
 def stream_tokens(answer: str, *, chunk_size: int = 24) -> Iterable[str]:
@@ -294,6 +361,6 @@ _prepare_query_stream = prepare_query_stream
 _query_sse_events = query_sse_events
 _query_stream_sse_events = query_stream_sse_events
 _mark_stream_message_failed = mark_stream_message_failed
+_stream_error_answer_result = stream_error_answer_result
 _sse_event = sse_event
 _stream_tokens = stream_tokens
-

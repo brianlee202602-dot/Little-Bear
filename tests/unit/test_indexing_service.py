@@ -320,6 +320,7 @@ def test_write_draft_indexes_inserts_keyword_refs_and_marks_ready() -> None:
                         "title": "员工手册",
                         "collection_name": "little_bear_p0",
                         "text": "员工手册正文",
+                        "heading_path": "制度 / 请假",
                         "owner_department_id": _DEPARTMENT_ID,
                         "visibility": "department",
                         "permission_version": 7,
@@ -348,12 +349,21 @@ def test_write_draft_indexes_inserts_keyword_refs_and_marks_ready() -> None:
         "to_tsvector('simple', :search_text)" in statement
         for statement, _ in session.executed
     )
+    keyword_params = next(
+        params
+        for statement, params in session.executed
+        if "INSERT INTO keyword_index_entries" in statement
+    )
+    assert keyword_params["search_text"] == (
+        "title: 员工手册\nsection: 制度 / 请假\ncontent: 员工手册正文"
+    )
     assert any("INSERT INTO chunk_index_refs" in statement for statement, _ in session.executed)
     assert any("SET status = 'ready'" in statement for statement, _ in session.executed)
     assert len(vector_writer.draft_points) == 1
     point = vector_writer.draft_points[0]
     uuid.UUID(point.vector_id)
     assert point.collection_name == "little_bear_p0"
+    assert point.text == "title: 员工手册\nsection: 制度 / 请假\ncontent: 员工手册正文"
     assert point.payload["visibility_state"] == "draft"
     assert point.payload["document_index_status"] == "indexing"
     assert point.payload["indexed_permission_version"] == 7
@@ -564,6 +574,7 @@ def test_write_draft_indexes_marks_failure_retryable_when_vector_write_fails() -
                         "title": "员工手册",
                         "collection_name": "little_bear_p0",
                         "text": "员工手册正文",
+                        "heading_path": "制度 / 请假",
                         "owner_department_id": _DEPARTMENT_ID,
                         "visibility": "department",
                         "permission_version": 7,

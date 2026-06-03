@@ -10,6 +10,7 @@ from app.api.schemas.query import (
     QueryConversationResponse,
     QueryMessageData,
     QueryResponse,
+    QueryScopeData,
 )
 from app.modules.query.conversations import (
     QueryConversationDetail,
@@ -29,6 +30,7 @@ def query_response(result: QueryResult) -> QueryResponse:
         confidence=result.confidence,
         degraded=result.degraded,
         degrade_reason=result.degrade_reason,
+        query_scope=query_scope_data(result),
     )
 
 
@@ -41,6 +43,13 @@ def citation_data(citation: QueryCitation) -> CitationData:
         page_start=citation.page_start,
         page_end=citation.page_end,
         score=citation.score,
+    )
+
+
+def query_scope_data(result: QueryResult) -> QueryScopeData:
+    return QueryScopeData(
+        mode=result.query_scope.mode,
+        resolved_kb_count=result.query_scope.resolved_kb_count,
     )
 
 
@@ -96,4 +105,3 @@ def public_debug_id(*values: str | None) -> str | None:
         return None
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
     return f"dbg_{digest}"
-

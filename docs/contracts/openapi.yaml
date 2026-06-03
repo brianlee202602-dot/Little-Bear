@@ -2410,6 +2410,11 @@ paths:
           in: query
           schema:
             type: string
+        - name: query_scope_mode
+          in: query
+          schema:
+            type: string
+            enum: [explicit, auto_all_accessible]
         - name: degrade_reason
           in: query
           schema:
@@ -3317,9 +3322,21 @@ components:
           type: string
           minLength: 1
           maxLength: 4000
+    QueryScope:
+      type: object
+      required: [mode, resolved_kb_count]
+      properties:
+        mode:
+          type: string
+          enum: [explicit, auto_all_accessible]
+          description: 查询范围来源。explicit 表示请求显式限定知识库，auto_all_accessible 表示服务端按当前用户权限自动搜索全部可访问知识库。
+        resolved_kb_count:
+          type: integer
+          minimum: 0
+          description: 服务端最终纳入检索范围的知识库数量。
     QueryResponse:
       type: object
-      required: [debug_id, answer, citations, confidence, degraded]
+      required: [debug_id, answer, citations, confidence, degraded, query_scope]
       properties:
         debug_id:
           $ref: "#/components/schemas/DebugId"
@@ -3340,6 +3357,8 @@ components:
           type: boolean
         degrade_reason:
           type: [string, "null"]
+        query_scope:
+          $ref: "#/components/schemas/QueryScope"
     QueryConversationCreateRequest:
       type: object
       properties:
@@ -4948,10 +4967,22 @@ components:
           type: integer
         citation_count:
           type: integer
+        query_scope_mode:
+          type: string
+          enum: [explicit, auto_all_accessible]
+        resolved_kb_count:
+          type: integer
+          minimum: 0
+        rewrite_count:
+          type: integer
+          minimum: 0
         error_code:
           type: [string, "null"]
         created_at:
           $ref: "#/components/schemas/Timestamp"
+        retrieval_diagnostics:
+          type: [object, "null"]
+          additionalProperties: true
     QueryLogResponse:
       type: object
       properties:

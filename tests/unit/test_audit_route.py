@@ -113,6 +113,9 @@ def _query_log() -> QueryLog:
         latency_ms=321,
         candidate_count=5,
         citation_count=2,
+        query_scope_mode="explicit",
+        resolved_kb_count=1,
+        rewrite_count=2,
         error_code=None,
         created_at=datetime.now(UTC),
     )
@@ -226,6 +229,9 @@ def test_query_log_list_route_requires_audit_read_scope(monkeypatch) -> None:
     assert seen["filters"]["degraded"] is False
     payload = response.json()["data"][0]
     assert payload["candidate_count"] == 5
+    assert payload["query_scope_mode"] == "explicit"
+    assert payload["resolved_kb_count"] == 1
+    assert payload["rewrite_count"] == 2
     assert "trace_id" not in payload
     assert "query_hash" not in payload
 
@@ -254,6 +260,7 @@ def test_query_log_get_route_returns_single_log(monkeypatch) -> None:
     assert response.status_code == 200
     assert seen["query_log_id"] == "query_log_1"
     assert response.json()["data"]["trace_id"] == "trace_query"
+    assert response.json()["data"]["query_scope_mode"] == "explicit"
 
 
 def test_model_call_log_list_route_requires_audit_read_scope(monkeypatch) -> None:

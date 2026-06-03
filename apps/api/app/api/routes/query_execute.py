@@ -83,6 +83,12 @@ def execute_query(
                     include_sources=payload.include_sources,
                     request_id=request_id,
                     trace_id=trace_id,
+                    history=[message.model_dump() for message in payload.history],
+                )
+                QueryConversationService().update_conversation_kbs(
+                    session,
+                    conversation_id=conversation_context.conversation_id,
+                    kb_ids=result.kb_ids,
                 )
                 QueryConversationService().complete_assistant_message(
                     session,
@@ -142,4 +148,3 @@ def attach_conversation(
 
 _execute_query = execute_query
 _attach_conversation = attach_conversation
-
