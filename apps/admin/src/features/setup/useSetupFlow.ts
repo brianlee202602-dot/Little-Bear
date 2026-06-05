@@ -32,6 +32,7 @@ export function useSetupFlow(options: UseSetupFlowOptions) {
   const feedback = ref<SetupFeedback | null>(null);
   const validationErrorPayload = ref<ApiErrorPayload | null>(null);
   const initializationErrorPayload = ref<ApiErrorPayload | null>(null);
+  const initializationErrorDialogOpen = ref(false);
   const submitConfirmed = ref(false);
   const lastValidatedPayload = ref<string | null>(null);
   let refreshSetupState: () => Promise<void> = async () => {};
@@ -59,6 +60,7 @@ export function useSetupFlow(options: UseSetupFlowOptions) {
     fieldIssues,
     flowItems,
     initializationDatabaseError,
+    initializationErrorSummary,
     initializationErrorItems,
     initializationFailedChecks,
     localBlockingIssues,
@@ -81,6 +83,7 @@ export function useSetupFlow(options: UseSetupFlowOptions) {
     canValidate,
     feedback,
     form,
+    initializationErrorDialogOpen,
     initializationErrorPayload,
     initializationResult,
     lastValidatedPayload,
@@ -104,11 +107,14 @@ export function useSetupFlow(options: UseSetupFlowOptions) {
     canSubmit,
     canValidate,
     checkboxFieldsBySection,
+    closeInitializationErrorDialog,
     feedback,
     fieldIssues,
     flowItems,
     form,
     initializationDatabaseError,
+    initializationErrorDialogOpen,
+    initializationErrorSummary,
     initializationErrorItems,
     initializationErrorPayload,
     initializationFailedChecks,
@@ -140,6 +146,10 @@ export function useSetupFlow(options: UseSetupFlowOptions) {
     validationGateMessage,
     validationResult,
   });
+
+  function closeInitializationErrorDialog(): void {
+    initializationErrorDialogOpen.value = false;
+  }
 
   return {
     busy,

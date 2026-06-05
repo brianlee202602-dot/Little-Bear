@@ -1,8 +1,8 @@
-# Little Bear 当前项目文档
+# Little Bear 项目文档
 
-本目录用于存放已经过实现校对、可以作为团队后续开发依据的成熟文档，包括架构设计、功能说明、接口约束、开发规范和运维说明。
+本目录用于存放已经过实现校对、可作为交付和扩展开发依据的成熟文档，包括架构设计、功能说明、接口约束、开发规范和运维说明。
 
-## 当前文档
+## 文档入口
 
 - [项目总体架构设计书](architecture/项目总体架构设计书.md)
 - [核心业务链路时序图](architecture/核心业务链路时序图.md)
@@ -40,7 +40,7 @@
 - [权限矩阵](contracts/权限矩阵.md)
 - [审计事件字典](contracts/审计事件字典.md)
 - [状态机设计](contracts/状态机设计.md)
-- [P0 查询回归样例](examples/query-regression.p0.jsonl)
+- [交付版查询回归样例](examples/query-regression.p0.jsonl)
 - [RAG 增强查询回归样例](examples/query-regression.rag-enhancement.jsonl)
 - [本地初始化样例](examples/setup-initialization.local.p0.json)
 

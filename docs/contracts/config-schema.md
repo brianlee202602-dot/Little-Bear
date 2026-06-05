@@ -2,11 +2,11 @@
 
 ## 1. 文档目标
 
-本文定义 Little Bear RAG 后端 P0 阶段的初始化配置和 `active_config v1` 契约，作为 `setup-config-validations`、`setup-initialization`、Config Service、ServiceBootstrap、OpenAPI、数据库 Schema 和本地开发环境的共同输入。
+本文定义 Little Bear RAG 后端正式交付版的初始化配置和 `active_config v1` 契约，作为 `setup-config-validations`、`setup-initialization`、Config Service、ServiceBootstrap、OpenAPI、数据库 Schema 和本地开发环境的共同输入。
 
 机器可校验 JSON Schema 已落地到 `docs/contracts/config.schema.json`。本文负责说明字段语义、校验意图和运行约束；实现中的 schema 校验应以 `docs/contracts/config.schema.json` 为准。
 
-P0 目标：
+交付版目标：
 
 - 系统启动配置只包含数据库连接和进程参数。
 - 初始化接口一次性提交首个可运行配置。
@@ -14,7 +14,7 @@ P0 目标：
 - 本地开发和自动化测试使用外部 embedding、rerank、LLM 服务，不再内置模型模拟服务。
 - Secret value 不进入 active config、API 响应、普通日志或审计摘要。
 
-P0 不实现：
+交付版不实现：
 
 - 完整配置审批。
 - 通用配置回滚平台。
@@ -64,7 +64,7 @@ P0 不实现：
 | `display_name` | string | 是 | 1 到 128 字符 |
 | `initial_password` | string | 是 | 必须满足 `auth` 密码策略，只允许初始化请求携带，不写入日志或审计摘要 |
 | `email` | string/null | 否 | 如提供必须是 email 格式 |
-| `phone` | string/null | 否 | P0 只保存，不做短信验证 |
+| `phone` | string/null | 否 | 交付版只保存，不做短信验证 |
 
 ### 3.2 setup.organization
 
@@ -95,7 +95,7 @@ P0 不实现：
 | `departments[].code` | string | 是 | 1 到 64 字符，企业内唯一 |
 | `departments[].is_default` | boolean | 是 | 必须且只能有一个默认部门 |
 
-P0 部门不建模上下级递归，不包含 `parent_id`、`path` 或 closure table。
+交付版部门不建模上下级递归，不包含 `parent_id`、`path` 或 closure table。
 
 ### 3.3 setup.roles
 
@@ -118,9 +118,9 @@ P0 部门不建模上下级递归，不包含 `parent_id`、`path` 或 closure t
 
 | 字段 | 类型 | 必填 | 规则 |
 | --- | --- | --- | --- |
-| `builtin_roles` | string[] | 是 | 必须包含 P0 内置角色全集 |
-| `admin_role` | string | 是 | P0 固定为 `system_admin` |
-| `default_user_role` | string | 是 | P0 固定为 `employee` |
+| `builtin_roles` | string[] | 是 | 必须包含交付版内置角色全集 |
+| `admin_role` | string | 是 | 交付版固定为 `system_admin` |
+| `default_user_role` | string | 是 | 交付版固定为 `employee` |
 
 ### 3.4 setup.model_provider_secrets
 
@@ -149,7 +149,7 @@ P0 部门不建模上下级递归，不包含 `parent_id`、`path` 或 closure t
 
 ## 4. active_config v1 Schema
 
-`active_config v1` 是运行配置 bundle。P0 使用单个 global bundle 作为最小实现，后续可以由 Config Service 拆分为多条 `system_configs` 记录。
+`active_config v1` 是运行配置 bundle。交付版使用单个 global bundle 作为最小实现，可由 Config Service 拆分为多条 `system_configs` 记录。
 
 ```json
 {
@@ -186,10 +186,10 @@ P0 部门不建模上下级递归，不包含 `parent_id`、`path` 或 closure t
 
 | 字段 | 类型 | 必填 | 规则 |
 | --- | --- | --- | --- |
-| `schema_version` | integer | 是 | P0 固定为 `1` |
+| `schema_version` | integer | 是 | 交付版固定为 `1` |
 | `config_version` | integer | 是 | 运行配置版本；首次初始化发布为 `1`，后续发布必须与数据库 `config_versions.version` 一致 |
-| `scope.type` | string | 是 | P0 固定为 `global` |
-| `scope.id` | string | 是 | P0 固定为 `global` |
+| `scope.type` | string | 是 | 交付版固定为 `global` |
+| `scope.id` | string | 是 | 交付版固定为 `global` |
 
 ## 5. Secret 引用规则
 
@@ -201,7 +201,7 @@ Secret 引用格式：
 secret://<namespace>/<path>
 ```
 
-P0 默认命名空间：
+交付版默认命名空间：
 
 ```text
 secret://rag/<service>/<name>
@@ -247,8 +247,8 @@ secret://rag/<service>/<name>
 
 约束：
 
-- P0 推荐 `postgres_encrypted`。
-- 可以保留 `vault`、`kms` 等枚举扩展，但不得作为 P0 必需依赖。
+- 交付版推荐 `postgres_encrypted`。
+- 可以保留 `vault`、`kms` 等枚举扩展，但不得作为交付版必需依赖。
 
 ### 6.2 redis
 
@@ -325,11 +325,11 @@ secret://rag/<service>/<name>
 }
 ```
 
-P0 默认使用 PostgreSQL Full Text + `zhparser` 作为中文分词方案。企业词库、同义词、停用词和更细粒度的中文分词治理进入后续阶段；如果运行环境不提供 `zhparser`，则必须退回预分词字段方案，不能直接宣称中文关键词召回可用于生产。
+正式交付版默认使用 PostgreSQL Full Text + `zhparser` 作为中文分词方案。企业词库、同义词、停用词和更细粒度的中文分词治理属于扩展治理能力；如果运行环境不提供 `zhparser`，则必须退回预分词字段方案，不能直接宣称中文关键词召回可用于生产。
 
 ### 6.6 model_gateway
 
-P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embedding` 和 `tei-rerank` 是 `docker-compose.yml` 提供的本地演示 provider，不是强制部署项；实际使用可以删除对应 compose service，并替换为企业模型代理、远程 TEI 或云厂商 provider URL。当前 compose 不创建 LLM 容器，`providers.llm.base_url` 必须替换为真实 OpenAI-compatible 服务地址。默认配置：
+交付版直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embedding` 和 `tei-rerank` 是 `docker-compose.yml` 提供的本地演示 provider，不是强制部署项；实际使用可以删除对应 compose service，并替换为企业模型代理、远程 TEI 或云厂商 provider URL。当前 compose 不创建 LLM 容器，`providers.llm.base_url` 必须替换为真实 OpenAI-compatible 服务地址。默认配置：
 
 ```json
 {
@@ -490,15 +490,15 @@ P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embeddi
 
 字段说明：
 
-- `rewrite_enabled`：历史总开关，未配置 `query_rewrite_enabled` 时作为 Query Rewrite 后备开关。
-- `query_rewrite_enabled`：是否启用 P1 Query Rewrite；关闭时直接使用原始问题检索。
+- `rewrite_enabled`：兼容总开关，未配置 `query_rewrite_enabled` 时作为 Query Rewrite 后备开关。
+- `query_rewrite_enabled`：是否启用 Query Rewrite；关闭时直接使用原始问题检索。
 - `query_rewrite_use_llm`：是否调用 LLM 做 query 改写。关闭时仅使用规则 fallback，不产生模型调用成本。
 - `query_rewrite_max_queries`：单次问题最多生成的检索 query 数量，范围 1 到 5。
 - `query_rewrite_use_conversation`：是否读取最近会话消息做指代补全；只用于检索 query 改写，不直接进入答案上下文。
 - `query_rewrite_recent_messages`：最多读取最近多少条会话消息，范围 0 到 20。
 - `query_rewrite_max_tokens`：LLM rewrite 输出 token 上限。
-- `fusion_params.keyword_weight` / `vector_weight`：P3 Weighted RRF 的召回源权重。
-- `fusion_params.original_query_weight` / `rewrite_query_weight`：P3 Weighted RRF 的 query 来源权重，原始问题默认高于改写 query。
+- `fusion_params.keyword_weight` / `vector_weight`：Weighted RRF 的召回源权重。
+- `fusion_params.original_query_weight` / `rewrite_query_weight`：Weighted RRF 的 query 来源权重，原始问题默认高于改写 query。
 - `fusion_params.min_fusion_score` / `min_source_score`：rerank 不可用或未配置时的候选质量门控阈值。候选必须同时满足融合分和原始召回分，才会进入上下文。
 - `max_context_tokens`：最终送入答案模型的上下文 token 预算。Context Builder 按可替换 token 估算器截断内容；当前默认估算器按 CJK 字符、ASCII 词和标点做保守估算，不等同于具体 provider 的精确 tokenizer。
 - `max_chunks_per_document`：单次上下文中同一文档最多保留多少个 chunk。
@@ -506,7 +506,7 @@ P0 直接配置外部 embedding、rerank 和 LLM 服务。下面的 `tei-embeddi
 - `mmr_enabled` / `mmr_lambda`：是否启用上下文 MMR 去冗余；候选带 embedding 时使用向量余弦相似度，缺少 embedding 时回落文本 token Jaccard。`mmr_lambda` 越高越偏向相关性，越低越偏向多样性。
 - `context_expand_neighbors`：对已通过权限 gate 的候选扩展前后相邻 chunk 的窗口大小；扩展 chunk 仍会重新经过权限、状态、active index 和 access block 校验。
 
-P1 默认支持规则 fallback；LLM rewrite 需要 `query_rewrite_use_llm=true` 并依赖 LLM provider 配置。`expansion_enabled` 仍保留为后续 query expansion 能力开关。
+Query Rewrite 默认支持规则 fallback；LLM rewrite 需要 `query_rewrite_use_llm=true` 并依赖 LLM provider 配置。`expansion_enabled` 为 query expansion 能力开关。
 
 ### 6.11 chunk
 
@@ -567,7 +567,7 @@ P1 默认支持规则 fallback；LLM rewrite 需要 `query_rewrite_use_llm=true`
 
 约束：
 
-- P0 文档可见性只支持 `department` 和 `enterprise`。
+- 交付版文档可见性只支持 `department` 和 `enterprise`。
 - 权限判断不依赖 LLM。
 - `tightening_block_policy` 三个开关允许系统管理员在配置版本中调整；生产环境推荐保持 `true`，关闭任一项都应作为高风险配置变更审计。
 
@@ -607,7 +607,7 @@ P1 默认支持规则 fallback；LLM rewrite 需要 `query_rewrite_use_llm=true`
 }
 ```
 
-P0 默认关闭最终答案缓存，降低串权风险。
+交付版默认关闭最终答案缓存，降低串权风险。
 
 ### 6.16 rate_limit
 
@@ -651,7 +651,7 @@ P0 默认关闭最终答案缓存，降低串权风险。
 }
 ```
 
-`rewrite_ms` 是历史 rewrite 预算字段；P1 Query Rewrite runtime 优先读取 `query_rewrite_ms`，未配置时默认 3000ms。
+`rewrite_ms` 是兼容 rewrite 预算字段；Query Rewrite runtime 优先读取 `query_rewrite_ms`，未配置时默认 3000ms。
 
 ### 6.18 degrade
 
@@ -694,8 +694,8 @@ P0 默认关闭最终答案缓存，降低串权风险。
 
 约束：
 
-- `record_full_prompt` P0 必须为 `false`。
-- `query_text_mode` 可选值：`none`、`hash`、`plain`；P0 推荐 `hash`。
+- `record_full_prompt` 交付版必须为 `false`。
+- `query_text_mode` 可选值：`none`、`hash`、`plain`；交付版推荐 `hash`。
 
 ### 6.20 observability
 
@@ -736,7 +736,7 @@ ServiceBootstrap 输入只能是数据库中的 `active_config v1`。
 
 Ready 判定：
 
-| 模块 | P0 ready 条件 |
+| 模块 | 交付就绪条件 |
 | --- | --- |
 | Secret Provider | 可读取所有必需 Secret ref |
 | Redis | ping 成功，锁和计数器基础命令可用 |
@@ -796,7 +796,7 @@ Ready 判定：
 | `CONFIG_MODEL_PROVIDER_INVALID` | 外部模型 provider 配置缺失或不兼容 | false |
 | `CONFIG_EMBEDDING_DIMENSION_INVALID` | embedding 维度与向量库配置不一致 | false |
 | `CONFIG_CACHE_UNSAFE` | 缓存策略可能跨用户或跨权限复用最终答案 | false |
-| `CONFIG_PROMPT_LOGGING_UNSAFE` | P0 尝试记录完整 prompt | false |
+| `CONFIG_PROMPT_LOGGING_UNSAFE` | 交付版尝试记录完整 prompt | false |
 | `CONFIG_PERMISSION_UNSAFE` | 权限收紧策略不是 fail closed | false |
 | `CONFIG_BOOTSTRAP_NOT_READY` | ServiceBootstrap 未 ready | true |
 
@@ -811,14 +811,14 @@ OpenAPI 必须为以下接口引用本文 schema：
 - `PUT /internal/v1/admin/configs/{key}`
 - `POST /internal/v1/admin/config-validations`
 
-P0 管理后台配置 API 只要求：
+交付版管理后台配置 API 只要求：
 
 - 读取配置。
 - 保存或替换配置草稿。
 - 校验配置。
 - 发布 active config。
 
-P0 不要求：
+交付版不要求：
 
 - 完整审批。
 - 通用配置回滚。
@@ -826,7 +826,7 @@ P0 不要求：
 
 ## 11. 测试要求
 
-P0 必测：
+交付版必测：
 
 - 缺少任一顶层必填配置时校验失败。
 - Secret value 出现在 active config 时校验失败。

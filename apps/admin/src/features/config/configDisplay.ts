@@ -1,15 +1,15 @@
 import type { ConfigVersionData, ConfigVersionListItemData } from "@/api/config";
 import type { DisplayTone } from "@/utils/display";
 
-export function riskLevelText(riskLevel: string | null | undefined): string {
+export function configChangeImpactText(riskLevel: string | null | undefined): string {
   if (!riskLevel) {
     return "-";
   }
   const labels: Record<string, string> = {
-    low: "低",
-    medium: "中",
-    high: "高",
-    critical: "严重",
+    low: "低影响",
+    medium: "中等影响",
+    high: "高影响",
+    critical: "严重影响",
   };
   return labels[riskLevel] ?? riskLevel;
 }

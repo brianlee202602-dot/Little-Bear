@@ -3,7 +3,7 @@ import { computed } from "vue";
 import type { ConfigVersionData } from "@/api/config";
 import StatusBadge from "@/components/StatusBadge.vue";
 import type { ConfigSectionFormDefinition } from "@/features/config/configFields";
-import { configStatusTone, riskLevelText } from "@/features/config/configDisplay";
+import { configChangeImpactText, configStatusTone } from "@/features/config/configDisplay";
 import { formatDateTime } from "@/utils/date";
 import { formatStatusText } from "@/utils/display";
 
@@ -67,8 +67,8 @@ const visibleSectionRows = computed(() => {
             </dd>
           </div>
           <div class="summary__row">
-            <dt>风险等级</dt>
-            <dd>{{ riskLevelText(props.version.risk_level) }}</dd>
+            <dt>变更影响</dt>
+            <dd>{{ configChangeImpactText(props.version.risk_level) }}</dd>
           </div>
           <div class="summary__row">
             <dt>创建时间</dt>

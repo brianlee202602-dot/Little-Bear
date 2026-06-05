@@ -14,7 +14,7 @@ apps/worker     文档导入与索引 Worker
 apps/web        普通用户查询前端
 apps/admin      管理后台前端
 packages/       共享契约、前端 SDK 和共享 UI 包
-docs/           当前成熟项目文档
+docs/           交付版项目文档
 tests/          单元、集成、契约和回归测试
 ```
 
@@ -26,7 +26,7 @@ tests/          单元、集成、契约和回归测试
 - active config 配置版本管理、配置编辑、激活、归档和配置审计。
 - Secret Store 加密保存 MinIO、JWT、模型 provider 等密钥。
 - ServiceBootstrap 启动门禁和 live / ready 健康检查。
-- 当前 schema 基线迁移。
+- 正式交付版数据库 Schema 迁移。
 
 ### 认证、组织与权限
 
@@ -73,16 +73,16 @@ tests/          单元、集成、契约和回归测试
 ### 诊断、审计与验收
 
 - 审计日志、查询日志、模型调用日志、查询检索诊断、配置审计和索引健康检查。
-- P0 smoke、查询回归、RAG 增强回归、Qdrant / embedding 真实联调测试。
+- 交付版冒烟测试、查询回归、RAG 增强回归、Qdrant / embedding 真实联调测试。
 - 后端单元测试、前端 typecheck / build 门禁。
 
-## 当前边界
+## 交付边界
 
-- Redis 已作为基础设施和 ServiceBootstrap 依赖接入，但业务缓存能力尚未实现。
-- 当前迁移已压缩为当前 schema 基线，停留在早期增量迁移链中间版本的数据库需要先升到 head 或重建。
-- 当前部署说明以本地和内部开发环境为主，尚未提供 Kubernetes / Helm 生产编排。
-- 查询多轮会话已保存和展示，但尚未实现长历史总结或跨轮意图规划。
-- 最终答案缓存尚未接入。
+- Redis 已作为基础设施和 ServiceBootstrap 依赖接入，业务缓存不属于交付版运行闭环。
+- 数据库迁移以 Alembic revision `0013_query_log_scope_summary` 作为交付版 schema head。
+- 部署说明覆盖本地和内部开发环境，不包含 Kubernetes / Helm 生产编排。
+- 查询多轮会话已保存和展示，不包含长历史总结或跨轮意图规划。
+- 最终答案缓存不属于交付版运行链路。
 
 ## 文档入口
 
@@ -144,7 +144,7 @@ tests/          单元、集成、契约和回归测试
 
 回归样例：
 
-- [P0 查询回归样例](docs/examples/query-regression.p0.jsonl)
+- [交付版查询回归样例](docs/examples/query-regression.p0.jsonl)
 - [RAG 增强查询回归样例](docs/examples/query-regression.rag-enhancement.jsonl)
 - [本地初始化样例](docs/examples/setup-initialization.local.p0.json)
 

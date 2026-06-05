@@ -20,7 +20,7 @@ apps/worker     文档导入、解析、切块、embedding 和索引发布 Worke
 apps/web        普通用户查询前端
 apps/admin      管理后台前端
 packages/       共享契约、前端 SDK 和共享 UI 包
-docs/           当前成熟项目文档
+docs/           交付版项目文档
 tests/          单元、集成、契约和回归测试
 ```
 
@@ -48,7 +48,7 @@ tests/          单元、集成、契约和回归测试
 基础设施：
 
 - PostgreSQL：业务事实源。
-- Redis：当前作为 ServiceBootstrap 依赖接入，业务缓存尚未实现。
+- Redis：作为 ServiceBootstrap 依赖接入，业务缓存不属于交付版运行闭环。
 - MinIO：对象存储。
 - Qdrant：向量索引。
 - embedding / rerank / LLM provider：由 active config 指定。
@@ -205,13 +205,13 @@ API 校验权限/大小/幂等键
 - [管理后台前端架构设计书](docs/frontend/管理后台前端架构设计书.md)
 - [前后端交互约束说明](docs/frontend/前后端交互约束说明.md)
 
-## 11. 当前实现边界
+## 11. 交付边界
 
-- Redis 已作为基础设施和 ServiceBootstrap 依赖接入，但业务缓存尚未实现。
-- 最终答案缓存尚未接入。
-- 当前生产拓扑说明不等于已有 Kubernetes / Helm 编排。
-- 查询多轮会话已保存和展示，但尚未实现长历史总结或跨轮意图规划。
-- 当前成熟文档存放在 `docs/`；根目录计划类文档不应替代实现校对后的成熟文档。
+- Redis 已作为基础设施和 ServiceBootstrap 依赖接入，业务缓存不属于交付版运行闭环。
+- 最终答案缓存不属于交付版运行链路。
+- 生产拓扑说明不等于已有 Kubernetes / Helm 编排。
+- 查询多轮会话已保存和展示，不包含长历史总结或跨轮意图规划。
+- 交付版项目文档存放在 `docs/`；根目录计划类文档不应替代实现校对后的成熟文档。
 
 ## 12. 架构文档入口
 

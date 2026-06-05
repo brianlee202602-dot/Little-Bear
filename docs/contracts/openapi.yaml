@@ -3,10 +3,10 @@ info:
   title: Little Bear RAG Backend API
   version: 0.1.0
   description: >
-    P0 OpenAPI contract for Little Bear RAG backend. The contract covers setup,
+    Release OpenAPI contract for Little Bear RAG backend. The contract covers setup,
     authentication, organization, permission, knowledge base, document import,
     indexing operations, query, audit, healthcheck, config, and internal model
-    gateway APIs. P0 uses external embedding, rerank, and LLM provider
+    gateway APIs. The release version uses external embedding, rerank, and LLM provider
     endpoints instead of built-in model simulators, and does not include complete
     config approval or rollback workflows.
 
@@ -1791,7 +1791,7 @@ paths:
       tags: [AdminPermission]
       summary: Admin create role
       operationId: adminCreateRole
-      x-implementation-stage: P1
+      x-contract-status: reserved
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
@@ -1862,7 +1862,7 @@ paths:
       tags: [AdminPermission]
       summary: Admin update role
       operationId: adminPatchRole
-      x-implementation-stage: P1
+      x-contract-status: reserved
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
@@ -1889,7 +1889,7 @@ paths:
       tags: [AdminPermission]
       summary: Admin delete role
       operationId: adminDeleteRole
-      x-implementation-stage: P1
+      x-contract-status: reserved
       x-token-type: access
       x-required-scope: role:manage
       x-audit-required: true
@@ -2003,7 +2003,7 @@ paths:
       tags: [AdminPermission]
       summary: Evaluate resource permission
       operationId: getPermissionEvaluation
-      x-implementation-stage: P1
+      x-contract-status: reserved
       x-token-type: access
       x-required-scope: permission:evaluate
       x-audit-required: true
@@ -2577,7 +2577,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal create embeddings
       operationId: createModelEmbeddings
-      x-implementation-stage: P2
+      x-contract-status: reserved
       x-token-type: service
       x-required-scope: model_gateway:invoke
       x-audit-required: true
@@ -2602,7 +2602,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal rerank documents
       operationId: createModelReranking
-      x-implementation-stage: P2
+      x-contract-status: reserved
       x-token-type: service
       x-required-scope: model_gateway:invoke
       x-audit-required: true
@@ -2627,7 +2627,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal create chat completion
       operationId: createModelChatCompletion
-      x-implementation-stage: P2
+      x-contract-status: reserved
       x-token-type: service
       x-required-scope: model_gateway:invoke
       x-audit-required: true
@@ -2652,7 +2652,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal list model catalog
       operationId: getModelCatalog
-      x-implementation-stage: P2
+      x-contract-status: reserved
       x-token-type: service
       x-required-scope: model_gateway:read
       responses:
@@ -2670,7 +2670,7 @@ paths:
       tags: [ModelGateway]
       summary: Internal model gateway health
       operationId: getModelHealth
-      x-implementation-stage: P2
+      x-contract-status: reserved
       x-token-type: service
       x-required-scope: model_gateway:read
       responses:

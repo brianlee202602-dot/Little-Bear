@@ -85,6 +85,10 @@
   margin: 0;
 }
 
+.issue-list__hint {
+  color: #516072;
+}
+
 .issue-list--warning li {
   border-color: #e8dcba;
   background: #fffaf0;
@@ -99,6 +103,10 @@
   padding: 16px 18px 18px;
   display: grid;
   gap: 14px;
+}
+
+.result-block--dialog {
+  padding: 0;
 }
 
 .empty-state {

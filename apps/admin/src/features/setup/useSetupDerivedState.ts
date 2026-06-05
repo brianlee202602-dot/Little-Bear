@@ -3,9 +3,11 @@ import { computed, type ComputedRef, type Ref } from "vue";
 import type { ApiErrorPayload } from "@/api/http";
 import type { SetupInitializationData, SetupStateData, SetupValidationData } from "@/api/setup";
 import {
+  buildInitializationFailureMessage,
   extractBootstrapChecks,
   extractDatabaseError,
   extractStructuredIssues,
+  isBootstrapProblemCheck,
 } from "@/features/setup/setupErrors";
 import type { SetupBusyState, SetupTone } from "@/features/setup/setupFlowTypes";
 import { sections } from "@/features/setup/setupFields";
@@ -185,7 +187,10 @@ export function useSetupDerivedState(options: UseSetupDerivedStateOptions) {
     extractStructuredIssues(initializationErrorPayload.value),
   );
   const initializationFailedChecks = computed(() =>
-    extractBootstrapChecks(initializationErrorPayload.value).filter((item) => item.status !== "passed"),
+    extractBootstrapChecks(initializationErrorPayload.value).filter(isBootstrapProblemCheck),
+  );
+  const initializationErrorSummary = computed(() =>
+    buildInitializationFailureMessage(initializationErrorPayload.value, "初始化提交失败"),
   );
   const initializationDatabaseError = computed(() =>
     extractDatabaseError(initializationErrorPayload.value),
@@ -203,6 +208,7 @@ export function useSetupDerivedState(options: UseSetupDerivedStateOptions) {
     fieldIssues,
     flowItems,
     initializationDatabaseError,
+    initializationErrorSummary,
     initializationErrorItems,
     initializationFailedChecks,
     localBlockingIssues,

@@ -2,7 +2,7 @@
 
 更新时间：2026-06-03
 
-本文说明 Little Bear 当前后端如何加载配置、保存密钥、校验运行依赖，以及配置变更如何影响 API 和 Worker。本文只描述当前代码已经实现的逻辑。
+本文说明 Little Bear 交付版后端如何加载配置、保存密钥、校验运行依赖，以及配置变更如何影响 API 和 Worker。本文只描述交付版已经实现的逻辑。
 
 ## 1. 设计目标
 
@@ -67,11 +67,11 @@ Secret Store 由 `apps/api/app/modules/secrets/service.py` 实现，使用 Postg
 secret://<namespace>/<service>/<name>
 ```
 
-P0 约束要求 secret_ref 使用 `secret://rag/` 前缀。配置中只保存 secret_ref，不保存真实密钥。
+交付版约束要求 secret_ref 使用 `secret://rag/` 前缀。配置中只保存 secret_ref，不保存真实密钥。
 
 ### 4.2 加密与完整性
 
-Secret Store 当前实现要点：
+Secret Store 实现要点：
 
 - 使用 `SECRET_STORE_MASTER_KEY` 派生 AES-256-GCM 加密密钥。
 - 派生过程使用 HKDF-SHA256。
@@ -161,7 +161,7 @@ Worker 自身的进程参数可以由启动参数或环境变量控制，例如 
 - 新的业务请求会在缓存失效后读取新的 active config。
 - 查询链路会使用新的模型 provider、检索策略、超时和降级策略。
 - 导入和索引链路会使用新的对象存储、embedding、Qdrant 和关键词检索配置。
-- Worker 后续领取或推进任务时会使用新的运行时配置。
+- Worker 领取或推进任务时会使用新的运行时配置。
 - 如果新配置无法通过依赖探测，则不会成为 active config。
 
 配置变更不会回滚已经完成的导入结果或已经写入的日志。涉及索引维度、collection、embedding 模型等关键变更时，应结合重建索引能力处理已有文档。
@@ -175,8 +175,8 @@ Worker 自身的进程参数可以由启动参数或环境变量控制，例如 
 - MinIO / Qdrant 不可用：检查配置管理中的连接参数、Secret Store、ServiceBootstrap 状态和对应外部服务健康状态。
 - Worker 导入失败：检查 import job 阶段、对象存储配置、embedding provider、Qdrant collection 和索引版本状态。
 
-## 11. 当前边界
+## 11. 交付边界
 
-- Redis 已作为基础设施依赖接入 ServiceBootstrap，但业务缓存和配置通知尚未实现。
+- Redis 已作为基础设施依赖接入 ServiceBootstrap，业务缓存和配置通知不属于交付版运行闭环。
 - active config 缓存是进程内 TTL 缓存，不是跨进程强一致配置广播。
 - Secret Store 依赖 `SECRET_STORE_MASTER_KEY`，该主密钥丢失或更换会导致既有 secret 无法解密。

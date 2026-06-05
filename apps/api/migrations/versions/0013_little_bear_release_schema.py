@@ -1,12 +1,11 @@
-"""当前 schema 基线迁移。
+"""Little Bear 正式交付版 Schema 迁移。
 
 迁移 ID: 0013_query_log_scope_summary
 前置版本: 无
 创建日期: 2026-06-03
 
-本迁移由 0001-0013 的增量迁移压缩而来，用于空库一次性建立当前版本
-Schema。已经升级到 0013_query_log_scope_summary 的现有数据库无需重复执行。
-低于 0013 的旧库应先使用旧迁移链升级到 head，或重建数据库后执行本基线迁移。
+本迁移用于在空库中一次性建立 Little Bear 正式交付版 PostgreSQL Schema。
+数据库以 0013_query_log_scope_summary 作为交付版 schema head。
 """
 
 from __future__ import annotations
@@ -128,19 +127,19 @@ def _drop_retrieval_diagnostics_schema() -> None:
     _downgrade_0013_query_log_scope_summary()
     _downgrade_0012_query_retrieval_diagnostics()
 
-# ---- 0001_extensions.py ----
+# ---- PostgreSQL 扩展与中文全文检索 ----
 def _upgrade_0001_extensions() -> None:
     # pgcrypto 提供数据库侧摘要和随机能力；当前 UUID 仍优先由应用层生成。
     op.execute('CREATE EXTENSION IF NOT EXISTS "pgcrypto"')
     # btree_gin 支持普通类型和 GIN 场景的组合索引能力，服务权限过滤与数组查询。
     op.execute('CREATE EXTENSION IF NOT EXISTS "btree_gin"')
-    # zhparser 是 P0 中文 PostgreSQL Full Text 的默认分词插件。
+    # zhparser 是交付版中文 PostgreSQL Full Text 的默认分词插件。
     op.execute('CREATE EXTENSION IF NOT EXISTS "zhparser"')
 
     # 使用项目自有配置名，避免业务 SQL 直接依赖扩展默认配置。
     op.execute("DROP TEXT SEARCH CONFIGURATION IF EXISTS little_bear_zh")
     op.execute("CREATE TEXT SEARCH CONFIGURATION little_bear_zh (PARSER = zhparser)")
-    # P0 先映射常见中文词性到 simple 字典；企业词库和停用词治理后续通过配置版本演进。
+    # 交付版先映射常见中文词性到 simple 字典；企业词库和停用词治理通过配置版本演进。
     op.execute(
         """
         ALTER TEXT SEARCH CONFIGURATION little_bear_zh
@@ -157,9 +156,9 @@ def _downgrade_0001_extensions() -> None:
     op.execute('DROP EXTENSION IF EXISTS "pgcrypto"')
 
 
-# ---- 0002_setup_config_auth_org.py ----
+# ---- 初始化、配置、认证和组织结构 ----
 def _upgrade_0002_setup_config_auth_org() -> None:
-    # P0 当前是单企业部署，但所有业务表保留 enterprise_id，避免后续扩展时重构主键。
+    # 交付版是单企业部署，但所有业务表保留 enterprise_id，避免扩展企业模型时重构主键。
     _run(
         """
         CREATE TABLE enterprises (
@@ -333,7 +332,7 @@ def _upgrade_0002_setup_config_auth_org() -> None:
     _run("CREATE INDEX idx_system_configs_value_hash ON system_configs(value_hash)")
     _run("CREATE INDEX idx_system_configs_status ON system_configs(status)")
 
-    # P0 Secret Store 使用数据库加密密文承载敏感值，active_config 只引用 secret_ref。
+    # 交付版 Secret Store 使用数据库加密密文承载敏感值，active_config 只引用 secret_ref。
     _run(
         """
         CREATE TABLE secrets (
@@ -427,7 +426,7 @@ def _upgrade_0002_setup_config_auth_org() -> None:
         """
     )
 
-    # P0 部门模型不做上下级递归，只保留企业、部门、成员三层。
+    # 交付版部门模型不做上下级递归，只保留企业、部门、成员三层。
     _run(
         """
         CREATE TABLE departments (
@@ -516,7 +515,7 @@ def _downgrade_0002_setup_config_auth_org() -> None:
         op.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
 
 
-# ---- 0003_roles_permissions.py ----
+# ---- 角色、权限与资源策略 ----
 def _upgrade_0003_roles_permissions() -> None:
     # roles 定义 RBAC 权限集合；scopes 使用数组便于快速加载和 GIN 查询。
     _run(
@@ -587,7 +586,7 @@ def _upgrade_0003_roles_permissions() -> None:
         """
     )
 
-    # resource_policies 保存资源权限策略版本；P0 仅允许 department / enterprise 可见性策略。
+    # resource_policies 保存资源权限策略版本；交付版仅允许 department / enterprise 可见性策略。
     _run(
         """
         CREATE TABLE resource_policies (
@@ -686,7 +685,7 @@ def _downgrade_0003_roles_permissions() -> None:
         op.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
 
 
-# ---- 0004_knowledge_document_index.py ----
+# ---- 知识库、文档、chunk 与索引账本 ----
 def _upgrade_0004_knowledge_document_index() -> None:
     # knowledge_bases 是文档组织容器；owner_department_id 仅表示管理归属，不再等同访问边界。
     # kb_visibility 控制知识库是否可发现/可选择，文档可读性由 documents.visibility 继续控制。
@@ -766,7 +765,7 @@ def _upgrade_0004_knowledge_document_index() -> None:
         """
     )
 
-    # 文件夹只负责知识库内层级组织；权限继承模式 P0 固定为 inherit。
+    # 文件夹只负责知识库内层级组织；权限继承模式交付版固定为 inherit。
     _run(
         """
         CREATE TABLE folders (
@@ -1144,7 +1143,7 @@ def _downgrade_0004_knowledge_document_index() -> None:
         op.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
 
 
-# ---- 0005_jobs_audit_cache.py ----
+# ---- 任务、审计、查询日志、缓存账本和模型调用日志 ----
 def _upgrade_0005_jobs_audit_cache() -> None:
     # import_jobs 是 Worker 领取任务和阶段推进的事实源，HTTP 请求只创建任务。
     _run(
@@ -1466,9 +1465,9 @@ def _downgrade_0005_jobs_audit_cache() -> None:
         op.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
 
 
-# ---- 0006_employee_knowledge_base_read_scope.py ----
+# ---- 内置员工角色知识库浏览权限 ----
 def _upgrade_0006_employee_knowledge_base_read_scope() -> None:
-    # 已初始化环境中内置 employee 角色可能缺少 P0-7 新增的知识库浏览 scope。
+    # 已初始化环境中内置 employee 角色可能缺少交付版知识库浏览 scope。
     _run(
         """
         UPDATE roles
@@ -1503,7 +1502,7 @@ def _downgrade_0006_employee_knowledge_base_read_scope() -> None:
     )
 
 
-# ---- 0007_department_admin_read_scopes.py ----
+# ---- 部门管理员读取权限 ----
 READ_SCOPES = "ARRAY['knowledge_base:read','document:read','rag:query']::text[]"
 
 
@@ -1544,7 +1543,7 @@ def _downgrade_0007_department_admin_read_scopes() -> None:
     )
 
 
-# ---- 0008_query_conversations.py ----
+# ---- 查询会话 ----
 def _upgrade_0008_query_conversations() -> None:
     # query_conversations 是普通用户工作区的会话窗口，不替代 query_logs 审计诊断事实源。
     _run(
@@ -1623,7 +1622,7 @@ def _downgrade_0008_query_conversations() -> None:
     _run("DROP TABLE IF EXISTS query_conversations")
 
 
-# ---- 0009_config_version_updated_at.py ----
+# ---- 配置版本更新时间 ----
 def _upgrade_0009_config_version_updated_at() -> None:
     _run(
         """
@@ -1639,7 +1638,7 @@ def _downgrade_0009_config_version_updated_at() -> None:
     _run("ALTER TABLE config_versions DROP COLUMN IF EXISTS updated_at")
 
 
-# ---- 0010_config_inactive_status.py ----
+# ---- 配置 inactive 状态 ----
 def _upgrade_0010_config_inactive_status() -> None:
     _run("ALTER TABLE config_versions DROP CONSTRAINT IF EXISTS config_versions_status_check")
     _run("ALTER TABLE system_configs DROP CONSTRAINT IF EXISTS system_configs_status_check")
@@ -1680,7 +1679,7 @@ def _downgrade_0010_config_inactive_status() -> None:
     )
 
 
-# ---- 0011_department_admin_user_manage_scope.py ----
+# ---- 部门管理员用户管理权限 ----
 def _upgrade_0011_department_admin_user_manage_scope() -> None:
     _run(
         """
@@ -1712,7 +1711,7 @@ def _downgrade_0011_department_admin_user_manage_scope() -> None:
     )
 
 
-# ---- 0012_query_retrieval_diagnostics.py ----
+# ---- 查询检索诊断 ----
 def _upgrade_0012_query_retrieval_diagnostics() -> None:
     _run(
         """
@@ -1767,7 +1766,7 @@ def _downgrade_0012_query_retrieval_diagnostics() -> None:
     _run("DROP TABLE IF EXISTS query_retrieval_diagnostics")
 
 
-# ---- 0013_query_log_scope_summary.py ----
+# ---- 查询日志 scope 摘要 ----
 def _upgrade_0013_query_log_scope_summary() -> None:
     _run(
         """

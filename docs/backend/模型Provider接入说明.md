@@ -93,7 +93,7 @@ OpenAI-compatible payload：
 
 - 返回 embedding 数量必须等于输入文本数量。
 - 如果配置了 `embedding_dimension`，维度必须匹配。
-- 如果配置了 normalize，client 会按当前实现执行向量归一化。
+- 如果配置了 normalize，client 会执行向量归一化。
 
 常见错误码：
 

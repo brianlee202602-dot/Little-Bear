@@ -3,7 +3,13 @@ import "@/styles/setup-layout.css";
 import "@/styles/setup-forms.css";
 import "@/styles/setup-feedback.css";
 import type { SetupIssue } from "@/api/setup";
+import BaseModal from "@/components/BaseModal.vue";
 import SetupForm from "@/features/setup/SetupForm.vue";
+import {
+  bootstrapCheckHint,
+  formatBootstrapCheckName,
+  type BootstrapCheckIssue,
+} from "@/features/setup/setupErrors";
 import { formatSetupStatus } from "@/features/setup/setupStatus";
 import type { SetupPageFlow } from "@/features/setup/useSetupFlow";
 
@@ -43,6 +49,20 @@ function normalizeIssueCode(issue: SetupIssue): string {
 
 function formatBoolean(value: boolean): string {
   return value ? "是" : "否";
+}
+
+function checkRequiredText(check: Pick<BootstrapCheckIssue, "required">): string {
+  return check.required ? "必需" : "可选";
+}
+
+function checkStatusText(check: Pick<BootstrapCheckIssue, "status">): string {
+  if (check.status === "failed") {
+    return "失败";
+  }
+  if (check.status === "skipped") {
+    return "跳过";
+  }
+  return check.status;
 }
 
 </script>
@@ -317,4 +337,95 @@ function formatBoolean(value: boolean): string {
       </footer>
     </section>
   </main>
+
+  <BaseModal
+    :open="props.flow.initializationErrorDialogOpen"
+    title="初始化提交失败"
+    size="large"
+    @close="props.flow.closeInitializationErrorDialog"
+  >
+    <section class="result-block result-block--dialog">
+      <p class="tone tone--error">{{ props.flow.initializationErrorSummary }}</p>
+      <dl v-if="props.flow.initializationErrorPayload" class="summary summary--compact modal-summary">
+        <div class="summary__row">
+          <dt>错误码</dt>
+          <dd>{{ props.flow.initializationErrorPayload.error_code ?? "-" }}</dd>
+        </div>
+        <div class="summary__row">
+          <dt>阶段</dt>
+          <dd>{{ props.flow.initializationErrorPayload.stage ?? "-" }}</dd>
+        </div>
+        <div class="summary__row">
+          <dt>请求 ID</dt>
+          <dd class="summary__value--break">{{ props.flow.initializationErrorPayload.request_id ?? "-" }}</dd>
+        </div>
+      </dl>
+
+      <div v-if="props.flow.initializationFailedChecks.length" class="modal-pane">
+        <h4>失败检查项</h4>
+        <ul class="issue-list">
+          <li v-for="check in props.flow.initializationFailedChecks" :key="check.name">
+            <strong>{{ formatBootstrapCheckName(check.name) }}</strong>
+            <span>{{ checkRequiredText(check) }} / {{ checkStatusText(check) }} / {{ check.name }}</span>
+            <p>{{ check.message }}</p>
+            <p v-if="bootstrapCheckHint(check.name)" class="issue-list__hint">
+              {{ bootstrapCheckHint(check.name) }}
+            </p>
+          </li>
+        </ul>
+      </div>
+
+      <div v-else-if="props.flow.initializationErrorItems.length" class="modal-pane">
+        <h4>结构化错误</h4>
+        <ul class="issue-list">
+          <li v-for="issue in props.flow.initializationErrorItems" :key="`${normalizeIssueCode(issue)}-${issue.path}`">
+            <strong>{{ normalizeIssueCode(issue) }}</strong>
+            <span>{{ issue.path }}</span>
+            <p>{{ issue.message }}</p>
+          </li>
+        </ul>
+      </div>
+
+      <dl v-else-if="props.flow.initializationDatabaseError" class="summary summary--compact modal-summary">
+        <div class="summary__row">
+          <dt>异常类型</dt>
+          <dd>{{ props.flow.initializationDatabaseError.type ?? "-" }}</dd>
+        </div>
+        <div class="summary__row">
+          <dt>驱动错误</dt>
+          <dd>{{ props.flow.initializationDatabaseError.driver_type ?? "-" }}</dd>
+        </div>
+        <div class="summary__row">
+          <dt>错误信息</dt>
+          <dd class="summary__value--break">{{ props.flow.initializationDatabaseError.message ?? "-" }}</dd>
+        </div>
+        <div class="summary__row">
+          <dt>SQLSTATE</dt>
+          <dd>{{ props.flow.initializationDatabaseError.sqlstate ?? "-" }}</dd>
+        </div>
+        <div class="summary__row">
+          <dt>约束</dt>
+          <dd class="summary__value--break">{{ props.flow.initializationDatabaseError.constraint ?? "-" }}</dd>
+        </div>
+        <div class="summary__row">
+          <dt>数据表</dt>
+          <dd>{{ props.flow.initializationDatabaseError.table ?? "-" }}</dd>
+        </div>
+        <div class="summary__row">
+          <dt>字段</dt>
+          <dd>{{ props.flow.initializationDatabaseError.column ?? "-" }}</dd>
+        </div>
+      </dl>
+
+      <p v-else class="empty-state empty-state--plain">
+        {{ props.flow.initializationErrorPayload?.message ?? "未返回可解析的初始化错误明细。" }}
+      </p>
+    </section>
+
+    <template #footer>
+      <button class="button button--secondary" type="button" @click="props.flow.closeInitializationErrorDialog">
+        关闭
+      </button>
+    </template>
+  </BaseModal>
 </template>

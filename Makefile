@@ -32,7 +32,7 @@ define env_shell
 set -a; [ ! -f "./$(ENV_FILE)" ] || . "./$(ENV_FILE)"; set +a;
 endef
 
-.PHONY: env up down restart ps logs clean reset db-upgrade db-current pg-backup api worker web admin test smoke-p0 smoke-p0-record query-regression-p0 query-regression-rag release-smoke-p0 test-integration-qdrant
+.PHONY: env up down restart ps logs clean reset db-upgrade db-current setup-secrets setup-secrets-verify setup-qdrant-secret setup-qdrant-secret-verify secrets-list pg-backup api worker web admin test smoke-p0 smoke-p0-record query-regression-p0 query-regression-rag release-smoke-p0 test-integration-qdrant
 
 env:
 	@if [ ! -f "$(ENV_FILE)" ]; then cp .env.example "$(ENV_FILE)"; fi
@@ -62,6 +62,25 @@ db-upgrade:
 
 db-current:
 	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m alembic.config current
+
+setup-secrets: env
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m app.cli.secrets put secret://rag/minio/access-key --value-env SECRET_INIT_MINIO_ACCESS_KEY
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m app.cli.secrets put secret://rag/minio/secret-key --value-env SECRET_INIT_MINIO_SECRET_KEY
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m app.cli.secrets put secret://rag/auth/jwt-signing-key --value-env SECRET_INIT_JWT_SIGNING_KEY
+
+setup-secrets-verify:
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m app.cli.secrets verify secret://rag/minio/access-key
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m app.cli.secrets verify secret://rag/minio/secret-key
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m app.cli.secrets verify secret://rag/auth/jwt-signing-key
+
+setup-qdrant-secret: env
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m app.cli.secrets put secret://rag/qdrant/api-key --value-env SECRET_INIT_QDRANT_API_KEY
+
+setup-qdrant-secret-verify:
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m app.cli.secrets verify secret://rag/qdrant/api-key
+
+secrets-list:
+	$(env_shell) PYTHONPATH=apps/api $(PYTHON) -m app.cli.secrets list
 
 pg-backup:
 	@mkdir -p "$(BACKUP_DIR)"

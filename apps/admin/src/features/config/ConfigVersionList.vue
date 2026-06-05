@@ -4,11 +4,11 @@ import PaginationBar from "@/components/PaginationBar.vue";
 import StatusBadge from "@/components/StatusBadge.vue";
 import {
   configStatusTone,
+  configChangeImpactText,
   configVersionPreview,
   isActivatableConfigVersion,
   isArchivableConfigVersion,
   isEditableConfigVersion,
-  riskLevelText,
 } from "@/features/config/configDisplay";
 import { formatDateTime } from "@/utils/date";
 import { formatStatusText } from "@/utils/display";
@@ -63,7 +63,7 @@ const emit = defineEmits<{
       <span>状态</span>
       <span>创建时间</span>
       <span>更新时间</span>
-      <span>内容摘要</span>
+      <span>变更影响</span>
       <span>操作</span>
     </div>
     <article
@@ -84,7 +84,7 @@ const emit = defineEmits<{
       <div class="entity-cell">{{ formatDateTime(version.created_at) }}</div>
       <div class="entity-cell">{{ formatDateTime(version.updated_at) }}</div>
       <div class="entity-cell">
-        <span>{{ riskLevelText(version.risk_level) }}风险</span>
+        <span>{{ configChangeImpactText(version.risk_level) }}</span>
       </div>
       <div class="row-actions">
         <button

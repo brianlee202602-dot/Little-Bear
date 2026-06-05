@@ -1,8 +1,8 @@
-# P0 数据库 Schema 设计
+# 交付版数据库 Schema 设计
 
 ## 1. 文档目标
 
-本文定义 Little Bear RAG 后端 P0 阶段的 PostgreSQL 业务事实源 Schema，作为后续 Alembic migration、Repository、权限矩阵、状态机、测试计划和正式编码的输入。
+本文定义 Little Bear RAG 后端正式交付版的 PostgreSQL 业务事实源 Schema，作为 Alembic migration、Repository、权限矩阵、状态机、测试计划和正式编码的输入。
 
 设计依据：
 
@@ -17,7 +17,7 @@
 ## 2. 总体原则
 
 - PostgreSQL 是业务事实源。Qdrant、关键词索引、Redis 缓存和对象存储都是派生数据或外部存储。
-- P0 使用单企业模型，但所有租户业务表仍保留 `enterprise_id`，避免后续扩展时重构主键和索引。
+- 交付版使用单企业模型，但所有租户业务表仍保留 `enterprise_id`，避免扩展企业模型时重构主键和索引。
 - 全局表必须明确 scope，不假装属于某个企业。
 - 文档、chunk、权限快照、索引版本和引用必须可对账。
 - draft、deleted、blocked、权限版本落后的数据必须 fail closed，不允许进入查询上下文。
@@ -32,7 +32,7 @@
 | 时间 | `timestamptz` | 统一 UTC 存储 |
 | JSON | `jsonb` | 配置、payload、摘要、扩展字段 |
 | hash | `text` | sha256 hex 或等价稳定 hash |
-| 状态 | `text` + CHECK 或 enum | P0 建议使用 CHECK，方便 migration 调整 |
+| 状态 | `text` + CHECK 或 enum | 交付版建议使用 CHECK，方便 migration 调整 |
 | 金额/分数 | `numeric` 或 `double precision` | 检索分数用 `double precision` |
 | 大文本 | object key + preview | 原文和大 chunk 不直接放普通日志或审计摘要 |
 
@@ -103,7 +103,7 @@
 | `updated_at` | `timestamptz` | 否 | idx | 更新时间 |
 | `updated_by` | `uuid` | 是 | FK `users.id` | 操作者 |
 
-P0 必需 key：
+交付版必需 key：
 
 | key | value_json 说明 |
 | --- | --- |
@@ -132,7 +132,7 @@ P0 必需 key：
 | `jwt_jti` | `text` | 否 | UNIQUE, FK `jwt_tokens.jti` | JWT jti |
 | `token_hash` | `text` | 否 | UNIQUE | token 明文 hash，不存明文 |
 | `status` | `text` | 否 | idx, CHECK `token_status` | `active`、`used`、`revoked`、`expired` |
-| `scopes` | `text[]` | 否 | GIN | P0 必须包含 `setup:validate` 和 `setup:initialize` |
+| `scopes` | `text[]` | 否 | GIN | 交付版必须包含 `setup:validate` 和 `setup:initialize` |
 | `issued_by` | `uuid` | 是 | FK `users.id` | CLI 或恢复初始化可能为空 |
 | `issued_at` | `timestamptz` | 否 | idx | 签发时间 |
 | `expires_at` | `timestamptz` | 否 | idx | 过期时间 |
@@ -158,11 +158,11 @@ P0 必需 key：
 | --- | --- | --- | --- | --- |
 | `id` | `uuid` | 否 | PK | 配置版本 ID |
 | `version` | `integer` | 否 | UNIQUE | 递增版本号，初始化为 1 |
-| `scope_type` | `text` | 否 | idx | P0 固定 `global` |
-| `scope_id` | `text` | 否 | idx | P0 固定 `global` |
+| `scope_type` | `text` | 否 | idx | 交付版固定 `global` |
+| `scope_id` | `text` | 否 | idx | 交付版固定 `global` |
 | `status` | `text` | 否 | idx, CHECK `config_status` | draft/validating/active/inactive/archived/failed |
 | `config_hash` | `text` | 否 | UNIQUE | active config bundle hash |
-| `schema_version` | `integer` | 否 |  | P0 固定 1 |
+| `schema_version` | `integer` | 否 |  | 交付版固定 1 |
 | `validation_result_json` | `jsonb` | 是 |  | 校验结果摘要 |
 | `risk_level` | `text` | 否 | CHECK `risk_level` | 配置风险等级 |
 | `created_by` | `uuid` | 是 | FK `users.id` | 创建者 |
@@ -178,15 +178,15 @@ P0 必需 key：
 
 ### 5.4 `system_configs`
 
-用途：保存配置版本下的配置项。P0 使用 global scope 和 `docs/contracts/config.schema.json` 的顶层配置 key。
+用途：保存配置版本下的配置项。交付版使用 global scope 和 `docs/contracts/config.schema.json` 的顶层配置 key。
 
 | 字段 | 类型 | Null | 约束/索引 | 说明 |
 | --- | --- | --- | --- | --- |
 | `id` | `uuid` | 否 | PK | 配置项 ID |
 | `config_version_id` | `uuid` | 否 | FK `config_versions.id` | 所属配置版本 |
 | `version` | `integer` | 否 | idx | 冗余版本号，便于查询 |
-| `scope_type` | `text` | 否 | idx | P0 固定 `global` |
-| `scope_id` | `text` | 否 | idx | P0 固定 `global` |
+| `scope_type` | `text` | 否 | idx | 交付版固定 `global` |
+| `scope_id` | `text` | 否 | idx | 交付版固定 `global` |
 | `key` | `text` | 否 | idx | 如 `redis`、`storage`、`model_gateway` |
 | `value_json` | `jsonb` | 否 | GIN | 配置值，不得含 secret value |
 | `value_hash` | `text` | 否 | idx | 配置值 hash |
@@ -201,13 +201,13 @@ P0 必需 key：
 
 ### 5.5 `secrets`
 
-用途：P0 Secret Store，保存加密后的敏感值。active config 只保存 Secret ref。
+用途：交付版 Secret Store，保存加密后的敏感值。active config 只保存 Secret ref。
 
 | 字段 | 类型 | Null | 约束/索引 | 说明 |
 | --- | --- | --- | --- | --- |
 | `id` | `uuid` | 否 | PK | Secret ID |
-| `scope_type` | `text` | 否 | idx | P0 默认 `global` |
-| `scope_id` | `text` | 否 | idx | P0 默认 `global` |
+| `scope_type` | `text` | 否 | idx | 交付版默认 `global` |
+| `scope_id` | `text` | 否 | idx | 交付版默认 `global` |
 | `secret_ref` | `text` | 否 | UNIQUE | 例如 `secret://rag/auth/jwt-signing-key` |
 | `ciphertext` | `bytea` | 否 |  | 加密密文 |
 | `encryption_meta_json` | `jsonb` | 否 |  | 算法、key id、nonce 等 |
@@ -230,7 +230,7 @@ P0 必需 key：
 | 字段 | 类型 | Null | 约束/索引 | 说明 |
 | --- | --- | --- | --- | --- |
 | `id` | `uuid` | 否 | PK | 企业 ID |
-| `code` | `text` | 否 | UNIQUE | 企业编码，P0 初始化固定一个 |
+| `code` | `text` | 否 | UNIQUE | 企业编码，交付版初始化固定一个 |
 | `name` | `text` | 否 |  | 企业名称 |
 | `status` | `text` | 否 | idx, CHECK `enterprise_status` | active/disabled/deleted |
 | `org_version` | `integer` | 否 | idx | 组织版本，默认 1 |
@@ -308,7 +308,7 @@ P0 必需 key：
 
 ### 6.5 `departments`
 
-P0 部门不建模上下级递归。
+交付版部门不建模上下级递归。
 
 | 字段 | 类型 | Null | 约束/索引 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -370,7 +370,7 @@ P0 部门不建模上下级递归。
 
 - `uq_roles_enterprise_code(enterprise_id, code)`
 
-P0 内置角色：
+交付版内置角色：
 
 - `system_admin`
 - `security_admin`
@@ -433,7 +433,7 @@ P0 内置角色：
 | --- | --- | --- | --- | --- |
 | `id` | `uuid` | 否 | PK | 权限快照 ID |
 | `enterprise_id` | `uuid` | 否 | FK `enterprises.id`, idx | 企业 ID |
-| `resource_type` | `text` | 否 | idx | P0 主要 document/chunk |
+| `resource_type` | `text` | 否 | idx | 交付版主要 document/chunk |
 | `resource_id` | `uuid` | 否 | idx | 资源 ID |
 | `permission_version` | `integer` | 否 | idx | 全局权限版本 |
 | `policy_id` | `uuid` | 是 | FK `resource_policies.id` | 资源策略 |
@@ -462,7 +462,7 @@ P0 内置角色：
 | `owner_department_id` | `uuid` | 否 | FK `departments.id`, idx | 归属部门 |
 | `default_visibility` | `text` | 否 | CHECK `visibility` | 默认可见性 |
 | `policy_version` | `integer` | 否 | idx | 当前策略版本 |
-| `config_scope_id` | `text` | 是 | idx | P0 可为空 |
+| `config_scope_id` | `text` | 是 | idx | 交付版可为空 |
 | `created_by` | `uuid` | 是 | FK `users.id` | 创建者 |
 | `updated_by` | `uuid` | 是 | FK `users.id` | 更新者 |
 | `created_at` | `timestamptz` | 否 |  | 创建时间 |
@@ -484,7 +484,7 @@ P0 内置角色：
 | `parent_id` | `uuid` | 是 | FK `folders.id`, idx | 父文件夹 |
 | `name` | `text` | 否 | idx | 名称 |
 | `path` | `text` | 否 | idx | 层级路径 |
-| `policy_inherit_mode` | `text` | 否 |  | P0 默认 `inherit` |
+| `policy_inherit_mode` | `text` | 否 |  | 交付版默认 `inherit` |
 | `status` | `text` | 否 | idx, CHECK `folder_status` | active/disabled/archived/deleted |
 | `created_by` | `uuid` | 是 | FK `users.id` | 创建者 |
 | `updated_by` | `uuid` | 是 | FK `users.id` | 更新者 |
@@ -647,7 +647,7 @@ P0 内置角色：
 
 ### 7.8 `keyword_index_entries`
 
-用途：P0 PostgreSQL Full Text 派生索引表，支持关键词召回和与 `chunk_index_refs.keyword_id` 对账。
+用途：交付版 PostgreSQL Full Text 派生索引表，支持关键词召回和与 `chunk_index_refs.keyword_id` 对账。
 
 | 字段 | 类型 | Null | 约束/索引 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -761,7 +761,7 @@ P0 内置角色：
 
 约束：
 
-- P0 `final_answer` 缓存默认关闭；若后续启用，必须 `user_id is not null`。
+- 交付版 `final_answer` 缓存默认关闭；如启用，必须 `user_id is not null`。
 - 缓存命中后仍需轻量 access block 和 citation 校验。
 
 ## 9. 审计与可观测
@@ -986,23 +986,23 @@ AND (
 | 模型调用日志 | `model_call_logs(enterprise_id, config_version, model_type, status, created_at desc)` |
 | 缓存过期 | `query_cache_entries(expires_at)` |
 
-## 14. Alembic migration 基线
+## 14. Alembic migration
 
-当前实现不再保留早期 0001-0013 的分散增量脚本，而是压缩为当前版本基线：
+交付版 PostgreSQL Schema 由以下 Alembic migration 建立：
 
 ```text
-apps/api/migrations/versions/0013_current_schema_baseline.py
+apps/api/migrations/versions/0013_little_bear_release_schema.py
 revision = "0013_query_log_scope_summary"
 down_revision = None
 ```
 
 执行策略：
 
-- 空库执行 `db-upgrade` 时，一次性建立当前版本 Schema。
-- 已经升级到 `0013_query_log_scope_summary` 的数据库不会重复执行建表。
-- 仍停留在旧增量链中间版本的历史数据库，应先使用旧迁移链升级到 head，或重建数据库后执行当前基线迁移。
+- 空库执行 `db-upgrade` 时，一次性建立交付版 Schema。
+- `db-current` 应显示 `0013_query_log_scope_summary (head)`。
+- 已经记录该 revision 的数据库不会重复执行建表。
 
-当前基线迁移包含以下阶段化步骤：
+交付版迁移包含以下结构域：
 
 1. 启用 PostgreSQL 扩展与中文全文检索配置：`pgcrypto`、`btree_gin`、`zhparser`、`little_bear_zh`。
 2. 创建初始化、配置、Secret、认证、组织和 JWT 相关表。
@@ -1013,8 +1013,8 @@ down_revision = None
 7. 补齐配置版本生命周期字段与 `inactive` 状态约束。
 8. 创建查询检索诊断表，并为查询日志补充查询范围、解析知识库数量和 rewrite 数量摘要字段。
 
-内置角色不依赖 migration 中的历史补丁更新；setup 初始化阶段通过
-`apps/api/app/modules/setup/contracts.py` 写入当前最终 scope。
+内置角色由 setup 初始化阶段通过 `apps/api/app/modules/setup/contracts.py`
+写入交付版 scope。
 
 ## 15. 软删除与阻断策略
 
@@ -1035,7 +1035,7 @@ down_revision = None
 6. INSERT audit_logs(event_name='document.deleted', ...)
 ```
 
-## 16. P0 实现检查清单
+## 16. 交付版实现检查清单
 
 - [x] 所有租户业务表都有 `enterprise_id`。
 - [x] 所有 global 表都明确 scope 和访问边界。

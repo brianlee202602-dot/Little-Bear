@@ -8,8 +8,8 @@ from app.main import create_app
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 CONTRACT_PATH = Path("docs/contracts/openapi.yaml")
 
-# OpenAPI 中已经登记、但当前后端尚未挂载的 P1/P2 契约占位。后续每实现一个接口，
-# 都应从这里删除对应项，让测试成为开发进度的细颗粒提醒。
+# OpenAPI 中保留但后端未挂载的契约操作。实现对应接口时应同步删除保留标记，
+# 让契约测试继续约束 OpenAPI 与实际路由的一致性。
 EXPECTED_CONTRACT_ONLY_OPERATIONS = {
     ("/internal/v1/admin/roles", "POST"),
     ("/internal/v1/admin/roles/{role_id}", "DELETE"),
@@ -35,13 +35,13 @@ def test_contract_only_operations_match_tracked_gap() -> None:
     assert contract_only == EXPECTED_CONTRACT_ONLY_OPERATIONS
 
 
-def test_contract_only_operations_are_marked_as_future_stage() -> None:
+def test_contract_only_operations_are_marked_as_reserved() -> None:
     contract = yaml.safe_load(CONTRACT_PATH.read_text(encoding="utf-8"))
     paths = contract.get("paths") or {}
     missing_stage: set[tuple[str, str]] = set()
     for path, method in EXPECTED_CONTRACT_ONLY_OPERATIONS:
         operation = (paths.get(path) or {}).get(method.lower()) or {}
-        if operation.get("x-implementation-stage") not in {"P1", "P2"}:
+        if operation.get("x-contract-status") != "reserved":
             missing_stage.add((path, method))
 
     assert missing_stage == set()

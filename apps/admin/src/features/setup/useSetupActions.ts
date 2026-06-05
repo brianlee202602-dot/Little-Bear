@@ -8,6 +8,7 @@ import {
   type SetupValidationData,
 } from "@/api/setup";
 import { createDefaultSetupForm } from "@/features/setup/setupDefaultValues";
+import { buildInitializationFailureMessage } from "@/features/setup/setupErrors";
 import type { SetupFormModel, SetupRequestPayload } from "@/features/setup/setupModel";
 import type { SetupBusyState, SetupFeedback } from "@/features/setup/setupFlowTypes";
 
@@ -17,6 +18,7 @@ type UseSetupActionsOptions = {
   canValidate: ComputedRef<boolean>;
   feedback: Ref<SetupFeedback | null>;
   form: SetupFormModel;
+  initializationErrorDialogOpen: Ref<boolean>;
   initializationErrorPayload: Ref<ApiErrorPayload | null>;
   initializationResult: Ref<SetupInitializationData | null>;
   lastValidatedPayload: Ref<string | null>;
@@ -37,6 +39,7 @@ export function useSetupActions(options: UseSetupActionsOptions) {
     canValidate,
     feedback,
     form,
+    initializationErrorDialogOpen,
     initializationErrorPayload,
     initializationResult,
     lastValidatedPayload,
@@ -96,11 +99,13 @@ export function useSetupActions(options: UseSetupActionsOptions) {
       return;
     }
     busy.submitting = true;
+    initializationErrorDialogOpen.value = false;
     try {
       // initializeSetup 会自动带 x-setup-confirm；后端仍会二次校验确认头和请求体。
       const response = await initializeSetup(payload.value, form.setupToken || undefined);
       initializationResult.value = response.data;
       initializationErrorPayload.value = null;
+      initializationErrorDialogOpen.value = false;
       feedback.value = {
         tone: "success",
         message: "初始化提交成功",
@@ -110,9 +115,13 @@ export function useSetupActions(options: UseSetupActionsOptions) {
     } catch (error) {
       initializationResult.value = null;
       initializationErrorPayload.value = error instanceof ApiRequestError ? error.payload : null;
+      initializationErrorDialogOpen.value = true;
       feedback.value = {
         tone: "error",
-        message: normalizeErrorMessage(error, "初始化提交失败"),
+        message:
+          error instanceof ApiRequestError
+            ? buildInitializationFailureMessage(error.payload, "初始化提交失败")
+            : normalizeErrorMessage(error, "初始化提交失败"),
       };
     } finally {
       busy.submitting = false;
@@ -125,6 +134,7 @@ export function useSetupActions(options: UseSetupActionsOptions) {
     validationResult.value = null;
     lastValidatedPayload.value = null;
     initializationResult.value = null;
+    initializationErrorDialogOpen.value = false;
     validationErrorPayload.value = null;
     initializationErrorPayload.value = null;
     feedback.value = {
